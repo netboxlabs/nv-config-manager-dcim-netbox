@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NetBox Labs. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Shared helpers for the fabric (overlay) plugin endpoints.
+
+Mixed into the composed client so the Spectrum-X and InfiniBand mixins share
+overlay lookup, id resolution, and the plugin REST paths.
+"""
+
+from __future__ import annotations
+
+import re
+
+from nv_config_manager_dcim import DCIMConflictError, DCIMNotFoundError
+
+# Default fabric status value (plugin uses a choice field, not a status object).
+FABRIC_STATUS = "active"
+
+_PKEY_RE = re.compile(r"\A0[xX]([0-9a-fA-F]{1,4})\Z")
+
+
+def normalize_pkey(value: str) -> str:
+    """Return a pkey in canonical ``0x%04x`` form (unchanged if unparseable)."""
+    if not value:
+        return value
+    match = _PKEY_RE.match(value.strip())
+    if not match:
+        return value
+    return f"0x{int(match.group(1), 16):04x}"
+
+
+class FabricCommonMixin:
+    OVERLAYS_PATH = "plugins/nv-config-manager/overlays/"
+    VXLANS_PATH = "plugins/nv-config-manager/vxlans/"
+    ASSIGNMENTS_PATH = "plugins/nv-config-manager/overlay-assignments/"
+    PKEYS_PATH = "plugins/nv-config-manager/ib-pkeys/"
+
+    async def _find_overlay(self, name: str, location: str | None = None) -> dict | None:
+        params = [("name", name)]
+        if location is not None:
+            location_id = await self._resolve_location_id(location)
+            if location_id is None:
+                # No NetBox Location by that name -> no overlay can match it.
+                return None
+            params.append(("location_id", str(location_id)))
+        rows = await self.rest_list(self.OVERLAYS_PATH, params)
+        if len(rows) > 1:
+            raise DCIMConflictError(f"Multiple overlays named {name!r}")
+        return rows[0] if rows else None
+
+    async def _resolve_location_id(self, location: str | int | None) -> int | None:
+        """Resolve a NetBox Location given as a PK or a name to its integer id.
+
+        NVCM passes a site/location *name*; NetBox's ``location_id`` filter and the
+        Overlay ``location`` FK need a numeric PK. A digit is used as-is; a name is
+        looked up against ``dcim/locations/``. Returns ``None`` when unresolved.
+        """
+        if location is None:
+            return None
+        if str(location).isdigit():
+            return int(location)
+        return await self._lookup_id("dcim/locations/", str(location))
+
+    async def _lookup_id(self, path: str, name: str) -> int | None:
+        rows = await self.rest_list(path, [("name", name)])
+        if len(rows) > 1:
+            raise DCIMConflictError(f"Multiple {path} entries named {name!r}")
+        return rows[0]["id"] if rows else None
+
+    async def _resolve_tenant_id(self, tenant: str | None) -> int | None:
+        if not tenant:
+            return None
+        if str(tenant).isdigit():
+            return int(tenant)
+        return await self._lookup_id("tenancy/tenants/", tenant)
+
+    @staticmethod
+    def _fk_id(value):
+        """Return an id from either a nested object dict or a bare PK."""
+        return value.get("id") if isinstance(value, dict) else value
+
+    async def _safe_delete(self, path: str) -> None:
+        try:
+            await self.rest_request("DELETE", path)
+        except DCIMNotFoundError:
+            pass

@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request: {}
+  push:
+    branches: [ main ]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: Ruff
+        run: uvx ruff@0.15.11 check src/ tests/
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      # The SDK is not yet published. Until then, install it from the NVCM
+      # branch that defines the provider contract. Update this once published.
+      - name: Fetch DCIM SDK
+        run: |
+          git clone --depth 1 --branch zb/pluggable-dcim \
+            https://github.com/NVIDIA/nv-config-manager.git ../nv-config-manager
+      - name: Install
+        run: |
+          uv pip install --system ../nv-config-manager/components/dcim
+          uv pip install --system -e .
+          uv pip install --system pytest pytest-asyncio
+      - name: Tests
+        run: pytest

@@ -1,0 +1,70 @@
+[project]
+name = "nv-config-manager-dcim-netbox"
+version = "0.1.0"
+description = "NetBox implementation of the NVIDIA Config Manager DCIM provider API"
+authors = [{ name = "NetBox Labs" }]
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.13"
+dependencies = [
+    "aiohttp[speedups]>=3.14.1",
+    "nv-config-manager-dcim",
+]
+
+[project.urls]
+Homepage = "https://github.com/netboxlabs/nv-config-manager-dcim-netbox"
+
+# Discovered by the SDK through the `nv_config_manager.dcim` entry-point group.
+# The entry-point name and DCIMProviderMetadata.name must both be "netbox".
+[project.entry-points."nv_config_manager.dcim"]
+netbox = "nv_config_manager_dcim_netbox:NetBoxProvider"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.3",
+    "pytest-asyncio>=0.23.7",
+    "ruff>=0.15.11",
+]
+
+# The SDK is not yet published to an index. For local development, point uv at a
+# sibling checkout of nv-config-manager (branch: zb/pluggable-dcim), e.g.:
+#
+# [tool.uv.sources]
+# nv-config-manager-dcim = { path = "../nv-config-manager/components/dcim", editable = true }
+#
+# or install it explicitly:
+#   uv pip install ../nv-config-manager/components/dcim -e .
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nv_config_manager_dcim_netbox"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "inventory: core inventory / DCIM operations",
+    "reference: reference / selection lists",
+    "ipam: IPAM / VRF operations",
+    "hosts: host / MAC correlation",
+    "dhcp: DHCP operations",
+    "ztp: ZTP operations",
+    "firmware: firmware / OS-image operations",
+    "state: NVCM lifecycle state (managed / intended / backup)",
+    "secrets: secret / password operations",
+    "render: render data assembly",
+    "spectrumx: Spectrum-X overlay operations",
+    "ib: InfiniBand operations",
+    "lifecycle: provider factory / lifecycle",
+    "events: change-event integration",
+]
