@@ -13,16 +13,20 @@ interact with it only through the SDK's `DCIMClient` protocol.
 
 ## Status
 
-**Scaffold.** Every `DCIMClient` operation is stubbed and raises
-`DCIMOperationNotSupportedError`. Methods are implemented incrementally, grouped
-by functional area (one module per area — see [Layout](#layout)). The provider
-factory, settings validation, discovery, and the HTTP transport skeleton are
-functional; `close()` and `get_device_ui_url()` are implemented.
+**Implemented.** All `DCIMClient` operations are implemented against NetBox
+(REST + GraphQL), grouped by functional area (one module per area — see
+[Layout](#layout)). The provider factory, settings validation, discovery, and
+the aiohttp transport are functional. The unit suite passes (108 tests).
 
-Change-event integration (`register_render_event_handlers`, `normalize_event`)
-is a documented no-op / TODO: automatic render-on-change is disabled until the
-NetBox `EVENTS_PIPELINE` bridge lands. Manual and template-version renders are
-unaffected.
+Change-event integration is live: `register_render_event_handlers` and
+`normalize_event` are wired, so automatic render-on-change works via the
+companion NetBox plugin's `EVENTS_PIPELINE` bridge
+([`netbox_nv_config_manager`](https://github.com/netboxlabs/netbox-nv-config-manager)),
+which publishes object changes as the DCIM change envelope this provider consumes.
+
+Per-device lifecycle state (managed flags, intended/backup config metadata) is
+backed by the plugin's first-class models, so the companion plugin is required
+for the full feature set.
 
 ## Layout
 
@@ -90,7 +94,7 @@ token  = "<netbox-api-token>"
 # 1. Confirm discovery
 uv run python -c "from nv_config_manager_dcim import discover_dcim_providers; print(discover_dcim_providers())"
 
-# 2. Run the unit tests (discovery + stub behavior)
+# 2. Run the unit tests
 uv run pytest
 
 # 3. Exercise render against a live NetBox via the templates CLI
