@@ -48,6 +48,26 @@ def test_connection_settings_parses_verify():
     assert netbox_connection_settings(_OK)["verify"] is True  # default
 
 
+def test_extra_settings_keys_are_ignored():
+    # NVCM's installer may pass provider-specific keys (e.g. dcim.options.*).
+    # The provider reads only its connection keys and must ignore the rest, so
+    # unknown options never break validation or client creation.
+    settings = {
+        **_OK,
+        "options": {"tenant": "lab"},
+        "tenant": "lab",
+        "display_name": "NetBox",
+        "unknown": "x",
+    }
+    NetBoxProvider().validate_settings(settings)  # no raise
+    resolved = netbox_connection_settings(settings)
+    assert resolved["server"] == _OK["server"]
+    assert set(resolved) == {"server", "token", "public_url", "verify"}
+    # create_client tolerates the extra keys too.
+    client = create_dcim_client("netbox", settings)
+    assert client._base_url == "https://netbox.example"
+
+
 # --- auth scheme (v1 Token vs v2 Bearer) ---------------------------------------
 
 

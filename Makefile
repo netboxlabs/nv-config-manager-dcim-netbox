@@ -9,6 +9,7 @@ SERVER     ?= http://localhost:8000
 TOKEN      ?= REPLACE_ME
 DEVICE_ID  ?= REPLACE_ME
 ENTRYPOINT ?= REPLACE_ME
+IMAGE      ?= nv-config-manager-dcim-netbox:0.1.0
 
 VENV     := .venv
 PY       := $(VENV)/bin/python
@@ -17,7 +18,7 @@ RUFF     := $(VENV)/bin/ruff
 TEMPLATE := $(VENV)/bin/template-cli
 
 .PHONY: help setup lint test test-netbox discovery probe provider-config \
-        cache-query render-cli test-sdk test-templates check clean \
+        cache-query render-cli test-sdk test-templates check clean image \
         inventory reference ipam hosts dhcp ztp firmware state secrets render \
         spectrumx ib infiniband spx lifecycle events
 
@@ -32,6 +33,7 @@ help:
 	@echo "test-sdk        run the SDK (components/dcim) tests"
 	@echo "test-templates  run the templates library tests"
 	@echo "check           lint + test"
+	@echo "image           build the provider-package OCI image (IMAGE=..., SDK from NVCM=...)"
 	@echo "clean           remove venv and caches"
 	@echo ""
 	@echo "per-area (implement one at a time):"
@@ -55,6 +57,12 @@ test test-netbox:
 	$(PYTEST) -q
 
 check: lint test
+
+# --- provider-package image ---
+# The SDK is not yet published, so it is passed as a named build context.
+# Requires Docker Buildx (bundled with modern Docker). Override IMAGE / NVCM.
+image:
+	docker build --build-context sdk=$(NVCM)/components/dcim -t $(IMAGE) .
 
 # --- Tier 1: provider dev loop ---
 discovery:

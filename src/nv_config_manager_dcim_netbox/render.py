@@ -701,7 +701,9 @@ class NetBoxRenderMixin:
         nvlink_domains = await self._safe_list(
             "plugins/nv-config-manager/nvlink-domains/", [("device_id", str(device_id))]
         )
-        nvlink_topology = _str_or_none(nvlink_domains[0].get("topology")) if nvlink_domains else None
+        nvlink_topology = (
+            _str_or_none(nvlink_domains[0].get("topology")) if nvlink_domains else None
+        )
 
         render_interfaces = tuple(_render_interface(i, site_networks) for i in interfaces)
 

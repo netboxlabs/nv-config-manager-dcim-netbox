@@ -88,6 +88,73 @@ token  = "<netbox-api-token>"
 # verify     = true                        # bool or path to a CA bundle
 ```
 
+## Deployment (external DCIM provider)
+
+In a real Config Manager deployment the provider is selected through NVCM's
+installer configuration (not the `[provider]` TOML above, which is only for
+local `template-cli` testing). A NetBox deployment looks like:
+
+```yaml
+version: "1"
+cluster:
+  hostname: config-manager.example.com
+  environment: production
+  namespace: nv-config-manager
+secrets:
+  method: kubernetes
+  k8s:
+    dcim:
+      values:
+        token: "nbt_<key>.<secret>"        # NetBox v2 API token
+dcim:
+  provider: netbox
+  server: https://netbox.example.com
+  public_url: https://netbox.example.com
+  display_name: NetBox
+  event_stream: netbox
+  event_subject: netbox.change
+  options: {}                              # provider-specific, non-secret (see below)
+  provider_packages:
+    - name: netbox
+      image: registry.example.com/nv-config-manager-dcim-netbox:0.1.0
+services:
+  nautobot: false                          # NetBox is the external DCIM
+sites:
+  - name: dc01
+```
+
+The installer maps `dcim.server` / `dcim.public_url` and the resolved
+`secrets…dcim.values.token` into the provider settings mapping (`server` /
+`public_url` / `token`). The token must be a NetBox **v2** token (`nbt_…`,
+Bearer). For `secrets.method: eso`, enable `secrets.vault.paths.dcim` instead of
+the `kubernetes` block.
+
+**Event alignment (required).** `dcim.event_stream` / `dcim.event_subject` must
+match the companion NetBox plugin's NATS settings: set the plugin's
+`nats_subject` equal to `dcim.event_subject` (and point it at the
+`dcim.event_stream` JetStream stream). The plugin pushes normalized envelopes on
+that subject; the render service consumes them and calls `normalize_event`. If
+the two disagree, changes are published but never delivered.
+
+**`dcim.options`.** Provider-specific, non-secret options. The NetBox provider
+reads only `server` / `token` / `public_url` / `verify` from its settings; any
+other keys (including everything under `options`) are ignored, so extra options
+never break client creation. Tenant is resolved per-operation from request data
+— there is **no** global tenant-scope filter today (a possible future option).
+Never put secrets in `dcim.options`; use `secrets…` references.
+
+**Provider package image.** Until the provider is published to an index, either
+install it from a sibling checkout (see above) or build the `provider_packages`
+image from this repo:
+
+```bash
+make image IMAGE=registry.example.com/nv-config-manager-dcim-netbox:0.1.0
+```
+
+For an airgapped bundle, add that image reference to the file passed to
+`create-airgapped.sh --extra-images-file` (the bundle builder can't infer
+site-specific provider packages).
+
 ## Required NetBox permissions
 
 The provider authenticates with a **v2 API token** (`Authorization: Bearer
@@ -116,9 +183,10 @@ Change events originate in NetBox and are **pushed** to the render service — t
 provider never polls. The companion plugin's `EVENTS_PIPELINE` bridge normalizes
 each NetBox change into the provider-neutral `DCIMChangeEvent` envelope and
 publishes it (to a logger, or to a NATS subject set by the plugin's
-`nats_subject`, which must match NVCM's `dcim_change_subject`). The render
-service consumes the envelope, calls `NetBoxProvider.normalize_event` to validate
-it, and dispatches it to the handler registered for its `object_type`.
+`nats_subject`, which must match the installer's `dcim.event_subject` — see
+[Deployment](#deployment-external-dcim-provider)). The render service consumes
+the envelope, calls `NetBoxProvider.normalize_event` to validate it, and
+dispatches it to the handler registered for its `object_type`.
 
 The provider registers render-event handlers for these native object types
 (`events._HANDLERS`); each returns the device renders a change should trigger:
