@@ -2,27 +2,34 @@
 # SPDX-License-Identifier: Apache-2.0
 """Render data assembly.
 
-``get_render_data`` maps NetBox's native inventory and intent into the
-provider-neutral :class:`RenderData` contract the template engine consumes:
+``get_render_data`` translates NetBox's native inventory into the provider-neutral
+:class:`RenderData` contract the template engine consumes. As of the 2026-07-28
+SDK contract, providers must return *fully typed* render concepts — there is no
+generic ``intent`` blob or ``inventory`` dict; every value belongs to a typed
+``Render*`` model that the common template filters read directly.
 
-* **identity** — stable placement values used to select templates (id, name,
-  platform, role, model, location hierarchy, tags).
-* **intent** — NetBox's rendered ``config_context`` for the device. NetBox
-  merges region/site/location/role/platform-scoped contexts into this single
-  payload, so location-scoped intent is already reflected here.
-* **interfaces** — normalized NetBox interfaces (with VRF, VLANs, IPs, MACs).
-* **inventory** — the fabric relationships not carried by a first-class SDK
-  model: derived VRFs, BGP sessions (``netbox-bgp``), and the plugin's
-  overlays / VXLANs / overlay-assignments.
+Sections populated from NetBox native data:
 
-BGP and the fabric overlay models are read over REST (neither exposes GraphQL in
-this NetBox build); the device, its interfaces, and config-context come from a
-single GraphQL query.
+* ``device.identity`` — id, name, platform, role, model, full location hierarchy.
+* ``device.interfaces`` — typed interfaces (type, VRF, VLANs, addresses with
+  prefix ancestry, MAC, management flag).
+* ``device.network`` — the device's distinct VRFs.
+* ``device.routing`` — BGP instances/peers from ``netbox-bgp``, grouped by ASN.
+* ``device.overlays`` — L2/L3 VNIs scoped to the device via the plugin's overlay
+  assignments (never the global VXLAN table).
+* ``device.services`` / ``device.firmware`` — best-effort from the device's
+  merged ``config_context`` where the native keys exist.
+* ``location.location`` / ``location.address_space`` — the Site hierarchy plus
+  site prefixes (role/tags) and VLANs (with plugin DHCP helper addresses).
+
+Sections with no first-class NetBox source (console-server ports, ISIS/EVPN,
+firmware bundles, credential references, WAN topology) are returned as the SDK's
+default empty models; they remain optional until a filter requires them.
 """
 
 from __future__ import annotations
 
-import asyncio
+import ipaddress
 from typing import TYPE_CHECKING, Any
 
 from nv_config_manager_dcim import (
@@ -32,9 +39,38 @@ from nv_config_manager_dcim import (
     IntendedInterfaceNeighbor,
     IntendedNeighborDevice,
     LocationRenderData,
+    RenderAccessData,
+    RenderBGPInstance,
+    RenderBGPPeer,
+    RenderCredentialReference,
     RenderData,
     RenderDeviceIdentity,
+    RenderEndpointSet,
+    RenderEvpnData,
+    RenderFirmwareArtifact,
+    RenderFirmwareBundle,
+    RenderFirmwareComponent,
+    RenderFirmwareData,
+    RenderFirmwareOverrides,
+    RenderInterface,
+    RenderIPAddress,
+    RenderIsisInterface,
+    RenderL2Vni,
+    RenderL3Vni,
     RenderLocation,
+    RenderLocationAddressSpace,
+    RenderLocationRoutingData,
+    RenderLocationVlan,
+    RenderNamedEndpointSet,
+    RenderNetworkData,
+    RenderOverlayData,
+    RenderPrefix,
+    RenderPrefixSet,
+    RenderRouteTarget,
+    RenderRoutingData,
+    RenderServicesData,
+    RenderVlan,
+    RenderVrf,
 )
 
 if TYPE_CHECKING:
@@ -74,9 +110,10 @@ query ($id: ID!) {
       mode
       mac_addresses { mac_address }
       vrf { name rd }
+      parent { name }
       untagged_vlan { vid name }
       tagged_vlans { vid name }
-      ip_addresses { address }
+      ip_addresses { address role }
       tags { name }
     }
   }
@@ -120,18 +157,134 @@ def _tags(obj: dict[str, Any] | None) -> tuple[str, ...]:
     return tuple(tag["name"] for tag in (obj or {}).get("tags") or [] if tag.get("name"))
 
 
-def _location_hierarchy(device: dict[str, Any]) -> tuple[RenderLocation, RenderLocation]:
-    """Build the device location chain and its Site root.
+def _str_or_none(value: Any) -> str | None:
+    return str(value) if value not in (None, "") else None
 
-    Returns ``(device_location, site_location)``. The device location is the
-    innermost NetBox location (if any) nested within its Site; the Site is the
-    root ancestor used by site-scoped template filters. NetBox always assigns a
-    device to a Site, so the Site node is always present.
+
+def _choice_value(value: Any) -> str:
+    """Normalize a NetBox status/choice (``{'value': ...}`` or a bare string)."""
+    if isinstance(value, dict):
+        return str(value.get("value") or value.get("label") or "")
+    return str(value or "")
+
+
+def _ref_id(value: Any) -> Any:
+    """Return an object id from a nested dict (``{'id': ...}``) or a bare id."""
+    return value.get("id") if isinstance(value, dict) else value
+
+
+def _ref_addr(value: Any) -> Any:
+    """Return an address from a nested dict (``{'address': ...}``) or a bare value."""
+    return value.get("address") if isinstance(value, dict) else value
+
+
+def _is_ip(value: Any) -> bool:
+    try:
+        ipaddress.ip_address(str(value).split("/")[0])
+        return True
+    except ValueError:
+        return False
+
+
+def _render_vrf(vrf: dict[str, Any] | None) -> RenderVrf | None:
+    """Build a :class:`RenderVrf` from a NetBox VRF dict (``name`` + ``rd``)."""
+    if not isinstance(vrf, dict) or not vrf.get("name"):
+        return None
+    return RenderVrf(name=str(vrf["name"]), route_distinguisher=_str_or_none(vrf.get("rd")))
+
+
+def _render_vlan(vlan: dict[str, Any] | None) -> RenderVlan | None:
+    if not isinstance(vlan, dict) or vlan.get("vid") is None:
+        return None
+    return RenderVlan(vid=int(vlan["vid"]), name=_str_or_none(vlan.get("name")))
+
+
+def _targets(values: Any) -> tuple[RenderRouteTarget, ...]:
+    out: list[RenderRouteTarget] = []
+    for item in values or []:
+        name = item.get("name") if isinstance(item, dict) else item
+        if name:
+            out.append(RenderRouteTarget(name=str(name)))
+    return tuple(out)
+
+
+def _render_ip(addr: str, role: Any, site_networks: list[Any]) -> RenderIPAddress | None:
+    """Build a :class:`RenderIPAddress`, deriving host, version, and prefix ancestry.
+
+    ``parent_prefixes`` is ordered nearest-parent-first (most specific outward),
+    which the loopback / point-to-point / Spectrum-X filters rely on.
     """
+    try:
+        iface = ipaddress.ip_interface(addr)
+    except ValueError:
+        return None
+    host = iface.ip
+    parents = sorted(
+        (net for net in site_networks if host in net),
+        key=lambda net: net.prefixlen,
+        reverse=True,
+    )
+    return RenderIPAddress(
+        address=str(iface),
+        host=str(host),
+        version=host.version,
+        role=_choice_value(role) or None if role else None,
+        parent_prefixes=tuple(str(net) for net in parents),
+    )
+
+
+def _render_interface(iface: dict[str, Any], site_networks: list[Any]) -> RenderInterface:
+    """Map one NetBox interface into the typed :class:`RenderInterface`."""
+    name = _require(iface.get("name"), "interface name")
+    iface_type = iface.get("type")
+    if not iface_type:
+        raise DCIMInvalidDataError(f"NetBox interface {name} is missing required type for render")
+    macs = [m.get("mac_address") for m in iface.get("mac_addresses") or [] if m.get("mac_address")]
+    addresses = tuple(
+        filter(
+            None,
+            (
+                _render_ip(a["address"], a.get("role"), site_networks)
+                for a in iface.get("ip_addresses") or []
+                if a.get("address")
+            ),
+        )
+    )
+    return RenderInterface(
+        name=str(name),
+        type=str(iface_type),
+        enabled=bool(iface.get("enabled", True)),
+        mtu=iface.get("mtu"),
+        description=iface.get("description") or "",
+        tags=_tags(iface),
+        mac_address=macs[0] if macs else None,
+        vrf=_render_vrf(iface.get("vrf")),
+        management_only=bool(iface.get("mgmt_only", False)),
+        parent_interface=(iface.get("parent") or {}).get("name") or None,
+        untagged_vlan=_render_vlan(iface.get("untagged_vlan")),
+        tagged_vlans=tuple(
+            filter(None, (_render_vlan(v) for v in iface.get("tagged_vlans") or []))
+        ),
+        addresses=addresses,
+    )
+
+
+def _device_vrfs(interfaces: list[dict[str, Any]]) -> tuple[RenderVrf, ...]:
+    """Collect the distinct VRFs referenced by a device's interfaces (order-stable)."""
+    seen: dict[str, RenderVrf] = {}
+    for iface in interfaces:
+        vrf = _render_vrf(iface.get("vrf"))
+        if vrf is not None and vrf.name not in seen:
+            seen[vrf.name] = vrf
+    return tuple(seen.values())
+
+
+def _location_hierarchy(device: dict[str, Any]) -> tuple[RenderLocation, RenderLocation]:
+    """Build ``(device_location, site_location)`` from the NetBox site/location chain."""
     site = _require(device.get("site"), "site")
     region = site.get("region")
     site_location = RenderLocation(
-        id=str(site["id"]) if site.get("id") is not None else None,
+        id=_str_or_none(site.get("id")),
         name=str(site["name"]),
         kind="Site",
         parent=(
@@ -140,9 +293,6 @@ def _location_hierarchy(device: dict[str, Any]) -> tuple[RenderLocation, RenderL
             else None
         ),
     )
-
-    # NetBox locations nest within a Site; build the chain from the outermost
-    # parent down to the device's innermost location, rooted at the Site.
     chain: list[dict[str, Any]] = []
     node = device.get("location")
     while isinstance(node, dict):
@@ -151,7 +301,7 @@ def _location_hierarchy(device: dict[str, Any]) -> tuple[RenderLocation, RenderL
     device_location = site_location
     for level in reversed(chain):
         device_location = RenderLocation(
-            id=str(level["id"]) if level.get("id") is not None else None,
+            id=_str_or_none(level.get("id")),
             name=str(level["name"]),
             kind="Location",
             parent=device_location,
@@ -159,61 +309,363 @@ def _location_hierarchy(device: dict[str, Any]) -> tuple[RenderLocation, RenderL
     return device_location, site_location
 
 
-def _device_vrfs(interfaces: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Collect the distinct VRFs referenced by a device's interfaces."""
-    vrfs: dict[str, dict[str, Any]] = {}
-    for interface in interfaces:
-        vrf = interface.get("vrf")
-        if isinstance(vrf, dict) and vrf.get("name") and vrf["name"] not in vrfs:
-            vrfs[vrf["name"]] = {"name": vrf["name"], "rd": vrf.get("rd")}
-    return list(vrfs.values())
+def _bgp_instances(sessions: list[dict[str, Any]]) -> tuple[RenderBGPInstance, ...]:
+    """Group ``netbox-bgp`` sessions for a device into BGP instances keyed by local ASN.
+
+    ``netbox-bgp`` models each peering as a ``session`` with nested ``local_as`` /
+    ``remote_as`` / ``remote_address`` / ``peer_group``. It exposes no VRF
+    association, so peers use the default source VRF.
+    """
+    instances: dict[str, dict[str, Any]] = {}
+    for session in sessions:
+        local_asn = _str_or_none((session.get("local_as") or {}).get("asn"))
+        if local_asn is None:
+            continue
+        inst = instances.setdefault(
+            local_asn, {"status": _choice_value(session.get("status")) or "active", "peers": []}
+        )
+        remote = (session.get("remote_address") or {}).get("address")
+        peer_ipv4 = peer_ipv6 = None
+        if remote:
+            try:
+                ip = ipaddress.ip_interface(remote).ip
+                if ip.version == 4:
+                    peer_ipv4 = str(ip)
+                else:
+                    peer_ipv6 = str(ip)
+            except ValueError:
+                pass
+        inst["peers"].append(
+            RenderBGPPeer(
+                name=session.get("name") or f"peer-{session.get('id')}",
+                status=_choice_value(session.get("status")) or "active",
+                description=session.get("description") or "",
+                peer_group=(session.get("peer_group") or {}).get("name") or "",
+                peer_role="",
+                asn=_str_or_none((session.get("remote_as") or {}).get("asn")) or "",
+                peer_ipv4=peer_ipv4,
+                peer_ipv6=peer_ipv6,
+            )
+        )
+    return tuple(
+        RenderBGPInstance(status=data["status"], asn=asn, peers=tuple(data["peers"]))
+        for asn, data in instances.items()
+    )
+
+
+# --- config_context mappers -----------------------------------------------------
+#
+# NetBox merges region/site/role/platform/tag-scoped config contexts into the
+# device's ``config_context`` (fetched by the render GraphQL query). These mappers
+# read the same canonical keys the fabric templates expect (the keys the bundled
+# ``config_contexts.yaml`` seeds), so services/firmware/access/routing populate
+# from real data rather than defaults. Endpoint/prefix values are explicit
+# ``{ipv4: [...], ipv6: [...]}`` mappings, not flat lists.
+
+
+def _endpoint_set(value: Any) -> RenderEndpointSet | None:
+    """Build a :class:`RenderEndpointSet` from a ``{ipv4, ipv6}`` context value."""
+    if not isinstance(value, dict):
+        return None
+    ipv4 = tuple(str(x) for x in value.get("ipv4") or ())
+    ipv6 = tuple(str(x) for x in value.get("ipv6") or ())
+    if not ipv4 and not ipv6:
+        return None
+    try:
+        return RenderEndpointSet(ipv4=ipv4, ipv6=ipv6)
+    except ValueError as exc:
+        raise DCIMInvalidDataError(
+            f"config_context endpoint set has invalid addresses: {exc}"
+        ) from exc
+
+
+def _prefix_set(value: Any) -> RenderPrefixSet | None:
+    """Build a :class:`RenderPrefixSet` from a ``{ipv4, ipv6}`` context value."""
+    if not isinstance(value, dict):
+        return None
+    ipv4 = tuple(str(x) for x in value.get("ipv4") or ())
+    ipv6 = tuple(str(x) for x in value.get("ipv6") or ())
+    if not ipv4 and not ipv6:
+        return None
+    try:
+        return RenderPrefixSet(ipv4=ipv4, ipv6=ipv6)
+    except ValueError as exc:
+        raise DCIMInvalidDataError(
+            f"config_context prefix set has invalid prefixes: {exc}"
+        ) from exc
+
+
+def _services_from_context(context: dict[str, Any]) -> RenderServicesData:
+    """Typed effective network-service policy from the merged config context."""
+    raw_dhcp = context.get("dhcp") if isinstance(context.get("dhcp"), dict) else {}
+    dhcp = tuple(
+        RenderNamedEndpointSet(
+            name=str(provider), endpoints=_endpoint_set(value) or RenderEndpointSet()
+        )
+        for provider, value in raw_dhcp.items()
+    )
+    return RenderServicesData(
+        dns=_endpoint_set(context.get("dns")),
+        ntp=_endpoint_set(context.get("ntp")),
+        syslog=_endpoint_set(context.get("syslog")),
+        tacacs=_endpoint_set(context.get("tacacs")),
+        ztp=_endpoint_set(context.get("ztp")),
+        firmware_cache=_endpoint_set(context.get("firmware_cache")),
+        provisioning=_endpoint_set(context.get("provisioning_servers")),
+        dhcp=dhcp,
+        management_prefixes=_prefix_set(context.get("management_prefixes")),
+    )
+
+
+def _firmware_artifact(raw: Any) -> RenderFirmwareArtifact:
+    raw = raw if isinstance(raw, dict) else {}
+    return RenderFirmwareArtifact(
+        version=_str_or_none(raw.get("version")),
+        image_file=_str_or_none(raw.get("image_file") or raw.get("file")),
+        source_path=_str_or_none(raw.get("s3_path")),
+    )
+
+
+def _firmware_component(name: Any, raw: Any) -> RenderFirmwareComponent:
+    return RenderFirmwareComponent(name=str(name), artifact=_firmware_artifact(raw))
+
+
+def _firmware_from_context(context: dict[str, Any]) -> RenderFirmwareData:
+    """Desired OS + firmware bundles/overrides from the merged config context."""
+    target = context.get("intended-firmware")
+    desired = target.get("version") if isinstance(target, dict) else None
+
+    bundles: list[RenderFirmwareBundle] = []
+    raw_bundles = context.get("firmware_bundles")
+    if isinstance(raw_bundles, dict):
+        for version, raw_bundle in raw_bundles.items():
+            if not isinstance(raw_bundle, dict):
+                continue
+            raw_components = raw_bundle.get("firmware")
+            components = (
+                tuple(_firmware_component(n, c) for n, c in raw_components.items())
+                if isinstance(raw_components, dict)
+                else ()
+            )
+            bundles.append(
+                RenderFirmwareBundle(
+                    version=str(version),
+                    operating_system=_firmware_artifact(raw_bundle.get("nv_os")),
+                    components=components,
+                )
+            )
+
+    raw_overrides = context.get("firmware_overrides")
+    raw_overrides = raw_overrides if isinstance(raw_overrides, dict) else {}
+    raw_custom = raw_overrides.get("custom_components")
+    raw_custom = raw_custom if isinstance(raw_custom, dict) else {}
+    skip = raw_overrides.get("skip_components")
+    if isinstance(skip, (str, bytes)) or not isinstance(skip, (list, tuple)):
+        skip = ()
+    return RenderFirmwareData(
+        desired_version=_str_or_none(desired),
+        selected_bundle_version=_str_or_none(context.get("firmware_bundle_version")),
+        bundles=tuple(bundles),
+        overrides=RenderFirmwareOverrides(
+            skip_components=tuple(str(s) for s in skip),
+            custom_components=tuple(_firmware_component(n, c) for n, c in raw_custom.items()),
+        ),
+    )
+
+
+def _access_from_context(context: dict[str, Any]) -> RenderAccessData:
+    """Credential *references* (never secret values) from ``password_mappings``."""
+    raw = context.get("password_mappings")
+    if not isinstance(raw, dict):
+        return RenderAccessData()
+    credentials: list[RenderCredentialReference] = []
+    for username, cred in raw.items():
+        if not isinstance(cred, dict):
+            continue
+        secret_name = cred.get("password")
+        rotation = cred.get("rotation")
+        if not secret_name or not rotation:
+            raise DCIMInvalidDataError(
+                f"config_context.password_mappings['{username}'] requires 'password' and 'rotation'"
+            )
+        credentials.append(
+            RenderCredentialReference(
+                username=str(username),
+                secret_name=str(secret_name),
+                rotation=str(rotation),
+                role=_str_or_none(cred.get("role")),
+            )
+        )
+    return RenderAccessData(credentials=tuple(credentials))
+
+
+def _isis_interfaces(context: dict[str, Any]) -> tuple[RenderIsisInterface, ...]:
+    isis = context.get("isis")
+    interfaces = isis.get("interfaces") if isinstance(isis, dict) else None
+    if not isinstance(interfaces, dict):
+        return ()
+    return tuple(
+        RenderIsisInterface(
+            interface_name=str(name), metric=int(metric) if metric is not None else None
+        )
+        for name, metric in interfaces.items()
+    )
+
+
+def _evpn(context: dict[str, Any]) -> RenderEvpnData:
+    evpn = context.get("evpn") if isinstance(context.get("evpn"), dict) else {}
+    df = evpn.get("df-preference")
+    return RenderEvpnData(
+        esi_base_mac=_str_or_none(context.get("evpn_esi_base_mac")),
+        fabric_mac=_str_or_none(context.get("fabric-mac")),
+        df_preference=int(df) if df is not None else None,
+    )
+
+
+def _routing_from_context(
+    bgp_sessions: list[dict[str, Any]], context: dict[str, Any]
+) -> RenderRoutingData:
+    """Native ``netbox-bgp`` instances plus effective routing policy (ASN/ISIS/EVPN)."""
+    bgp = context.get("bgp") if isinstance(context.get("bgp"), dict) else {}
+    return RenderRoutingData(
+        bgp_instances=_bgp_instances(bgp_sessions),
+        default_asn=_str_or_none(bgp.get("asn")),
+        local_asn=_str_or_none(bgp.get("local-asn")),
+        site_asn=_str_or_none(context.get("site_asn")),
+        isis_interfaces=_isis_interfaces(context),
+        evpn=_evpn(context),
+    )
 
 
 class NetBoxRenderMixin:
-    """Normalized render-data assembly for the template engine."""
+    """Typed render-data assembly for the template engine."""
 
     async def _safe_list(self, path: str, params: list[tuple[str, str]] | None = None):
-        """List a REST endpoint, treating a missing endpoint as no data.
-
-        The fabric plugin and ``netbox-bgp`` are optional: if either is not
-        installed the render still succeeds with those relationships empty.
-        """
+        """List a REST endpoint, treating a missing endpoint (optional plugin) as no data."""
         try:
             return await self.rest_list(path, params)
         except DCIMNotFoundError:
             return []
 
-    async def _device_overlay_assignments(
-        self, device_id: str, interface_ids: set[str]
-    ) -> list[dict[str, Any]]:
-        """Return overlay assignments targeting this device or its interfaces.
-
-        Fetches only the assignments for the relevant object ids (the device and
-        its interfaces) instead of the whole table, then filters client-side by
-        (assigned_object_type, assigned_object_id) so a generic-FK id collision
-        between a device and an interface cannot leak an unrelated assignment.
-        """
+    async def _assigned_overlay_ids(self, device_id: str, interface_ids: set[str]) -> set[str]:
+        """Return the ids of overlays assigned to this device or its interfaces."""
         object_ids = [str(device_id), *sorted(interface_ids)]
-        results = await asyncio.gather(
-            *(
-                self._safe_list(self.ASSIGNMENTS_PATH, [("assigned_object_id", object_id)])
-                for object_id in object_ids
-            )
-        )
-        # Dedupe by assignment id in case a device and interface share a numeric id.
-        assignments = {a["id"]: a for rows in results for a in rows}.values()
-        out: list[dict[str, Any]] = []
-        for assignment in assignments:
-            content_type = assignment.get("assigned_object_type")
+        assignments: dict[Any, dict[str, Any]] = {}
+        for object_id in object_ids:
+            rows = await self._safe_list(self.ASSIGNMENTS_PATH, [("assigned_object_id", object_id)])
+            for row in rows:
+                assignments[row["id"]] = row
+        overlay_ids: set[str] = set()
+        for assignment in assignments.values():
+            ctype = assignment.get("assigned_object_type")
             assigned_id = str(assignment.get("assigned_object_id"))
-            if content_type == "dcim.device" and assigned_id == str(device_id):
-                out.append(assignment)
-            elif content_type == "dcim.interface" and assigned_id in interface_ids:
-                out.append(assignment)
-        return out
+            matches_device = ctype == "dcim.device" and assigned_id == str(device_id)
+            matches_iface = ctype == "dcim.interface" and assigned_id in interface_ids
+            if matches_device or matches_iface:
+                overlay_id = _ref_id(assignment.get("overlay"))
+                if overlay_id is not None:
+                    overlay_ids.add(str(overlay_id))
+        return overlay_ids
+
+    async def _id_map(self, path: str, ids: set[str]) -> dict[str, dict[str, Any]]:
+        """Fetch objects by id into an ``{id: obj}`` map (empty ids → no fetch)."""
+        if not ids:
+            return {}
+        params = [("id", i) for i in sorted(ids)]
+        rows = await self._safe_list(path, params)
+        return {str(row["id"]): row for row in rows if row.get("id") is not None}
+
+    async def _overlays(self, device_id: str, interface_ids: set[str]) -> RenderOverlayData:
+        """Build device-scoped L2/L3 VNI inventory from the plugin's overlays.
+
+        Scoped via overlay *assignments* (which overlays reach this device), never
+        the global VXLAN table — a device must not receive every fabric VNI.
+        """
+        overlay_ids = await self._assigned_overlay_ids(device_id, interface_ids)
+        if not overlay_ids:
+            return RenderOverlayData()
+        overlays = {
+            str(o["id"]): o
+            for o in await self._safe_list(self.OVERLAYS_PATH)
+            if o.get("id") is not None
+        }
+        vxlans = [
+            v
+            for v in await self._safe_list(self.VXLANS_PATH)
+            if str(_ref_id(v.get("overlay"))) in overlay_ids
+        ]
+        vrf_map = await self._id_map(
+            "ipam/vrfs/", {str(_ref_id(v.get("vrf"))) for v in vxlans if v.get("vrf")}
+        )
+        vlan_map = await self._id_map(
+            "ipam/vlans/", {str(_ref_id(v.get("vlan"))) for v in vxlans if v.get("vlan")}
+        )
+
+        l2: list[RenderL2Vni] = []
+        l3: list[RenderL3Vni] = []
+        for vxlan in vxlans:
+            overlay_name = _str_or_none(
+                (overlays.get(str(_ref_id(vxlan.get("overlay")))) or {}).get("name")
+            )
+            vnid = vxlan.get("vnid")
+            if vxlan.get("vni_type") == "l3":
+                vrf = _render_vrf(vrf_map.get(str(_ref_id(vxlan.get("vrf")))))
+                if vrf is None:
+                    continue
+                l3.append(
+                    RenderL3Vni(
+                        vrf=vrf,
+                        l3_vlan_id=vxlan.get("l3_vlan_id"),
+                        vni=vnid,
+                        overlay_name=overlay_name,
+                    )
+                )
+            else:
+                vlan = _render_vlan(vlan_map.get(str(_ref_id(vxlan.get("vlan")))))
+                if vlan is None:
+                    continue
+                l2.append(
+                    RenderL2Vni(
+                        vlan=vlan,
+                        vni=vnid,
+                        overlay_name=overlay_name,
+                        import_targets=_targets(vxlan.get("import_targets")),
+                        export_targets=_targets(vxlan.get("export_targets")),
+                    )
+                )
+        return RenderOverlayData(l2_vnis=tuple(l2), l3_vnis=tuple(l3))
+
+    async def _location_address_space(self, site_id: str | None) -> RenderLocationAddressSpace:
+        """Site prefixes (role/tags) and VLANs (with plugin DHCP helper addresses)."""
+        if not site_id:
+            return RenderLocationAddressSpace()
+        prefixes = await self._safe_list("ipam/prefixes/", [("site_id", site_id)])
+        vlans = await self._safe_list("ipam/vlans/", [("site_id", site_id)])
+        render_prefixes = tuple(
+            RenderPrefix(
+                prefix=p["prefix"],
+                role=_choice_value(p.get("role")) or None if p.get("role") else None,
+                tags=_tags(p),
+            )
+            for p in prefixes
+            if p.get("prefix")
+        )
+        render_vlans: list[RenderLocationVlan] = []
+        for vlan in vlans:
+            render_vlan = _render_vlan(vlan)
+            if render_vlan is None:
+                continue
+            helpers = (vlan.get("custom_fields") or {}).get("nvcm_helper_addresses") or []
+            helper_ips = tuple(
+                str(ipaddress.ip_address(str(_ref_addr(h)).split("/")[0]))
+                for h in helpers
+                if _ref_addr(h) and _is_ip(_ref_addr(h))
+            )
+            render_vlans.append(RenderLocationVlan(vlan=render_vlan, helper_addresses=helper_ips))
+        return RenderLocationAddressSpace(prefixes=render_prefixes, vlans=tuple(render_vlans))
 
     async def get_render_data(self, request: RenderDataRequest) -> RenderData:
-        """Assemble the provider-neutral render payload for one device."""
+        """Assemble the provider-neutral, fully typed render payload for one device."""
         device_id = request.device_id
         data = await self.graphql_query(_RENDER_DEVICE_QUERY, {"id": device_id})
         device = _require(data.get("device"), "device")
@@ -222,24 +674,29 @@ class NetBoxRenderMixin:
         role = _require(device.get("role"), "role")
         device_type = _require(device.get("device_type"), "device type")
         interfaces = list(device.get("interfaces") or [])
-        interface_ids = {str(interface["id"]) for interface in interfaces if interface.get("id")}
+        interface_ids = {str(i["id"]) for i in interfaces if i.get("id")}
+        context = device.get("config_context") or {}
 
         device_location, site_location = _location_hierarchy(device)
+        site_id = site_location.id
 
-        # Fabric + BGP relationships (REST; optional plugins degrade to empty).
+        # Site prefixes double as the ancestry source for interface addresses.
+        site_prefixes = (
+            await self._safe_list("ipam/prefixes/", [("site_id", site_id)]) if site_id else []
+        )
+        site_networks = [
+            ipaddress.ip_network(p["prefix"], strict=False)
+            for p in site_prefixes
+            if p.get("prefix")
+        ]
+
         bgp_sessions = await self._safe_list(
             "plugins/bgp/session/", [("device_id", str(device_id))]
         )
-        overlays = await self._safe_list(self.OVERLAYS_PATH)
-        vxlans = await self._safe_list(self.VXLANS_PATH)
-        overlay_assignments = await self._device_overlay_assignments(device_id, interface_ids)
+        overlays = await self._overlays(device_id, interface_ids)
+        address_space = await self._location_address_space(site_id)
 
-        # Site-scoped inventory available natively (region/site/location-scoped
-        # config context is already merged into the device intent above).
-        site_id = str(site_location.id) if site_location.id else None
-        site_params = [("site_id", site_id)] if site_id else None
-        prefixes = await self._safe_list("ipam/prefixes/", site_params) if site_id else []
-        vlans = await self._safe_list("ipam/vlans/", site_params) if site_id else []
+        render_interfaces = tuple(_render_interface(i, site_networks) for i in interfaces)
 
         return RenderData(
             device=DeviceRenderData(
@@ -252,23 +709,18 @@ class NetBoxRenderMixin:
                     location=device_location,
                     tags=_tags(device),
                 ),
-                interfaces=tuple(interfaces),
-                inventory={
-                    "serial": device.get("serial") or None,
-                    "tenant": (device.get("tenant") or {}).get("name"),
-                    "manufacturer": (device_type.get("manufacturer") or {}).get("name"),
-                    "vrfs": _device_vrfs(interfaces),
-                    "bgp_sessions": bgp_sessions,
-                    "overlays": overlays,
-                    "vxlans": vxlans,
-                    "overlay_assignments": overlay_assignments,
-                },
-                intent=device.get("config_context") or {},
+                interfaces=render_interfaces,
+                network=RenderNetworkData(vrfs=_device_vrfs(interfaces)),
+                routing=_routing_from_context(bgp_sessions, context),
+                overlays=overlays,
+                firmware=_firmware_from_context(context),
+                services=_services_from_context(context),
+                access=_access_from_context(context),
             ),
             location=LocationRenderData(
                 location=site_location,
-                inventory={"prefixes": prefixes, "vlans": vlans},
-                intent={},
+                routing=RenderLocationRoutingData(site_asn=_str_or_none(context.get("site_asn"))),
+                address_space=address_space,
             ),
         )
 

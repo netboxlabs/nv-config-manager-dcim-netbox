@@ -103,13 +103,13 @@ template-cli cache-query --provider-config netbox-provider.toml --device-id <id>
     --output-render-data-file rd.json
 ```
 
-## Implementing an operation
+## Working on an operation
 
-Replace a stub body (`unsupported("...")`) with a real NetBox call. Reads use
-`self.graphql_query(...)`; writes use `self.rest_request("PATCH", ...)`. Return
-the SDK Pydantic models — never raw NetBox responses. Map backend failures to
-the SDK error taxonomy (see `client.py`). If NetBox genuinely cannot satisfy an
-operation, keep the `DCIMOperationNotSupportedError` with a clear explanation.
+Each operation lives in its functional-area module (see [Layout](#layout)).
+Reads use `self.graphql_query(...)`; writes use `self.rest_request("PATCH", ...)`.
+Return the SDK Pydantic models — never raw NetBox responses. Map backend failures
+to the SDK error taxonomy (see `client.py`). Where NetBox genuinely cannot satisfy
+an operation, it raises `DCIMOperationNotSupportedError` with a clear explanation.
 
 See NVCM's *Contribute a DCIM Provider* guide for the full authoring contract.
 

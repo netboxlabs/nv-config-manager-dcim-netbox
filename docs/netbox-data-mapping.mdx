@@ -1,0 +1,114 @@
+---
+title: NetBox render data mapping
+sidebar-title: NetBox data mapping
+position: 13
+---
+
+The `netbox` DCIM provider translates NetBox records into the provider-neutral
+`RenderData` contract before the Render service or a template filter sees them.
+Templates use the fields and filters documented here; they never query NetBox or
+read `config_context` directly.
+
+It doubles as a coverage checklist: a filter marked **not yet populated**
+consumes a `RenderData` section this provider currently returns as the SDK
+default, and is an untested provider boundary.
+
+## BGP peering
+
+NetBox models BGP through the `netbox-bgp` plugin. Each peering is a `session`
+with nested `local_as`, `remote_as`, `local_address`, `remote_address`, and
+`peer_group`. A `netbox-bgp` session does **not** expose a VRF association, so the
+provider does not require or emit a `source_interface`, and
+`RenderBGPPeer.source_vrf` is the default VRF.
+
+Sessions are grouped into one `RenderBGPInstance` per local ASN. Instances with
+no peers are still returned. `router_id_interface` is not exposed by
+`netbox-bgp` and is currently unset.
+
+## Device filter mapping
+
+The "NetBox source" column describes the provider implementation. GraphQL is used
+for the device, its interfaces, and merged `config_context`; REST is used for the
+`netbox-bgp`, overlay/VXLAN, and IPAM relationships.
+
+| Filter | Provider-neutral input | NetBox source |
+| --- | --- | --- |
+| `hostname` | `identity.name` | `device.name` |
+| `site_name` | `identity.location` hierarchy | `device.site` and nested `device.location` parents; the ancestor whose `kind` is `Site` |
+| `device_tags`, `has_tag` | `identity.tags` | `device.tags[].name` |
+| `platform` | `identity.platform` | `device.platform.name` |
+| `model` | `identity.model` | `device.device_type.model` |
+| `role` | `identity.role` | `device.role.name` |
+| `uuid` | `identity.id` | `device.id` |
+| `asn` | `routing.bgp_instances[].asn` | `netbox-bgp` session `local_as.asn`, grouped |
+| `bgp_routing_instance` | `routing.bgp_instances[]` | `netbox-bgp` sessions grouped by local ASN; peers from `remote_as`, `remote_address`, `peer_group`, `status` |
+| `interface_by_name`, `interfaces`, `management_interface` | `interfaces[]` | native device interfaces: `type`, `enabled`, `mtu`, `mgmt_only`, `vrf`, untagged/tagged VLANs, addresses, MAC, tags, parent |
+| `interface_has_tag` | `interfaces[].tags` | `device.interfaces[].tags[].name` |
+| `interface_natural_sort_key` | one `Interface.name` | `device.interfaces[].name` |
+| `breakout_count` | `interfaces[].parent_interface` | child interfaces whose `parent.name` matches |
+| `loopback_prefix` | `interfaces[].addresses[].parent_prefixes` | site IPAM prefixes containing the address, ordered nearest-parent-first |
+| `default_gateways` | management interface address | `mgmt_only` interface IP; gateway computed from its subnet |
+| `attached_vrfs`, `has_vrf`, `get_vrf`, `has_vrf_interfaces` | `interfaces[].vrf` | interface `vrf` (`name` + `rd`) |
+| `dns_servers` | `services.dns` | `config_context.dns` (`{ipv4, ipv6}`) |
+| `ntp_servers` | `services.ntp` | `config_context.ntp` |
+| `syslog_servers` | `services.syslog` | `config_context.syslog` |
+| `tacacs_servers` | `services.tacacs` | `config_context.tacacs` |
+| `ztp_servers` | `services.ztp` | `config_context.ztp` |
+| `firmware_cache` | `services.firmware_cache` | `config_context.firmware_cache` |
+| `provisioning_servers` | `services.provisioning` | `config_context.provisioning_servers` |
+| `dhcp_servers` | `services.dhcp[]` | `config_context.dhcp` (`{provider: {ipv4, ipv6}}`) |
+| `management_prefixes` | `services.management_prefixes` | `config_context.management_prefixes` (`{ipv4, ipv6}`) |
+| `desired_firmware` | `firmware.desired_version` | `config_context["intended-firmware"].version` |
+| `firmware_bundle_version` | `firmware.selected_bundle_version` | `config_context.firmware_bundle_version` |
+| `firmware_bundles`, `firmware_bundle`, `has_firmware_bundle`, `firmware_component`, `nv_os_version`, `nv_os_image_file` | `firmware.bundles[]` | `config_context.firmware_bundles` (`{version: {nv_os, firmware}}`) |
+| `firmware_overrides` | `firmware.overrides` | `config_context.firmware_overrides` (`skip_components`, `custom_components`) |
+| `users` | `access.credentials[]` | `config_context.password_mappings` (`{user: {password, rotation, role}}`) — secret **references** only |
+| `asn` (fallback), `bgp_routing_instance` | `routing.default_asn` / `.local_asn` | `config_context.bgp.asn` / `.local-asn` |
+| `evpn_esi_mac`, `global_fabric_mac`, `evpn_df_preference` | `routing.evpn` | `config_context.evpn_esi_base_mac`, `config_context["fabric-mac"]`, `config_context.evpn["df-preference"]` |
+| `isis_metric` | `routing.isis_interfaces[]` | `config_context.isis.interfaces` (`{name: metric}`) |
+| `l3vni_mappings` | `overlays.l3_vnis[]` | plugin VXLANs (`vni_type=l3`) whose overlay is **assigned to the device**; VRF resolved by id |
+| `vni_mappings` | `overlays.l2_vnis[]` | plugin VXLANs (`vni_type=l2`) whose overlay is assigned to the device; VLAN resolved by id |
+| `spx_subnets` | downlink interface addresses and `parent_prefixes` | interface addresses and site-prefix ancestry |
+| `helper_addresses_by_vlan` | `LocationRenderData.address_space.vlans` | site VLAN `custom_fields.nvcm_helper_addresses` |
+
+The `services`, `firmware`, `access`, and routing ASN/EVPN/ISIS sections read the
+same canonical `config_context` keys the fabric templates expect (the keys the
+bundled `config_contexts.yaml` seeds). NetBox merges region/site/role/platform/tag
+config contexts into `device.config_context`, so a device gets its effective
+policy; where a key is absent the section stays at the SDK default.
+
+### Not yet populated (SDK default — provider TODO)
+
+These filters read `RenderData` sections the provider currently returns as the
+SDK default. They are valid but empty until mapped from NetBox:
+
+| Filter(s) | Section | Note |
+| --- | --- | --- |
+| `router_id`, `peer_group_ttl` | `routing.bgp_instances[].router_id_interface` / `.peers[].ttl` | `netbox-bgp` exposes neither in its base schema |
+| `console_server_ports` | `network.console_server_ports[]` | map device console-server ports + connections |
+| `nvlink_topology` | `network.nvlink_topology` | no native NetBox source yet |
+| `l2vni_vrfs` | `overlays.l2_vni_vrfs[]` | derive from overlay assignments + route targets |
+| `connected_devices`, `device_aggregate` (peer half) | `interfaces[].connected_interface` | populate from cable/connected-endpoint data |
+| `helper_addresses_by_vrf` | device VLAN interfaces + `address_space.vlans` | needs device-side VLAN-interface join |
+
+## Known filter requirements
+
+- **VRF route distinguisher.** `attached_vrfs` / `has_vrf` / `get_vrf` build a
+  template `VRF` via the shared library's `VRF.from_render_data`, which requires
+  the route distinguisher in the overlay form `*:<vni>` (what NVCM's fabric VRFs
+  use, e.g. `*:60000`). A conventional `ASN:index` RD raises
+  `FilterException: Invalid RD set on VRF <name>`. Ensure interface VRFs carry an
+  `*:<vni>` RD, or the VRF filters will fail.
+
+## Location filter mapping
+
+| Filter | Provider-neutral input | NetBox source |
+| --- | --- | --- |
+| `site_aggregates` | `address_space.prefixes[]` | IPAM prefixes scoped to the site, with role and tags |
+| `location_has_tag` | `location.tags` | **not yet populated** — the Site `RenderLocation` does not yet carry tags |
+
+## IP utility filters
+
+`gateway`, `subnet`, `supernet`, `get_peer_ip`, `network_address`, and
+`host_range` operate only on the value passed to the filter. They do not consume
+a `RenderData` field or query NetBox.
