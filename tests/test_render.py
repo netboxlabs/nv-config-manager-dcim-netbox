@@ -116,6 +116,7 @@ _REST_MAP = {
         },
         {"id": 200, "vid": 200, "name": "Voice"},
     ],
+    "plugins/nv-config-manager/nvlink-domains/": [{"topology": "gb200_nvl36r1_c2g4"}],
 }
 
 
@@ -172,6 +173,8 @@ async def test_get_render_data_assembles_typed_sections():
 
     # --- network: distinct device VRFs (deduped) ---
     assert [v.name for v in rd.device.network.vrfs] == ["Tenant-A"]
+    # NVLink topology from the device's NVLink domain (feeds NVSwitch templates).
+    assert rd.device.network.nvlink_topology == "gb200_nvl36r1_c2g4"
 
     # --- routing: BGP grouped by local ASN ---
     assert len(rd.device.routing.bgp_instances) == 1

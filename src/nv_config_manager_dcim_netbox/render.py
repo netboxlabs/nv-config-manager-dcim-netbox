@@ -696,6 +696,13 @@ class NetBoxRenderMixin:
         overlays = await self._overlays(device_id, interface_ids)
         address_space = await self._location_address_space(site_id)
 
+        # NVLink topology comes from the device's NVLink domain (plugin model).
+        # The NVSwitch fabric-manager templates require network.nvlink_topology.
+        nvlink_domains = await self._safe_list(
+            "plugins/nv-config-manager/nvlink-domains/", [("device_id", str(device_id))]
+        )
+        nvlink_topology = _str_or_none(nvlink_domains[0].get("topology")) if nvlink_domains else None
+
         render_interfaces = tuple(_render_interface(i, site_networks) for i in interfaces)
 
         return RenderData(
@@ -710,7 +717,9 @@ class NetBoxRenderMixin:
                     tags=_tags(device),
                 ),
                 interfaces=render_interfaces,
-                network=RenderNetworkData(vrfs=_device_vrfs(interfaces)),
+                network=RenderNetworkData(
+                    vrfs=_device_vrfs(interfaces), nvlink_topology=nvlink_topology
+                ),
                 routing=_routing_from_context(bgp_sessions, context),
                 overlays=overlays,
                 firmware=_firmware_from_context(context),
