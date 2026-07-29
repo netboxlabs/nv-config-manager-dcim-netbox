@@ -209,8 +209,11 @@ async def test_render_data_round_trips_through_cache():
     finally:
         await client.close()
     restored = RenderData.from_cache(rd.to_cache())
+    assert isinstance(restored, RenderData)
     assert restored.device.identity.name == "leaf-01"
     assert restored == rd
+    # full-graph re-validation of the returned model (every nested Render* model)
+    assert RenderData.model_validate(restored.model_dump()) == rd
 
 
 async def test_get_render_data_requires_platform_role_model():

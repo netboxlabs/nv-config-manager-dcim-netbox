@@ -61,11 +61,15 @@ async def test_update_dpu_creates_mac_and_sets_primary():
     # device serial patched first
     assert calls[0] == ("PATCH", "dcim/devices/5/", {"serial": "SN-NEW"})
     # MAC created and assigned to the interface
-    assert ("POST", "dcim/mac-addresses/", {
-        "mac_address": "aa:bb:cc:00:00:01",
-        "assigned_object_type": "dcim.interface",
-        "assigned_object_id": 11,
-    }) in calls
+    assert (
+        "POST",
+        "dcim/mac-addresses/",
+        {
+            "mac_address": "aa:bb:cc:00:00:01",
+            "assigned_object_type": "dcim.interface",
+            "assigned_object_id": 11,
+        },
+    ) in calls
     # interface primary_mac_address set to the new MAC id
     assert ("PATCH", "dcim/interfaces/11/", {"primary_mac_address": 99}) in calls
     # returns the refreshed host device

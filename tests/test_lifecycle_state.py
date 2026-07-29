@@ -67,11 +67,15 @@ async def test_get_render_device_status_none_when_no_record():
 
 
 async def test_render_enabled_device_ids():
-    client = _client({_STATUS: [
-        {"id": 1, "device": 5, "render_enabled": True},
-        {"id": 2, "device": 6, "render_enabled": False},
-        {"id": 3, "device": 7, "render_enabled": True},
-    ]})
+    client = _client(
+        {
+            _STATUS: [
+                {"id": 1, "device": 5, "render_enabled": True},
+                {"id": 2, "device": 6, "render_enabled": False},
+                {"id": 3, "device": 7, "render_enabled": True},
+            ]
+        }
+    )
     try:
         ids = await client.get_render_enabled_device_ids(None)
     finally:
@@ -83,8 +87,14 @@ async def test_upsert_intended_creates_then_patches():
     # No existing intended-config -> POST with device set.
     client = _client({_INTENDED: []})
     update = IntendedConfigurationUpdate(
-        device_id="5", config_store_instance="http://cs", path="/d.cfg", commit_id="abc",
-        updated="2026-01-01T00:00:00Z", updated_by="u", commit_message="m", template_version="v1",
+        device_id="5",
+        config_store_instance="http://cs",
+        path="/d.cfg",
+        commit_id="abc",
+        updated="2026-01-01T00:00:00Z",
+        updated_by="u",
+        commit_message="m",
+        template_version="v1",
     )
     try:
         await client.upsert_intended_configuration(update)
@@ -107,8 +117,14 @@ async def test_upsert_intended_creates_then_patches():
 async def test_record_backup_upserts():
     client = _client({_BACKUP: []})
     intent = ConfigurationBackupIntent(
-        device_id="5", config_store_url="http://cs", commit_id="c1", filename="d.cfg",
-        user="u", commit_message="m", workflow_id="wf1", deployed_commit_id="c0",
+        device_id="5",
+        config_store_url="http://cs",
+        commit_id="c1",
+        filename="d.cfg",
+        user="u",
+        commit_message="m",
+        workflow_id="wf1",
+        deployed_commit_id="c0",
     )
     try:
         await client.record_configuration_backup(intent)
@@ -121,19 +137,23 @@ async def test_record_backup_upserts():
 
 async def test_config_drift():
     # intended.commit_id != backup.deployed_commit_id -> drift
-    client = _client({
-        _INTENDED: [{"id": 1, "device": 5, "commit_id": "new"}],
-        _BACKUP: [{"id": 1, "device": 5, "deployed_commit_id": "old"}],
-    })
+    client = _client(
+        {
+            _INTENDED: [{"id": 1, "device": 5, "commit_id": "new"}],
+            _BACKUP: [{"id": 1, "device": 5, "deployed_commit_id": "old"}],
+        }
+    )
     try:
         assert await client.has_recorded_config_drift("5") is True
     finally:
         await client.close()
     # equal -> no drift
-    client = _client({
-        _INTENDED: [{"id": 1, "device": 5, "commit_id": "same"}],
-        _BACKUP: [{"id": 1, "device": 5, "deployed_commit_id": "same"}],
-    })
+    client = _client(
+        {
+            _INTENDED: [{"id": 1, "device": 5, "commit_id": "same"}],
+            _BACKUP: [{"id": 1, "device": 5, "deployed_commit_id": "same"}],
+        }
+    )
     try:
         assert await client.has_recorded_config_drift("5") is False
     finally:

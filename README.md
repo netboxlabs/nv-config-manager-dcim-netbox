@@ -88,6 +88,51 @@ token  = "<netbox-api-token>"
 # verify     = true                        # bool or path to a CA bundle
 ```
 
+## Required NetBox permissions
+
+The provider authenticates with a **v2 API token** (`Authorization: Bearer
+nbt_<key>.<secret>`; a non-`nbt_` token falls back to the v1 `Token` scheme). The
+token's user needs:
+
+- **Read** across the objects the render/inventory/reference paths consume:
+  `dcim` (devices, interfaces, sites, locations, regions, device-types,
+  platforms, roles, cables), `ipam` (prefixes, vlans, vrfs, ip-addresses,
+  mac-addresses), `tenancy` (tenants), `extras` (tags, config-contexts), the
+  plugin models under `plugins/nv-config-manager/` (overlays, vxlans,
+  overlay-assignments, device-config-statuses, intended-configs, backup-configs),
+  and `netbox-bgp` sessions.
+- **Write** where the provider mutates NetBox: the plugin lifecycle models
+  (device/intended/backup config — upsert), overlays + vxlans + VRFs (Spectrum-X
+  provisioning), interfaces + mac-addresses (DPU inventory), and devices (serial
+  updates, interface VRF assignment).
+- The provider also issues **OPTIONS** requests to read field choices (statuses).
+
+For a lab, a superuser token is simplest; for production, grant read+write scoped
+to the `dcim` / `ipam` / `tenancy` / `extras` apps, the plugin, and `netbox-bgp`.
+
+## Event delivery
+
+Change events originate in NetBox and are **pushed** to the render service — the
+provider never polls. The companion plugin's `EVENTS_PIPELINE` bridge normalizes
+each NetBox change into the provider-neutral `DCIMChangeEvent` envelope and
+publishes it (to a logger, or to a NATS subject set by the plugin's
+`nats_subject`, which must match NVCM's `dcim_change_subject`). The render
+service consumes the envelope, calls `NetBoxProvider.normalize_event` to validate
+it, and dispatches it to the handler registered for its `object_type`.
+
+The provider registers render-event handlers for these native object types
+(`events._HANDLERS`); each returns the device renders a change should trigger:
+
+| `object_type` | Affected-device fan-out |
+| --- | --- |
+| `dcim.device` | the device itself |
+| `dcim.interface` | the interface's parent device |
+| `netbox_bgp.bgpsession` | the session's device |
+| `netbox_nv_config_manager.overlayassignment` | the assigned device, or the assigned interface's device (resolved via REST) |
+
+Object types whose fan-out needs cross-object queries (prefix / vrf / ipaddress /
+cable / config-context) are intentionally not registered yet.
+
 ## Test the basics without NVCM core
 
 ```bash
