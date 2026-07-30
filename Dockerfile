@@ -1,35 +1,44 @@
 # Provider-package image for the NetBox DCIM provider.
 #
-# Referenced from an NVCM installer config as a `dcim.provider_packages[].image`.
-# The image ships the provider (and, until it is published to an index, the SDK)
-# installed into site-packages so the deployment can import
-# `nv_config_manager_dcim_netbox` and resolve the `netbox` entry point.
+# Referenced from an NVCM installer config as `dcim.provider_packages[].image`.
+# NVCM's contract (deploy/helm/templates/_helpers.tpl): the image must contain
+# the provider AND all its dependencies as wheels under **/plugin-wheels/**. An
+# init container copies them out and installs them OFFLINE
+# (`pip install --no-index --find-links=<dir> *.whl`) into the app pods.
+#
+# Because the install is offline, /plugin-wheels must carry every transitive
+# dependency (aiohttp[speedups], pydantic-core, netaddr, ...). The wheels are
+# built glibc/manylinux (cp313) to match NVCM's glibc app runtime, so the
+# offline installer must also run on glibc — set
+# `dcim.providerPackages.installerImage: python:3.13-slim` (the chart default of
+# python:3.13-alpine is musl and cannot install/serve these wheels to a glibc app).
 #
 # The SDK (`nv-config-manager-dcim`) is not yet on an index, so it is supplied
-# via a named build context rather than pip. Build with:
+# via a named build context. Build with:
 #
-#   docker build \
-#     --build-context sdk=../nv-config-manager/components/dcim \
-#     -t registry.example.com/nv-config-manager-dcim-netbox:0.1.0 .
+#   docker build --build-context sdk=../nv-config-manager/components/dcim \
+#     -t nv-config-manager-dcim-netbox:0.1.0 .
 #
-# or simply `make image` (see the Makefile).
+# or `make image`.
 
 FROM python:3.13-slim AS build
 WORKDIR /build
 RUN pip install --no-cache-dir build
-# SDK (from the named build context) + this provider -> wheels.
+# Build the SDK + provider wheels...
 COPY --from=sdk . /build/sdk
 COPY . /build/provider
-RUN python -m build --wheel --outdir /wheels /build/sdk \
- && python -m build --wheel --outdir /wheels /build/provider
+RUN python -m build --wheel --outdir /pkg /build/sdk \
+ && python -m build --wheel --outdir /pkg /build/provider \
+ # ...then collect them + every transitive dependency as wheels into /plugin-wheels
+ # (--find-links /pkg resolves the not-yet-published SDK from the local build).
+ && pip wheel --no-cache-dir --find-links /pkg --wheel-dir /plugin-wheels /pkg/*.whl
 
-FROM python:3.13-slim
+# Final image only needs a shell (the copy init container runs /bin/sh: ls/mkdir/cp)
+# plus the wheels; the wheels themselves are glibc, carried as plain files.
+FROM alpine:3.20
 LABEL org.opencontainers.image.title="nv-config-manager-dcim-netbox" \
-      org.opencontainers.image.description="NetBox DCIM provider for NVIDIA Config Manager"
-COPY --from=build /wheels /wheels
-RUN pip install --no-cache-dir /wheels/*.whl \
- && rm -rf /wheels
-# Sanity check: the entry point resolves.
-RUN python -c "from importlib.metadata import entry_points; \
-eps = entry_points(group='nv_config_manager.dcim'); \
-assert any(e.name == 'netbox' for e in eps), 'netbox entry point missing'"
+      org.opencontainers.image.description="NetBox DCIM provider package (offline wheels) for NVIDIA Config Manager"
+COPY --from=build /plugin-wheels/ /plugin-wheels/
+# Fail the build if the wheelhouse is empty or missing the provider wheel.
+RUN ls /plugin-wheels/*.whl >/dev/null \
+ && ls /plugin-wheels/ | grep -q "nv_config_manager_dcim_netbox"
