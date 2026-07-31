@@ -19,7 +19,7 @@ _HOST_GQL = {
     "rack": {"name": "R1"},
     "device_type": {"slug": "bluefield"},
     "tenant": {"name": "NGC"},
-    "devicebays": [],
+    "devicebays": [{"name": "bay0", "id": "5", "installed_device": {"id": "2"}}],
     "interfaces": [
         {
             "id": 11,
@@ -65,6 +65,12 @@ async def test_get_host_metadata_by_names():
     client = _client(gql={"device_list": [_HOST_GQL]})
     result = await client.get_host_metadata_by_names(["dpu-01"])
     assert [m.name for m in result] == ["dpu-01"]
+    # Validate the HostMetadata fields + the embedded HostInterfaceMetadata that
+    # the fixture actually populates (name-only assertion left this model uncovered).
+    meta = result[0]
+    assert meta.tenant == "NGC"
+    assert meta.alias is None
+    assert [(i.name, i.mac_address) for i in meta.interfaces] == [("p0", "aa:bb:cc:00:00:01")]
 
 
 async def test_get_connected_switch_port_by_remote_mac():
@@ -100,6 +106,9 @@ async def test_get_host_device():
     client = _client(gql={"device": _HOST_GQL})
     host = await client.get_host_device("1")
     assert host.name == "dpu-01" and host.serial == "S1"
+    # Validate the embedded DeviceBayData (previously never populated by a fixture).
+    bay = host.device_bays[0]
+    assert (bay.name, bay.id, bay.installed_device_id) == ("bay0", "5", "2")
 
 
 async def test_get_host_device_missing_raises():

@@ -54,3 +54,45 @@ async def test_get_dhcp_auto_subnets():
     assert subnet["gateway"] == "10.0.0.1"
     assert subnet["pool_ips"] == ["10.0.0.50"]
     assert subnet["reservations"] == []
+
+
+async def test_get_dhcp_auto_subnets_resolves_interface_reservation():
+    """A dhcp-reserve IP assigned to a device interface resolves through
+    interface -> device into a reservation entry (the device-resolution branch,
+    previously uncovered)."""
+    reserve_ip = {
+        "address": "10.0.0.60/24",
+        "assigned_object_type": "dcim.interface",
+        "assigned_object": {"id": 11},
+    }
+    client = fake_client(
+        rest_list={
+            "ipam/prefixes/": [
+                {
+                    "id": 1,
+                    "prefix": "10.0.0.0/24",
+                    "family": {"value": 4},
+                    "custom_fields": {"nvcm_gateway": {"address": "10.0.0.1/24"}},
+                }
+            ],
+            "ipam/ip-addresses/": [reserve_ip],
+        },
+        rest_get={
+            "dcim/interfaces/11/": {
+                "id": 11,
+                "mac_address": "aa:bb:cc:00:00:09",
+                "device": {"id": 2},
+            },
+            "dcim/devices/2/": {
+                "id": 2,
+                "serial": "SN2",
+                "platform": {"name": "cumulus-linux"},
+                "custom_fields": {"nvcm_ztp_enabled": True},
+            },
+        },
+    )
+    subnets = await client.get_dhcp_auto_subnets()
+    reservations = subnets[0]["reservations"]
+    assert len(reservations) == 1
+    assert reservations[0]["serial"] == "SN2"
+    assert reservations[0]["mac_address"] == "aa:bb:cc:00:00:09"

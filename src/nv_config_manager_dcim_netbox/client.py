@@ -14,11 +14,13 @@ import logging
 import ssl
 from collections.abc import Callable
 from typing import Any, Self
+from urllib.parse import urlparse
 
 import aiohttp
 from nv_config_manager_dcim import (
     DCIMAuthenticationError,
     DCIMAuthorizationError,
+    DCIMConflictError,
     DCIMConnectivityError,
     DCIMInvalidDataError,
     DCIMNotFoundError,
@@ -53,6 +55,12 @@ def netbox_connection_settings(settings: ProviderSettings) -> dict[str, str | bo
     if missing:
         raise DCIMProviderConfigurationError(
             'DCIM provider "netbox" requires ' + ", ".join(missing)
+        )
+    server = str(values["server"]).strip()
+    parsed = urlparse(server)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise DCIMProviderConfigurationError(
+            f'DCIM provider "netbox" server must be an http(s):// URL, got {server!r}'
         )
     return {
         "server": str(values["server"]),
@@ -137,12 +145,16 @@ class BaseNetBoxClient:
         return headers
 
     def _raise_status(self, status: int, body: str) -> None:
+        if status == 400:
+            raise DCIMInvalidDataError(f"NetBox rejected the request ({status}): {body[:200]}")
         if status == 401:
             raise DCIMAuthenticationError(f"NetBox authentication failed ({status})")
         if status == 403:
             raise DCIMAuthorizationError(f"NetBox authorization failed ({status})")
         if status == 404:
             raise DCIMNotFoundError("NetBox record not found")
+        if status == 409:
+            raise DCIMConflictError(f"NetBox reported a conflict ({status}): {body[:200]}")
         raise DCIMConnectivityError(f"NetBox request failed ({status}): {body[:200]}")
 
     async def _read(self, response: aiohttp.ClientResponse) -> Any:
@@ -151,7 +163,12 @@ class BaseNetBoxClient:
             self._raise_status(response.status, text)
         if response.status == 204 or not text.strip():
             return None
-        return await response.json(content_type=None)
+        try:
+            return await response.json(content_type=None)
+        except ValueError as exc:  # JSONDecodeError — NetBox returned a non-JSON body
+            raise DCIMInvalidDataError(
+                f"NetBox returned a non-JSON response: {text[:200]}"
+            ) from exc
 
     async def graphql_query(
         self, query: str, variables: dict[str, Any] | None = None
@@ -165,7 +182,7 @@ class BaseNetBoxClient:
                 ssl=self._ssl,
             ) as response:
                 payload = await self._read(response)
-        except aiohttp.ClientError as exc:
+        except (aiohttp.ClientError, TimeoutError) as exc:
             raise DCIMConnectivityError(f"NetBox GraphQL request failed: {exc}") from exc
         payload = payload or {}
         if payload.get("errors"):
@@ -195,7 +212,7 @@ class BaseNetBoxClient:
                 ssl=self._ssl,
             ) as response:
                 return await self._read(response)
-        except aiohttp.ClientError as exc:
+        except (aiohttp.ClientError, TimeoutError) as exc:
             raise DCIMConnectivityError(f"NetBox REST request failed: {exc}") from exc
 
     async def rest_list(

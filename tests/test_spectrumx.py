@@ -48,6 +48,45 @@ async def test_get_spectrum_x_vrfs_no_overlay():
     assert await _client(overlay=None).get_spectrum_x_vrfs("x", "DM-Akron") == []
 
 
+async def test_provision_spectrum_x_vrf_creates_overlay_vrf_assignment_vxlan():
+    """Happy path (overlay does not exist yet): create the overlay, then the VRF,
+    assignment, and VXLAN — asserting each write's path + body. Previously only the
+    location-unresolved error branch was covered."""
+    record = []
+
+    async def no_overlay(name, location=None):
+        return None
+
+    async def tenant_id(name):
+        return 7
+
+    async def location_id(site):
+        return 3
+
+    client = fake_client(
+        record=record,
+        patch={
+            "_find_overlay": no_overlay,
+            "_resolve_tenant_id": tenant_id,
+            "_resolve_location_id": location_id,
+        },
+    )
+    await client.provision_spectrum_x_vrf(
+        namespaces=["ns1"],
+        route_distinguisher="65001:1500",
+        vnid=1500,
+        overlay_name="SpX",
+        site="rack-1",
+        tenant="tenant-a",
+    )
+    posts = {path: body for method, path, body in record if method == "POST"}
+    assert posts[_OVERLAYS]["name"] == "SpX" and posts[_OVERLAYS]["location"] == 3
+    assert posts[_OVERLAYS]["tenant"] == 7
+    assert posts["ipam/vrfs/"] == {"name": "SpXTenant1500", "rd": "65001:1500", "tenant": 7}
+    assert posts[_ASSIGN]["assigned_object_type"] == "ipam.vrf"
+    assert posts[_VXLANS]["vnid"] == 1500 and posts[_VXLANS]["name"] == "SpXTenant1500"
+
+
 async def test_delete_spectrum_x_vrf():
     record = []
     client = _client(

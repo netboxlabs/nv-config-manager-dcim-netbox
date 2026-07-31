@@ -8,10 +8,14 @@ native HTTP/GraphQL failures onto the SDK error taxonomy.
 
 from __future__ import annotations
 
+import json
+
+import aiohttp
 import pytest
 from nv_config_manager_dcim import (
     DCIMAuthenticationError,
     DCIMAuthorizationError,
+    DCIMConflictError,
     DCIMConnectivityError,
     DCIMInvalidDataError,
     DCIMNotFoundError,
@@ -89,17 +93,30 @@ def test_auth_scheme_token_for_v1_token():
 @pytest.mark.parametrize(
     ("status", "expected"),
     [
+        (400, DCIMInvalidDataError),
         (401, DCIMAuthenticationError),
         (403, DCIMAuthorizationError),
         (404, DCIMNotFoundError),
+        (409, DCIMConflictError),
         (500, DCIMConnectivityError),
-        (400, DCIMConnectivityError),
     ],
 )
 def test_raise_status_maps_http_to_sdk_errors(status, expected):
     client = create_dcim_client("netbox", _OK)
     with pytest.raises(expected):
         client._raise_status(status, "response body")
+
+
+def test_validate_settings_rejects_malformed_url():
+    """A ``server`` without an http(s) scheme is a configuration error, not a
+    late opaque transport failure at request time."""
+    provider = NetBoxProvider()
+    with pytest.raises(DCIMProviderConfigurationError):
+        provider.validate_settings({"server": "not-a-url", "token": "t"})
+    with pytest.raises(DCIMProviderConfigurationError):
+        provider.validate_settings({"server": "netbox.example", "token": "t"})  # no scheme
+    with pytest.raises(DCIMProviderConfigurationError):
+        provider.validate_settings({"server": "ftp://netbox.example", "token": "t"})
 
 
 class _FakeCM:
@@ -127,5 +144,88 @@ async def test_graphql_errors_map_to_invalid_data():
     try:
         with pytest.raises(DCIMInvalidDataError):
             await client.graphql_query("query { device { id } }")
+    finally:
+        await client.close()
+
+
+class _RaisingCM:
+    """Async context manager whose entry raises — models a transport failure."""
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    async def __aenter__(self):
+        raise self._exc
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _RaisingSession:
+    def __init__(self, exc):
+        self._exc = exc
+
+    def post(self, *args, **kwargs):
+        return _RaisingCM(self._exc)
+
+    def request(self, *args, **kwargs):
+        return _RaisingCM(self._exc)
+
+
+# A connection error and a timeout — the two native transport failures. Timeout is
+# a builtin TimeoutError (== asyncio.TimeoutError), NOT an aiohttp.ClientError, so
+# it would leak unmapped without the widened except.
+_TRANSPORT_FAILURES = [aiohttp.ClientError("connection refused"), TimeoutError()]
+
+
+@pytest.mark.parametrize("exc", _TRANSPORT_FAILURES)
+async def test_graphql_transport_failure_maps_to_connectivity(exc):
+    client = create_dcim_client("netbox", _OK)
+    client._session = lambda: _RaisingSession(exc)
+    try:
+        with pytest.raises(DCIMConnectivityError):
+            await client.graphql_query("query { device { id } }")
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("exc", _TRANSPORT_FAILURES)
+async def test_rest_transport_failure_maps_to_connectivity(exc):
+    client = create_dcim_client("netbox", _OK)
+    client._session = lambda: _RaisingSession(exc)
+    try:
+        with pytest.raises(DCIMConnectivityError):
+            await client.rest_request("GET", "dcim/devices/")
+    finally:
+        await client.close()
+
+
+class _FakeResponse:
+    def __init__(self, status, text, *, json_exc=None, json_val=None):
+        self.status = status
+        self._text = text
+        self._json_exc = json_exc
+        self._json_val = json_val
+
+    async def text(self):
+        return self._text
+
+    async def json(self, content_type=None):
+        if self._json_exc is not None:
+            raise self._json_exc
+        return self._json_val
+
+
+async def test_malformed_json_maps_to_invalid_data():
+    """A 200 with a non-JSON body (e.g. an HTML error page) is contract-invalid,
+    not a transport error — it must surface as DCIMInvalidDataError, not leak a
+    raw ValueError."""
+    client = create_dcim_client("netbox", _OK)
+    response = _FakeResponse(
+        200, "<html>not json</html>", json_exc=json.JSONDecodeError("x", "", 0)
+    )
+    try:
+        with pytest.raises(DCIMInvalidDataError):
+            await client._read(response)
     finally:
         await client.close()

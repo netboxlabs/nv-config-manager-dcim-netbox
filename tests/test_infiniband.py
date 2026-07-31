@@ -230,6 +230,27 @@ async def test_sync_ib_pkey_assignments():
     assert added == ["12"] and removed == ["11"] and unchanged == []
 
 
+async def test_sync_ib_pkey_assignments_patches_membership_change():
+    """An interface that stays assigned but changes membership_type is PATCHed in
+    place (the unchanged-but-membership-differs branch)."""
+    record = []
+    rows = [
+        {
+            "id": 30,
+            "assigned_object_type": "dcim.interface",
+            "assigned_object_id": 11,
+            "membership_type": "full",
+        }
+    ]
+    client = _client(rest_list={_ASSIGN: rows}, record=record)
+    added, removed, unchanged = await client.sync_ib_pkey_assignments(
+        "10", [("11", "0xAA", "limited")]
+    )
+    assert added == [] and removed == [] and unchanged == ["11"]
+    patches = [(p, body) for m, p, body in record if m == "PATCH"]
+    assert patches == [(f"{_ASSIGN}30/", {"membership_type": "limited"})]
+
+
 # -- host / pkey-context resolution ---------------------------------------------
 
 
@@ -241,6 +262,36 @@ async def test_canonicalize_ib_host():
 
     client._resolve_ib_device = resolve
     assert await client.canonicalize_ib_host("host-01") == "10.0.0.5"
+
+
+async def test_resolve_ib_device_ipv4_fallback():
+    """When the host looks like an IPv4 and no device matches by name, resolve via
+    the IP -> interface -> device fallback (the IPv4 branch of _resolve_ib_device)."""
+    client = _client(
+        rest_list={
+            "ipam/ip-addresses/": [
+                {
+                    "address": "10.0.0.5/24",
+                    "assigned_object_type": "dcim.interface",
+                    "assigned_object": {"id": 11},
+                }
+            ]
+        },
+        rest_get={"dcim/interfaces/11/": {"id": 11, "device": {"name": "host-01"}}},
+    )
+
+    async def gql(query, variables=None):
+        names = (variables or {}).get("names") or []
+        if names == ["host-01"]:  # resolved by IP -> interface -> device name
+            return {
+                "device_list": [
+                    {"id": "1", "name": "host-01", "primary_ip4": {"address": "10.0.0.5/24"}}
+                ]
+            }
+        return {"device_list": []}  # first lookup, by the IP-as-name: miss
+
+    client.graphql_query = gql
+    assert await client.canonicalize_ib_host("10.0.0.5") == "10.0.0.5"
 
 
 async def test_resolve_ib_host_site():
