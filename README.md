@@ -16,7 +16,7 @@ interact with it only through the SDK's `DCIMClient` protocol.
 **Implemented.** All `DCIMClient` operations are implemented against NetBox
 (REST + GraphQL), grouped by functional area (one module per area — see
 [Layout](#layout)). The provider factory, settings validation, discovery, and
-the aiohttp transport are functional. The unit suite passes (108 tests).
+the aiohttp transport are functional. The unit suite passes (250 tests, 87% lines).
 
 Change-event integration is live: `register_render_event_handlers` and
 `normalize_event` are wired, so automatic render-on-change works via the
@@ -27,6 +27,14 @@ which publishes object changes as the DCIM change envelope this provider consume
 Per-device lifecycle state (managed flags, intended/backup config metadata) is
 backed by the plugin's first-class models, so the companion plugin is required
 for the full feature set.
+
+## Documentation
+
+- [Supported operations & NetBox semantics](docs/supported-operations.mdx) — the
+  full operation surface (73 methods by area) + NetBox-specific mappings.
+- [NetBox render data mapping](docs/netbox-data-mapping.mdx) — `RenderData` field
+  → NetBox source, and the render-coverage checklist.
+- *Required NetBox permissions* and *Event delivery* — see below.
 
 ## Layout
 
@@ -194,12 +202,23 @@ The provider registers render-event handlers for these native object types
 | `object_type` | Affected-device fan-out |
 | --- | --- |
 | `dcim.device` | the device itself |
-| `dcim.interface` | the interface's parent device |
+| `dcim.interface` / `dcim.rearport` / `dcim.frontport` | the parent device |
+| `dcim.cable` | both termination devices |
+| `ipam.vrf` | devices with an interface in the VRF |
+| `ipam.prefix` | devices in the prefix's scope (site/location/region) |
+| `ipam.ipaddress` | the interface's device |
+| `extras.configcontext` | devices matching the context's scope (locations/roles/platforms/tenants/tags…) |
 | `netbox_bgp.bgpsession` | the session's device |
-| `netbox_nv_config_manager.overlayassignment` | the assigned device, or the assigned interface's device (resolved via REST) |
+| `netbox_nv_config_manager.overlayassignment` | the assigned device, or the assigned interface's device |
+| `netbox_nv_config_manager.deviceconfigstatus` | the device |
 
-Object types whose fan-out needs cross-object queries (prefix / vrf / ipaddress /
-cable / config-context) are intentionally not registered yet.
+This mirrors the reference Nautobot provider's coverage, mapped to NetBox.
+Cross-object handlers skip `delete` events (the object can no longer be resolved)
+and are best-effort. Nautobot object types with **no NetBox equivalent** are
+deliberately not registered: `dcim.cablepath` (NetBox `CablePath` is internal),
+`dcim.deviceredundancygroup` (no NetBox model), and BGP `bgproutinginstance` /
+`peerendpoint` (`netbox-bgp` has no routing-instance or peer-endpoint model — a
+session carries its device directly).
 
 ## Test the basics without NVCM core
 

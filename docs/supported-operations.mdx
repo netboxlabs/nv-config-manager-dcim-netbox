@@ -1,0 +1,84 @@
+---
+title: Supported operations & NetBox semantics
+sidebar-title: Supported operations
+position: 12
+---
+
+The `netbox` provider implements the **entire** `DCIMClient` protocol (73
+operations) against native NetBox REST and GraphQL — there are **no**
+`DCIMOperationNotSupportedError` stubs. This page catalogs the operation surface
+and the NetBox-specific semantics an integrator needs to know; for the
+render-data field mapping see [NetBox data mapping](./netbox-data-mapping.mdx).
+
+## Operation surface
+
+| Group | Operations | NetBox note |
+| --- | --- | --- |
+| **Lifecycle / transport** (2) | `close`, `get_device_ui_url` | UI URL uses `public_url`. |
+| **Device inventory & selection** (10) | `get_device_metadata`, `get_managed_device_metadata`, `get_device_serial`, `get_device_selection_by_name`, `list_devices`, `get_device_interfaces`, `get_network_device`, `get_network_devices`, `get_host_device`, `get_host_devices` | `list_devices` returns only devices with a **primary IP**. |
+| **Reference lookups** (6) | `list_locations`, `list_tenants`, `list_roles`, `list_namespace_tags`, `list_overlays`, `list_statuses` | `list_statuses` reads OPTIONS choices; namespaces are VRF tags. |
+| **Render** (2) | `get_render_data`, `get_intended_interface_neighbors` | Returns the provider-neutral `RenderData`; portable REST + one GraphQL query. |
+| **Config lifecycle / state** (9) | `get_render_device_status`, `get_render_enabled_device_ids`, `get_render_template_versions`, `upsert_intended_configuration`, `update_render_template_version`, `get_backup_enabled_device_ids`, `get_configuration_backup_metadata`, `record_configuration_backup`, `has_recorded_config_drift` | Backed by the plugin's `DeviceConfigStatus` / `IntendedConfig` / `BackupConfig` models, not device custom fields. |
+| **DHCP** (4) | `get_dhcp_site_options`, `get_dhcp_contexts`, `get_dhcp_static_data`, `get_dhcp_auto_subnets` | **Read-only** (generates Kea config); does not write DCIM. |
+| **ZTP** (2) | `get_ztp_device`, `mark_ztp_device_provisioned` | `provisioned` maps to NetBox status `active`. |
+| **Firmware** (4) | `get_os_image_versions`, `set_intended_os_image`, `get_firmware_bundle`, `set_device_firmware_intent` | Sourced from the merged `config_context`. |
+| **Hosts / MAC correlation** (6) | `find_host_devices_by_mac`, `update_dpu_device_inventory`, `get_interface_hosts_by_mac`, `get_host_metadata_by_macs`, `get_host_metadata_by_names`, `get_connected_switch_port_by_remote_mac` | MAC is a first-class `MACAddress` object. |
+| **Secrets** (3) | `get_device_password_mapping_users`, `get_device_secret_versions`, `get_device_password_secret_names` | Returns secret **references** from `config_context`; no secret store. |
+| **IPAM / VRF** (4) | `get_device_vrfs`, `assign_vrf_to_device`, `assign_vrf_to_interface`, `get_namespace_route_distinguishers` | `assign_vrf_to_device` sets the VRF on **all** the device's interfaces. |
+| **Spectrum-X overlays** (5) | `get_spectrum_x_vrfs`, `provision_spectrum_x_vrf`, `delete_spectrum_x_vrf`, `delete_spectrum_x_overlay_if_unused`, `reconcile_spectrum_x_overlay_assignments` | One VRF per tenant (no NetBox Namespace); overlays live in the fabric plugin. |
+| **InfiniBand** (16) | `get_ib_switch_topology`, `get_ib_interface_guid(s)`, `set_ib_interface_guid`, `get_ib_interface_records`, `find_ib_interfaces_by_guids`, `ensure_ib_pkey_partition`, `ensure_orphan_ib_pkey`, `cleanup_ib_pkey_partition`, `ensure_ib_pkey_assignments`, `remove_ib_pkey_assignments`, `get_ib_pkey_assignments`, `sync_ib_pkey_assignments`, `canonicalize_ib_host`, `resolve_ib_host_site`, `resolve_ib_pkey_context` | PKeys/partitions are plugin models; hosts resolve by name or primary IPv4. |
+
+Provider-lifecycle methods (outside `DCIMClient`): `validate_settings`,
+`create_client`, `normalize_event`, `register_render_event_handlers`.
+
+## NetBox-specific semantics
+
+Because NetBox and Nautobot model DCIM differently, several operations map to a
+NetBox-native concept rather than a 1:1 equivalent:
+
+- **IPAM namespace = VRF.** NetBox has no first-class `Namespace`; a namespace
+  (an isolated zone of unique IP space) is modeled as a **VRF**. A namespace
+  *zone* is a set of VRFs sharing a `namespace_tag`; `list_namespace_tags` /
+  `get_namespace_route_distinguishers` operate on that tag.
+- **`assign_vrf_to_device` → all interfaces.** NetBox has no device↔VRF link
+  (VRFs attach to interfaces/prefixes/IPs), so the VRF is set on every one of the
+  device's interfaces — which is exactly how `get_device_vrfs` reads them back.
+- **Statuses** are per-model **choice fields**, not `Status` objects. Extensible
+  fields (`Device`/`IPAddress`/`Prefix`/`VLAN`/BGP `Session`) are extended via
+  `FIELD_CHOICES`; models with no status field (Interface/VRF/ASN) use the
+  `nvcm_status` custom field; `dcim.cable` remaps `active` → `connected`.
+  `list_statuses` reads them from the endpoint's `OPTIONS` response and returns
+  the status **value** (e.g. `active`), which round-trips into `?status=` filters.
+- **MAC = `MACAddress` model.** NetBox 4.x has no scalar `interface.mac_address`;
+  MACs are `MACAddress` objects with the interface's `primary_mac_address`
+  pointing at one. `update_dpu_device_inventory` upserts them.
+- **Secrets are references.** The secret operations return *which* secret / *which*
+  version (from `config_context`), never secret material. NetBox is not the secret
+  store, and `netbox-secrets` is not required.
+- **`list_devices` requires a primary IP.** Devices without a primary IP are
+  intentionally excluded from selection (faithful to the reference).
+- **BGP via `netbox-bgp`, REST only.** The plugin exposes no GraphQL, so BGP is
+  read over REST (`plugins/bgp/session/`); a session has no VRF association.
+- **"Site" is a NetBox Location name.** Overlay/Spectrum-X operations key on
+  `dcim.Location` (the `Overlay.location` FK); a NetBox *Site* name resolves only
+  if a Location of that name exists.
+- **Interface `role`** has no native NetBox field and is not currently emitted.
+- **Cabling requires both ends.** A `connected_interface` to a device that isn't
+  modeled in NetBox cannot form a cable, so those far-ends are not populated
+  (a NetBox data-model difference, not a data error).
+
+## Explicitly unsupported / defaulted
+
+- **Unsupported operations:** none — the full `DCIMClient` protocol is
+  implemented. (Nautobot-only optional adapters `create_nautobot_mcp_client` /
+  the MCP client are correctly not implemented.)
+- **SDK-default render sections** (returned as empty defaults, not sourced from
+  NetBox): console-server ports, interface `connected_interface`/`member_interfaces`,
+  `l2_vni_vrfs`, location route-servers/WAN topology, and `plugin_data` extensions.
+  See the "not yet populated" markers in [NetBox data mapping](./netbox-data-mapping.mdx).
+
+## Required permissions & event delivery
+
+The NetBox API-token permissions each operation group needs, and how change
+events reach the render service, are documented in the provider
+[README](../README.md) (*Required NetBox permissions* and *Event delivery*).
