@@ -104,7 +104,11 @@ _REST_MAP = {
     ],
     "ipam/vrfs/": [{"id": 8, "name": "Tenant-A", "rd": "65000:1"}],
     "ipam/prefixes/": [
-        {"prefix": "10.0.0.0/24", "role": {"value": "loopback"}, "tags": [{"name": "mgmt"}]},
+        {
+            "prefix": "10.0.0.0/24",
+            "role": {"name": "Loopback", "slug": "loopback"},
+            "tags": [{"name": "mgmt"}],
+        },
         {"prefix": "10.0.0.4/31"},
     ],
     "ipam/vlans/": [
@@ -199,7 +203,7 @@ async def test_get_render_data_assembles_typed_sections():
     assert rd.location.location.kind == "Site" and rd.location.location.name == "DM-Akron"
     prefixes = rd.location.address_space.prefixes
     assert str(prefixes[0].prefix) == "10.0.0.0/24"
-    assert prefixes[0].role == "loopback" and prefixes[0].tags == ("mgmt",)
+    assert prefixes[0].role == "Loopback" and prefixes[0].tags == ("mgmt",)
     data_vlan = next(v for v in rd.location.address_space.vlans if v.vlan.vid == 100)
     assert tuple(str(h) for h in data_vlan.helper_addresses) == ("10.0.0.53",)
     assert rd.location.routing.site_asn == "65000"

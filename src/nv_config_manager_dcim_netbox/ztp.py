@@ -8,11 +8,15 @@ from nv_config_manager_dcim import DCIMInvalidDataError, DCIMNotFoundError, ZTPD
 
 from nv_config_manager_dcim_netbox._mappers import strip_mask
 
-# NetBox has no "provisioned" status by default. Stock
-# NetBox statuses are: offline, active, planned, staged, failed, inventory,
-# decommissioning. "active" is the closest post-provisioning state; make this a
-# configured status if a dedicated "provisioned" choice is added.
-ZTP_PROVISIONED_STATUS = "active"
+# NetBox has no "provisioned" device status out of the box (stock statuses:
+# offline, active, planned, staged, failed, inventory, decommissioning). NVCM
+# adds one via netbox_nv_config_manager's FIELD_CHOICES (an extensible
+# `dcim.Device.status+` choice). Writing "provisioned" makes the device status
+# field a real ZTP signal — distinct from the pre-ZTP "provisioning"/"active"
+# state — instead of every device looking "active" forever. This REQUIRES the
+# target NetBox to register that choice (see the plugin's field_choices.py); a
+# NetBox without it will reject the status write with a 400.
+ZTP_PROVISIONED_STATUS = "provisioned"
 
 _ZTP_DEVICE_QUERY = """
 query ($id: ID!) {

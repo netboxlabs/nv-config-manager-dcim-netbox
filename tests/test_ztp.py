@@ -36,4 +36,4 @@ async def test_mark_ztp_device_provisioned_patches_status():
     assert len(calls) == 1
     method, path, body = calls[0]
     assert method == "PATCH" and path == "dcim/devices/7/"
-    assert "status" in body and body["status"]
+    assert body["status"] == "provisioned"

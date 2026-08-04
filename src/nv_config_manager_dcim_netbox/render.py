@@ -644,7 +644,10 @@ class NetBoxRenderMixin:
         render_prefixes = tuple(
             RenderPrefix(
                 prefix=p["prefix"],
-                role=_choice_value(p.get("role")) or None if p.get("role") else None,
+                # A Prefix role is a related object ({name, slug}), NOT a choice
+                # field ({value, label}); use the name so the `site_aggregates`
+                # template filter (matches role by name) can find it.
+                role=_str_or_none((p.get("role") or {}).get("name")),
                 tags=_tags(p),
             )
             for p in prefixes
