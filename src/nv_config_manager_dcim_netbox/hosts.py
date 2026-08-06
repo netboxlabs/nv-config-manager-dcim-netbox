@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from nv_config_manager_dcim import DCIMNotFoundError
@@ -82,10 +83,20 @@ class NetBoxHostsMixin:
         interface, not a scalar field. Each interface MAC is therefore upserted
         (reused if already present on the interface) and set as the interface's
         ``primary_mac_address``.
+
+        NOTE: this is several writes with no transaction — NetBox's REST API offers
+        none across objects. A failure part-way leaves the serial applied and some
+        MACs unset; the operation is idempotent, so the fix is to re-run it.
         """
         await self.rest_request("PATCH", f"dcim/devices/{device_id}/", json={"serial": serial})
-        for interface_id, mac_address in interface_macs.items():
-            await self._set_interface_primary_mac(str(interface_id), mac_address)
+        # Each interface's upsert is independent (2-3 round trips apiece), so run
+        # them concurrently rather than serially per interface.
+        await asyncio.gather(
+            *(
+                self._set_interface_primary_mac(str(interface_id), mac_address)
+                for interface_id, mac_address in interface_macs.items()
+            )
+        )
         return await self.get_host_device(str(device_id))
 
     async def _set_interface_primary_mac(self, interface_id: str, mac_address: str) -> None:

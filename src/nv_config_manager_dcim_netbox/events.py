@@ -11,12 +11,15 @@ companion plugin's ``EVENTS_PIPELINE`` bridge and validated by
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
 from nv_config_manager_dcim import RenderEventRequest
 
+from nv_config_manager_dcim_netbox._mappers import fk_id as _fk_id
 from nv_config_manager_dcim_netbox.client import encode_device_id
+from nv_config_manager_dcim_netbox.fabric_common import BGP_SESSIONS_PATH
 
 if TYPE_CHECKING:
     from nv_config_manager_dcim import DCIMChangeEvent, DCIMClient, DCIMRenderEventRegistry
@@ -29,39 +32,44 @@ def _commit_message(event: DCIMChangeEvent) -> str:
 
 
 def _record_device_id(event: DCIMChangeEvent):
-    device = (event.record or {}).get("device")
-    return device.get("id") if isinstance(device, dict) else device
+    return _fk_id((event.record or {}).get("device"))
+
+
+def _encoded(device_id) -> str | None:
+    """UUID-encode a NetBox device id, or ``None`` if it is not a NetBox PK.
+
+    A malformed id in an event envelope must drop that fan-out, not raise into the
+    dispatcher — the cross-object handlers are already best-effort and the
+    device/parent handlers should behave the same way.
+    """
+    try:
+        return encode_device_id(device_id)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring unusable NetBox device id in change event: %r", device_id)
+        return None
 
 
 def _requests(event: DCIMChangeEvent, device_id) -> tuple[RenderEventRequest, ...]:
     if not device_id:
         return ()
-    return (
-        RenderEventRequest(
-            device_id=encode_device_id(device_id), commit_message=_commit_message(event)
-        ),
-    )
+    return _requests_multi(event, [device_id])
 
 
 async def _device_changed(event: DCIMChangeEvent, client: DCIMClient):
     return _requests(event, event.object_id)
 
 
-def _fk_id(value):
-    """Return the id from a nested ``{"id": …}`` object or a bare PK int."""
-    return value.get("id") if isinstance(value, dict) else value
-
-
 def _requests_multi(event: DCIMChangeEvent, device_ids) -> tuple[RenderEventRequest, ...]:
-    """One deduplicated render request per affected device."""
+    """One deduplicated render request per affected device (input order preserved)."""
     message = _commit_message(event)
-    seen: list[str] = []
+    encoded = {}
     for device_id in device_ids:
-        if device_id and str(device_id) not in seen:
-            seen.append(str(device_id))
+        if device_id and str(device_id) not in encoded:
+            encoded[str(device_id)] = _encoded(device_id)
     return tuple(
-        RenderEventRequest(device_id=encode_device_id(device_id), commit_message=message)
-        for device_id in seen
+        RenderEventRequest(device_id=uuid_id, commit_message=message)
+        for uuid_id in encoded.values()
+        if uuid_id is not None
     )
 
 
@@ -176,8 +184,10 @@ async def _bgp_asn_devices(event, client):
     # session endpoint's local_as_id / remote_as_id filters AND when combined, so
     # query each separately and union the owning devices.
     asn_id = str(event.object_id)
-    local = await client.rest_list("plugins/bgp/session/", [("local_as_id", asn_id)])
-    remote = await client.rest_list("plugins/bgp/session/", [("remote_as_id", asn_id)])
+    local, remote = await asyncio.gather(
+        client.rest_list(BGP_SESSIONS_PATH, [("local_as_id", asn_id)]),
+        client.rest_list(BGP_SESSIONS_PATH, [("remote_as_id", asn_id)]),
+    )
     return {_fk_id(session.get("device")) for session in (*local, *remote)}
 
 
@@ -185,9 +195,7 @@ async def _bgp_peer_group_devices(event, client):
     # A shared netbox-bgp ``BGPPeerGroup`` is referenced by many sessions; editing
     # it must re-render each referencing session's device. Resolve peer group ->
     # sessions (peer_group=<pk>) -> devices.
-    sessions = await client.rest_list(
-        "plugins/bgp/session/", [("peer_group", str(event.object_id))]
-    )
+    sessions = await client.rest_list(BGP_SESSIONS_PATH, [("peer_group", str(event.object_id))])
     return {_fk_id(session.get("device")) for session in sessions}
 
 
@@ -199,6 +207,14 @@ async def _config_context_devices(event, client):
             value = item.get("slug") if param == "tag" else item.get("id")
             if value is not None:
                 filters.append((param, str(value)))
+    if not filters:
+        # A context with no scope assignments genuinely applies to every device, so
+        # this correctly fans out fleet-wide — but that is an unbounded render
+        # burst, so make it visible rather than silent.
+        logger.warning(
+            "Config context %s has no scope assignments; fanning out to every device",
+            event.object_id,
+        )
     devices = await client.rest_list("dcim/devices/", filters)
     return {device.get("id") for device in devices}
 

@@ -133,9 +133,7 @@ async def test_explicit_gateway_by_ip_id_is_resolved_and_validated():
 
     bad = fake_client(rest_get={"ipam/ip-addresses/42/": {"address": "192.168.0.1/24"}})
     with pytest.raises(DCIMInvalidDataError):
-        await bad._gateway_address(
-            {"prefix": "10.0.0.0/24", "custom_fields": {"nvcm_gateway": 42}}
-        )
+        await bad._gateway_address({"prefix": "10.0.0.0/24", "custom_fields": {"nvcm_gateway": 42}})
 
 
 async def test_gateway_derived_when_unset():

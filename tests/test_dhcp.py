@@ -32,9 +32,7 @@ async def test_get_dhcp_contexts():
     client = _client(rest_list={"dcim/devices/": [{"id": 1, "config_context": {"x": 1}}]})
     # Keyed by the UUID-encoded device id so it matches the (UUID-encoded) device_id
     # the confgen reads from reservations/option-candidates when resolving options.
-    assert await client.get_dhcp_contexts() == {
-        "00000000-0000-0000-0000-000000000001": {"x": 1}
-    }
+    assert await client.get_dhcp_contexts() == {"00000000-0000-0000-0000-000000000001": {"x": 1}}
 
 
 async def test_get_dhcp_auto_subnets():

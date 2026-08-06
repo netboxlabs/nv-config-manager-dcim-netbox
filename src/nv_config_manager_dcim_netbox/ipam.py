@@ -4,7 +4,12 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from nv_config_manager_dcim import DeviceVRF, NamespaceRouteDistinguisher
+
+from nv_config_manager_dcim_netbox._mappers import fk_id, tag_names
+from nv_config_manager_dcim_netbox.fabric_common import INTERFACES_PATH, VRFS_PATH
 
 # NetBox has no first-class IPAM "namespace" object: NetBox models a namespace
 # (an isolated zone of unique IP space) *as* a VRF. There is no grouping
@@ -12,19 +17,6 @@ from nv_config_manager_dcim import DeviceVRF, NamespaceRouteDistinguisher
 # should hold unique route distinguishers — is emulated with a NetBox **tag**
 # applied to those VRFs. ``namespace_tag`` selects that zone; each VRF in it is
 # itself a namespace carrying one route distinguisher.
-VRFS_PATH = "ipam/vrfs/"
-
-
-def _vrf_tag_names(vrf: dict) -> set[str]:
-    """Return the tag names and slugs on a VRF (match on either)."""
-    names: set[str] = set()
-    for tag in vrf.get("tags") or []:
-        if isinstance(tag, dict):
-            for key in ("name", "slug"):
-                value = tag.get(key)
-                if isinstance(value, str) and value:
-                    names.add(value)
-    return names
 
 
 class NetBoxIPAMMixin:
@@ -38,7 +30,7 @@ class NetBoxIPAMMixin:
         # exactly how ``assign_vrf_to_device`` writes them back. There is no
         # device-level VRF set to union in unless a future plugin exposes one;
         # if it does, merge it into ``vrfs`` below (guarded on its presence).
-        interfaces = await self.rest_list("dcim/interfaces/", [("device_id", str(device_id))])
+        interfaces = await self.rest_list(INTERFACES_PATH, [("device_id", str(device_id))])
         vrfs: dict[str, str] = {}
         for interface in interfaces:
             vrf = interface.get("vrf")
@@ -56,19 +48,27 @@ class NetBoxIPAMMixin:
         calls don't emit redundant changes.
         """
         target = int(vrf_id)
-        interfaces = await self.rest_list("dcim/interfaces/", [("device_id", str(device_id))])
-        for interface in interfaces:
-            current = interface.get("vrf")
-            current_id = current.get("id") if isinstance(current, dict) else current
-            if current_id == target:
-                continue
-            await self.rest_request(
-                "PATCH", f"dcim/interfaces/{interface['id']}/", json={"vrf": target}
+        interfaces = await self.rest_list(INTERFACES_PATH, [("device_id", str(device_id))])
+        stale = [
+            interface
+            for interface in interfaces
+            # str-compare: the FK may arrive nested or bare, and as int or str.
+            if str(fk_id(interface.get("vrf"))) != str(target)
+        ]
+        # Independent PATCHes: issue them together rather than one round trip per
+        # interface (a spine can carry hundreds).
+        await asyncio.gather(
+            *(
+                self.rest_request(
+                    "PATCH", f"{INTERFACES_PATH}{interface['id']}/", json={"vrf": target}
+                )
+                for interface in stale
             )
+        )
 
     async def assign_vrf_to_interface(self, interface_id: str, vrf_id: str) -> None:
         await self.rest_request(
-            "PATCH", f"dcim/interfaces/{interface_id}/", json={"vrf": int(vrf_id)}
+            "PATCH", f"{INTERFACES_PATH}{interface_id}/", json={"vrf": int(vrf_id)}
         )
 
     async def get_namespace_route_distinguishers(
@@ -94,5 +94,5 @@ class NetBoxIPAMMixin:
                 route_distinguishers=(vrf["rd"],) if vrf.get("rd") else (),
             )
             for vrf in vrfs
-            if namespace_tag in _vrf_tag_names(vrf)
+            if namespace_tag in tag_names(vrf)
         ]

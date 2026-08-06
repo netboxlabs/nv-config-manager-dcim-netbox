@@ -29,6 +29,7 @@ default empty models; they remain optional until a filter requires them.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 from typing import TYPE_CHECKING, Any
 
@@ -75,7 +76,15 @@ from nv_config_manager_dcim import (
     RenderVrf,
 )
 
+from nv_config_manager_dcim_netbox._mappers import choice_str, fk_id
 from nv_config_manager_dcim_netbox.client import decode_device_id
+from nv_config_manager_dcim_netbox.fabric_common import (
+    BGP_SESSIONS_PATH,
+    NVLINK_DOMAINS_PATH,
+    PREFIXES_PATH,
+    VLANS_PATH,
+    VRFS_PATH,
+)
 
 if TYPE_CHECKING:
     from nv_config_manager_dcim import RenderDataRequest
@@ -182,18 +191,6 @@ def _str_or_none(value: Any) -> str | None:
     return str(value) if value not in (None, "") else None
 
 
-def _choice_value(value: Any) -> str:
-    """Normalize a NetBox status/choice (``{'value': ...}`` or a bare string)."""
-    if isinstance(value, dict):
-        return str(value.get("value") or value.get("label") or "")
-    return str(value or "")
-
-
-def _ref_id(value: Any) -> Any:
-    """Return an object id from a nested dict (``{'id': ...}``) or a bare id."""
-    return value.get("id") if isinstance(value, dict) else value
-
-
 def _ref_addr(value: Any) -> Any:
     """Return an address from a nested dict (``{'address': ...}``) or a bare value."""
     return value.get("address") if isinstance(value, dict) else value
@@ -259,7 +256,7 @@ def _render_ip(addr: str, role: Any, site_networks: list[Any]) -> RenderIPAddres
         address=str(iface),
         host=str(host),
         version=host.version,
-        role=_choice_value(role) or None if role else None,
+        role=choice_str(role) or None if role else None,
         parent_prefixes=tuple(str(net) for net in parents),
     )
 
@@ -447,7 +444,7 @@ def _bgp_instances(
         if local_asn is None:
             continue
         inst = instances.setdefault(
-            local_asn, {"status": _choice_value(session.get("status")) or "active", "peers": []}
+            local_asn, {"status": choice_str(session.get("status")) or "active", "peers": []}
         )
         remote = (session.get("remote_address") or {}).get("address")
         peer_ipv4 = peer_ipv6 = None
@@ -463,7 +460,7 @@ def _bgp_instances(
         inst["peers"].append(
             RenderBGPPeer(
                 name=session.get("name") or f"peer-{session.get('id')}",
-                status=_choice_value(session.get("status")) or "active",
+                status=choice_str(session.get("status")) or "active",
                 description=session.get("description") or "",
                 peer_group=(session.get("peer_group") or {}).get("name") or "",
                 peer_role="",
@@ -493,8 +490,12 @@ def _bgp_instances(
 # ``{ipv4: [...], ipv6: [...]}`` mappings, not flat lists.
 
 
-def _endpoint_set(value: Any) -> RenderEndpointSet | None:
-    """Build a :class:`RenderEndpointSet` from a ``{ipv4, ipv6}`` context value."""
+def _address_family_set(value: Any, model: type, described_as: str):
+    """Build a ``{ipv4, ipv6}`` context value into ``model``, or ``None`` if empty.
+
+    Shared by the endpoint (host addresses) and prefix (CIDR) sets — the two
+    differ only in which SDK model validates the values.
+    """
     if not isinstance(value, dict):
         return None
     ipv4 = tuple(str(x) for x in value.get("ipv4") or ())
@@ -502,27 +503,19 @@ def _endpoint_set(value: Any) -> RenderEndpointSet | None:
     if not ipv4 and not ipv6:
         return None
     try:
-        return RenderEndpointSet(ipv4=ipv4, ipv6=ipv6)
+        return model(ipv4=ipv4, ipv6=ipv6)
     except ValueError as exc:
-        raise DCIMInvalidDataError(
-            f"config_context endpoint set has invalid addresses: {exc}"
-        ) from exc
+        raise DCIMInvalidDataError(f"config_context {described_as}: {exc}") from exc
+
+
+def _endpoint_set(value: Any) -> RenderEndpointSet | None:
+    """Build a :class:`RenderEndpointSet` from a ``{ipv4, ipv6}`` context value."""
+    return _address_family_set(value, RenderEndpointSet, "endpoint set has invalid addresses")
 
 
 def _prefix_set(value: Any) -> RenderPrefixSet | None:
     """Build a :class:`RenderPrefixSet` from a ``{ipv4, ipv6}`` context value."""
-    if not isinstance(value, dict):
-        return None
-    ipv4 = tuple(str(x) for x in value.get("ipv4") or ())
-    ipv6 = tuple(str(x) for x in value.get("ipv6") or ())
-    if not ipv4 and not ipv6:
-        return None
-    try:
-        return RenderPrefixSet(ipv4=ipv4, ipv6=ipv6)
-    except ValueError as exc:
-        raise DCIMInvalidDataError(
-            f"config_context prefix set has invalid prefixes: {exc}"
-        ) from exc
+    return _address_family_set(value, RenderPrefixSet, "prefix set has invalid prefixes")
 
 
 def _services_from_context(context: dict[str, Any]) -> RenderServicesData:
@@ -680,13 +673,19 @@ class NetBoxRenderMixin:
             return []
 
     async def _assigned_overlay_ids(self, device_id: str, interface_ids: set[str]) -> set[str]:
-        """Return the ids of overlays assigned to this device or its interfaces."""
+        """Return the ids of overlays assigned to this device or its interfaces.
+
+        ``assigned_object_id`` is multi-valued (repeated params OR), so the device
+        and all its interfaces are resolved in one query rather than one per
+        interface — a switch with 64 ports made 65 round trips here.
+        """
         object_ids = [str(device_id), *sorted(interface_ids)]
-        assignments: dict[Any, dict[str, Any]] = {}
-        for object_id in object_ids:
-            rows = await self._safe_list(self.ASSIGNMENTS_PATH, [("assigned_object_id", object_id)])
-            for row in rows:
-                assignments[row["id"]] = row
+        rows = await self._safe_list(
+            self.ASSIGNMENTS_PATH, [("assigned_object_id", i) for i in object_ids]
+        )
+        assignments: dict[Any, dict[str, Any]] = {
+            row["id"]: row for row in rows if row.get("id") is not None
+        }
         overlay_ids: set[str] = set()
         for assignment in assignments.values():
             ctype = assignment.get("assigned_object_type")
@@ -694,7 +693,7 @@ class NetBoxRenderMixin:
             matches_device = ctype == "dcim.device" and assigned_id == str(device_id)
             matches_iface = ctype == "dcim.interface" and assigned_id in interface_ids
             if matches_device or matches_iface:
-                overlay_id = _ref_id(assignment.get("overlay"))
+                overlay_id = fk_id(assignment.get("overlay"))
                 if overlay_id is not None:
                     overlay_ids.add(str(overlay_id))
         return overlay_ids
@@ -716,32 +715,33 @@ class NetBoxRenderMixin:
         overlay_ids = await self._assigned_overlay_ids(device_id, interface_ids)
         if not overlay_ids:
             return RenderOverlayData()
-        overlays = {
-            str(o["id"]): o
-            for o in await self._safe_list(self.OVERLAYS_PATH)
-            if o.get("id") is not None
-        }
-        vxlans = [
-            v
-            for v in await self._safe_list(self.VXLANS_PATH)
-            if str(_ref_id(v.get("overlay"))) in overlay_ids
-        ]
-        vrf_map = await self._id_map(
-            "ipam/vrfs/", {str(_ref_id(v.get("vrf"))) for v in vxlans if v.get("vrf")}
+        # Scope both reads to the assigned overlays server-side; fetching the whole
+        # overlay and VXLAN tables to filter in Python does not scale with fabric size.
+        overlay_params = [("id", i) for i in sorted(overlay_ids)]
+        vxlan_params = [("overlay_id", i) for i in sorted(overlay_ids)]
+        overlay_rows, vxlan_rows = await asyncio.gather(
+            self._safe_list(self.OVERLAYS_PATH, overlay_params),
+            self._safe_list(self.VXLANS_PATH, vxlan_params),
         )
-        vlan_map = await self._id_map(
-            "ipam/vlans/", {str(_ref_id(v.get("vlan"))) for v in vxlans if v.get("vlan")}
+        overlays = {str(o["id"]): o for o in overlay_rows if o.get("id") is not None}
+        # Belt-and-braces: keep the client-side scope check in case an endpoint
+        # ignores the filter (the whole point is that a device must not receive
+        # every fabric VNI).
+        vxlans = [v for v in vxlan_rows if str(fk_id(v.get("overlay"))) in overlay_ids]
+        vrf_map, vlan_map = await asyncio.gather(
+            self._id_map(VRFS_PATH, {str(fk_id(v.get("vrf"))) for v in vxlans if v.get("vrf")}),
+            self._id_map(VLANS_PATH, {str(fk_id(v.get("vlan"))) for v in vxlans if v.get("vlan")}),
         )
 
         l2: list[RenderL2Vni] = []
         l3: list[RenderL3Vni] = []
         for vxlan in vxlans:
             overlay_name = _str_or_none(
-                (overlays.get(str(_ref_id(vxlan.get("overlay")))) or {}).get("name")
+                (overlays.get(str(fk_id(vxlan.get("overlay")))) or {}).get("name")
             )
             vnid = vxlan.get("vnid")
             if vxlan.get("vni_type") == "l3":
-                vrf = _render_vrf(vrf_map.get(str(_ref_id(vxlan.get("vrf")))))
+                vrf = _render_vrf(vrf_map.get(str(fk_id(vxlan.get("vrf")))))
                 if vrf is None:
                     continue
                 l3.append(
@@ -753,7 +753,7 @@ class NetBoxRenderMixin:
                     )
                 )
             else:
-                vlan = _render_vlan(vlan_map.get(str(_ref_id(vxlan.get("vlan")))))
+                vlan = _render_vlan(vlan_map.get(str(fk_id(vxlan.get("vlan")))))
                 if vlan is None:
                     continue
                 l2.append(
@@ -767,12 +767,20 @@ class NetBoxRenderMixin:
                 )
         return RenderOverlayData(l2_vnis=tuple(l2), l3_vnis=tuple(l3))
 
-    async def _location_address_space(self, site_id: str | None) -> RenderLocationAddressSpace:
-        """Site prefixes (role/tags) and VLANs (with plugin DHCP helper addresses)."""
+    async def _location_address_space(
+        self, site_id: str | None, prefixes: list[dict[str, Any]] | None = None
+    ) -> RenderLocationAddressSpace:
+        """Site prefixes (role/tags) and VLANs (with plugin DHCP helper addresses).
+
+        ``prefixes`` may be supplied by a caller that has already fetched the
+        site's prefixes (``get_render_data`` needs them for address ancestry), so
+        the same query is not issued twice per render.
+        """
         if not site_id:
             return RenderLocationAddressSpace()
-        prefixes = await self._safe_list("ipam/prefixes/", [("site_id", site_id)])
-        vlans = await self._safe_list("ipam/vlans/", [("site_id", site_id)])
+        if prefixes is None:
+            prefixes = await self._safe_list(PREFIXES_PATH, [("site_id", site_id)])
+        vlans = await self._safe_list(VLANS_PATH, [("site_id", site_id)])
         render_prefixes = tuple(
             RenderPrefix(
                 prefix=p["prefix"],
@@ -817,9 +825,11 @@ class NetBoxRenderMixin:
         device_location, site_location = _location_hierarchy(device)
         site_id = site_location.id
 
-        # Site prefixes double as the ancestry source for interface addresses.
+        # Site prefixes double as the ancestry source for interface addresses, so
+        # they are fetched once here and handed to _location_address_space rather
+        # than queried again there.
         site_prefixes = (
-            await self._safe_list("ipam/prefixes/", [("site_id", site_id)]) if site_id else []
+            await self._safe_list(PREFIXES_PATH, [("site_id", site_id)]) if site_id else []
         )
         site_networks = [
             ipaddress.ip_network(p["prefix"], strict=False)
@@ -827,16 +837,15 @@ class NetBoxRenderMixin:
             if p.get("prefix")
         ]
 
-        bgp_sessions = await self._safe_list(
-            "plugins/bgp/session/", [("device_id", str(device_id))]
-        )
-        overlays = await self._overlays(device_id, interface_ids)
-        address_space = await self._location_address_space(site_id)
-
-        # NVLink topology comes from the device's NVLink domain (plugin model).
-        # The NVSwitch fabric-manager templates require network.nvlink_topology.
-        nvlink_domains = await self._safe_list(
-            "plugins/nv-config-manager/nvlink-domains/", [("device_id", str(device_id))]
+        # These four reads are independent of one another; run them concurrently
+        # rather than serialising four round trips per render.
+        bgp_sessions, overlays, address_space, nvlink_domains = await asyncio.gather(
+            self._safe_list(BGP_SESSIONS_PATH, [("device_id", str(device_id))]),
+            self._overlays(device_id, interface_ids),
+            self._location_address_space(site_id, site_prefixes if site_id else None),
+            # NVLink topology comes from the device's NVLink domain (plugin model).
+            # The NVSwitch fabric-manager templates require network.nvlink_topology.
+            self._safe_list(NVLINK_DOMAINS_PATH, [("device_id", str(device_id))]),
         )
         nvlink_topology = (
             _str_or_none(nvlink_domains[0].get("topology")) if nvlink_domains else None
@@ -887,7 +896,7 @@ class NetBoxRenderMixin:
         for interface in device.get("interfaces") or []:
             if not interface.get("enabled", True):
                 continue
-            tags = tuple(tag["name"] for tag in interface.get("tags") or [] if tag.get("name"))
+            tags = _tags(interface)
             endpoint = next(iter(interface.get("connected_endpoints") or []), None)
             if not endpoint:
                 neighbors.append(IntendedInterfaceNeighbor(name=interface["name"], tags=tags))

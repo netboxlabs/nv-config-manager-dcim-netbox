@@ -20,7 +20,21 @@ async def test_get_render_template_versions():
         }
     )
     result = await client.get_render_template_versions()
-    assert [(r.device_id, r.template_version) for r in result] == [("5", "v1")]
+    # device_id is UUID-encoded, like every other id handed back to NVCM.
+    assert [(decode_device_id(r.device_id), r.template_version) for r in result] == [("5", "v1")]
+
+
+async def test_get_render_template_versions_reads_nested_device_fk():
+    # The plugin serializer may render `device` as a nested brief object rather
+    # than a bare PK; both shapes must resolve to the same device.
+    client = _client(
+        rest_list={
+            _STATUS: [{"device": {"id": 5, "name": "leaf1"}}],
+            _INTENDED: [{"device": {"id": 5}, "template_version": "v1"}],
+        }
+    )
+    result = await client.get_render_template_versions()
+    assert [(decode_device_id(r.device_id), r.template_version) for r in result] == [("5", "v1")]
 
 
 async def test_update_render_template_version_creates_when_absent():

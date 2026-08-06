@@ -18,11 +18,14 @@ coexist in NetBox; distinct namespaces require distinct values.
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from nv_config_manager_dcim import DCIMConflictError, DCIMInvalidDataError, SpectrumXVRF
 
-from nv_config_manager_dcim_netbox.fabric_common import FABRIC_STATUS
-from nv_config_manager_dcim_netbox.ipam import _vrf_tag_names
+from nv_config_manager_dcim_netbox._mappers import tag_names
+from nv_config_manager_dcim_netbox.fabric_common import FABRIC_STATUS, VRFS_PATH
+
+logger = logging.getLogger(__name__)
 
 _SPECTRUMX_VRFS_QUERY = """
 query ($ids: [ID!]!) {
@@ -58,10 +61,10 @@ class NetBoxSpectrumXMixin:
         for vrf in data.get("vrf_list") or []:
             # Namespace is emulated as a VRF tag; derive it from the data (and
             # apply the namespace filter against it) rather than echoing args.
-            tag_names = _vrf_tag_names(vrf)
-            if namespace and namespace not in tag_names:
+            vrf_tags = tag_names(vrf)
+            if namespace and namespace not in vrf_tags:
                 continue
-            vrf_namespace = namespace or next(iter(sorted(tag_names)), "")
+            vrf_namespace = namespace or next(iter(sorted(vrf_tags)), "")
             interface_rows = vrf.get("interfaces") or []
             interfaces = tuple(
                 f"{(i.get('device') or {}).get('name')}:{i['name']}"
@@ -142,28 +145,21 @@ class NetBoxSpectrumXMixin:
             for namespace in namespaces:
                 vrf = await self.rest_request(
                     "POST",
-                    "ipam/vrfs/",
+                    VRFS_PATH,
                     json={"name": vrf_name, "rd": route_distinguisher, "tenant": tenant_id},
                 )
-                created.append(("ipam/vrfs/", vrf["id"]))
+                created.append((VRFS_PATH, vrf["id"]))
                 if namespace:
                     # Emulate the namespace as a VRF tag (NetBox has no IPAM
                     # namespace). Applied as a follow-up PATCH so the create
                     # payload stays minimal. NOTE: the tag is expected to pre-exist.
                     await self.rest_request(
                         "PATCH",
-                        f"ipam/vrfs/{vrf['id']}/",
+                        f"{VRFS_PATH}{vrf['id']}/",
                         json={"tags": [{"name": namespace}]},
                     )
-                assignment = await self.rest_request(
-                    "POST",
-                    self.ASSIGNMENTS_PATH,
-                    json={
-                        "overlay": overlay_id,
-                        "assigned_object_type": "ipam.vrf",
-                        "assigned_object_id": vrf["id"],
-                        "status": FABRIC_STATUS,
-                    },
+                assignment = await self._create_overlay_assignment(
+                    overlay_id, "ipam.vrf", vrf["id"]
                 )
                 created.append((self.ASSIGNMENTS_PATH, assignment["id"]))
                 vxlan = await self.rest_request(
@@ -181,17 +177,32 @@ class NetBoxSpectrumXMixin:
                 created.append((self.VXLANS_PATH, vxlan["id"]))
         except Exception:
             # Roll back in reverse creation order, overlay last (only if created).
-            for path, obj_id in reversed(created):
-                if obj_id is not None:
-                    await self._safe_delete(f"{path}{obj_id}/")
+            # A rollback failure must never replace the exception that caused it —
+            # the operator needs the original cause, plus a warning that cleanup
+            # left objects behind.
+            rollback = [*reversed(created)]
             if created_overlay_id is not None:
-                await self._safe_delete(f"{self.OVERLAYS_PATH}{created_overlay_id}/")
+                rollback.append((self.OVERLAYS_PATH, created_overlay_id))
+            for path, obj_id in rollback:
+                if obj_id is None:
+                    continue
+                try:
+                    await self._safe_delete(f"{path}{obj_id}/")
+                except Exception:  # noqa: BLE001 - never mask the original failure
+                    logger.exception(
+                        "Spectrum-X rollback could not delete %s%s; it may need removing by hand",
+                        path,
+                        obj_id,
+                    )
             raise
 
     async def delete_spectrum_x_vrf(self, vrf_id: str, vnid: int) -> None:
         vxlans = await self.rest_list(self.VXLANS_PATH, [("vnid", str(vnid))])
         for vxlan in vxlans:
-            if self._fk_id(vxlan.get("vrf")) == int(vrf_id):
+            # str-compare: the VRF FK may arrive nested or bare, int or str. An
+            # int() comparison silently matched nothing for the string shapes,
+            # leaking the VXLAN.
+            if str(self._fk_id(vxlan.get("vrf"))) == str(vrf_id):
                 await self._safe_delete(f"{self.VXLANS_PATH}{vxlan['id']}/")
         assignments = await self.rest_list(
             self.ASSIGNMENTS_PATH, [("assigned_object_id", str(vrf_id))]
@@ -199,7 +210,7 @@ class NetBoxSpectrumXMixin:
         for assignment in assignments:
             if str(assignment.get("assigned_object_type")) == "ipam.vrf":
                 await self._safe_delete(f"{self.ASSIGNMENTS_PATH}{assignment['id']}/")
-        await self._safe_delete(f"ipam/vrfs/{vrf_id}/")
+        await self._safe_delete(f"{VRFS_PATH}{vrf_id}/")
 
     async def delete_spectrum_x_overlay_if_unused(self, overlay_name: str, site: str) -> bool:
         overlay = await self._find_overlay(overlay_name, site)
@@ -224,30 +235,24 @@ class NetBoxSpectrumXMixin:
         present = {
             (str(a.get("assigned_object_type")), str(a["assigned_object_id"])) for a in existing
         }
-        created = 0
+        missing: list[tuple[str, str]] = []
         if ("dcim.device", str(device_id)) not in present:
-            await self._create_assignment(overlay_id, "dcim.device", device_id)
-            created += 1
-        for interface_id in interface_ids:
-            if ("dcim.interface", str(interface_id)) not in present:
-                await self._create_assignment(overlay_id, "dcim.interface", interface_id)
-                created += 1
+            missing.append(("dcim.device", device_id))
+        missing.extend(
+            ("dcim.interface", interface_id)
+            for interface_id in interface_ids
+            if ("dcim.interface", str(interface_id)) not in present
+        )
+        await asyncio.gather(
+            *(
+                self._create_overlay_assignment(overlay_id, object_type, object_id)
+                for object_type, object_id in missing
+            )
+        )
         removed = await self._remove_stale_spx_interface_assignments(overlay_id, interface_ids)
-        return created, removed
+        return len(missing), removed
 
     # -- helpers -------------------------------------------------------------
-
-    async def _create_assignment(self, overlay_id, object_type, object_id):
-        await self.rest_request(
-            "POST",
-            self.ASSIGNMENTS_PATH,
-            json={
-                "overlay": overlay_id,
-                "assigned_object_type": object_type,
-                "assigned_object_id": int(object_id),
-                "status": FABRIC_STATUS,
-            },
-        )
 
     async def _remove_stale_spx_interface_assignments(self, overlay_id, interface_ids) -> int:
         removed = 0

@@ -8,6 +8,9 @@ assignment sweep are stubbed so each test isolates the target method's logic.
 
 from __future__ import annotations
 
+import pytest
+from nv_config_manager_dcim import DCIMConflictError, DCIMInvalidDataError
+
 from tests._fake import fake_client
 
 _VXLANS = "plugins/nv-config-manager/vxlans/"
@@ -133,3 +136,65 @@ async def test_reconcile_creates_missing_assignments():
     assert (created, removed) == (3, 0)  # 1 device + 2 interfaces
     posts = [body for method, path, body in record if method == "POST" and path == _ASSIGN]
     assert len(posts) == 3
+
+
+async def test_provision_rollback_does_not_mask_the_original_failure():
+    """If cleanup itself fails, the caller must still see the exception that caused
+    the rollback — not the cleanup error, which hides the real cause."""
+    record = []
+
+    async def no_overlay(name, location=None):
+        return None
+
+    async def tenant_id(name):
+        return 7
+
+    async def location_id(site):
+        return 3
+
+    client = fake_client(
+        record=record,
+        patch={
+            "_find_overlay": no_overlay,
+            "_resolve_tenant_id": tenant_id,
+            "_resolve_location_id": location_id,
+        },
+    )
+    original = DCIMInvalidDataError("VXLAN vnid already in use")
+
+    async def failing_write(method, path, **kwargs):
+        record.append((method, path, kwargs.get("json")))
+        if method == "POST" and path == _VXLANS:
+            raise original
+        if method == "DELETE":
+            raise DCIMConflictError("cannot delete: still referenced")
+        return {"id": 99}
+
+    client.rest_request = failing_write
+    with pytest.raises(DCIMInvalidDataError) as caught:
+        await client.provision_spectrum_x_vrf(
+            namespaces=["ns1"],
+            route_distinguisher="65001:1500",
+            vnid=1500,
+            overlay_name="SpX",
+            site="rack-1",
+            tenant="tenant-a",
+        )
+    assert caught.value is original
+    # Rollback was still attempted for everything created, overlay last.
+    deleted = [path for method, path, _ in record if method == "DELETE"]
+    assert any(p.startswith(_ASSIGN) for p in deleted)
+    assert any(p.startswith("ipam/vrfs/") for p in deleted)
+    assert deleted[-1].startswith(_OVERLAYS)
+
+
+async def test_delete_spectrum_x_vrf_matches_a_string_vrf_fk():
+    """The VXLAN's VRF FK may serialize as a string or a nested object; an int
+    comparison silently matched neither and leaked the VXLAN."""
+    for vrf_field in ("8", {"id": 8}, 8):
+        record = []
+        client = _client(rest_list={_VXLANS: [{"id": 5, "vrf": vrf_field}]}, record=record)
+        await client.delete_spectrum_x_vrf("8", 60000)
+        assert (f"{_VXLANS}5/") in [path for method, path, _ in record if method == "DELETE"], (
+            f"VXLAN not deleted for vrf={vrf_field!r}"
+        )

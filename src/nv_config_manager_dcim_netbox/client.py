@@ -33,8 +33,11 @@ from nv_config_manager_dcim import (
 
 logger = logging.getLogger(__name__)
 
-_CONNECTION_KEYS = ("server", "token", "public_url", "verify")
+_CONNECTION_KEYS = ("server", "token", "public_url", "verify", "timeout")
 _DEFAULT_TIMEOUT = 30.0
+# Upper bound on pages walked by ``rest_list``. Reached only when an endpoint
+# reports a further page without honouring ``offset`` (see ``rest_list``).
+_MAX_LIST_PAGES = 1000
 
 
 def _parse_verify(value: object) -> bool | str:
@@ -51,7 +54,34 @@ def _parse_verify(value: object) -> bool | str:
     return normalized
 
 
-def netbox_connection_settings(settings: ProviderSettings) -> dict[str, str | bool]:
+def _require_http_url(value: str, setting: str) -> str:
+    """Return ``value`` when it is an http(s) URL, else raise a config error."""
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise DCIMProviderConfigurationError(
+            f'DCIM provider "netbox" {setting} must be an http(s):// URL, got {value!r}'
+        )
+    return value
+
+
+def _parse_timeout(value: object) -> float:
+    """Normalize the request-timeout setting (seconds), falling back to the default."""
+    if value is None or str(value).strip() == "":
+        return _DEFAULT_TIMEOUT
+    try:
+        timeout = float(str(value).strip())
+    except ValueError as exc:
+        raise DCIMProviderConfigurationError(
+            f'DCIM provider "netbox" timeout must be a number of seconds, got {value!r}'
+        ) from exc
+    if timeout <= 0:
+        raise DCIMProviderConfigurationError(
+            f'DCIM provider "netbox" timeout must be greater than zero, got {value!r}'
+        )
+    return timeout
+
+
+def netbox_connection_settings(settings: ProviderSettings) -> dict[str, str | bool | float]:
     """Validate and normalize explicit NetBox provider settings."""
     values = {key: settings.get(key) for key in _CONNECTION_KEYS}
     missing = [key for key in ("server", "token") if not str(values[key] or "").strip()]
@@ -59,35 +89,54 @@ def netbox_connection_settings(settings: ProviderSettings) -> dict[str, str | bo
         raise DCIMProviderConfigurationError(
             'DCIM provider "netbox" requires ' + ", ".join(missing)
         )
-    server = str(values["server"]).strip()
-    parsed = urlparse(server)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise DCIMProviderConfigurationError(
-            f'DCIM provider "netbox" server must be an http(s):// URL, got {server!r}'
-        )
+    _require_http_url(str(values["server"]).strip(), "server")
+    public_url = str(values["public_url"]).strip() if values["public_url"] else ""
+    if public_url:
+        # Surfaced to operators in device UI links, so hold it to the same bar.
+        _require_http_url(public_url, "public_url")
     return {
         "server": str(values["server"]),
         "token": str(values["token"]),
-        "public_url": str(values["public_url"]) if values["public_url"] else "",
+        "public_url": public_url,
         "verify": _parse_verify(values["verify"]),
+        "timeout": _parse_timeout(values["timeout"]),
     }
 
 
 def _build_ssl(verify: bool | str) -> bool | ssl.SSLContext:
-    """Translate a verify setting into an aiohttp ``ssl`` argument."""
+    """Translate a verify setting into an aiohttp ``ssl`` argument.
+
+    A string is a CA-bundle path. An unusable bundle is reported as a provider
+    configuration error rather than leaking ``OSError``/``SSLError`` out of client
+    construction, where callers expect the SDK taxonomy.
+    """
     if verify is True:
         return True
     if verify is False:
+        logger.warning(
+            "NetBox TLS certificate verification is DISABLED (verify=false); "
+            "connections to NetBox are not authenticated"
+        )
         return False
-    return ssl.create_default_context(cafile=str(verify))
+    try:
+        return ssl.create_default_context(cafile=str(verify))
+    except (OSError, ssl.SSLError) as exc:
+        raise DCIMProviderConfigurationError(
+            f'DCIM provider "netbox" could not load the CA bundle at {verify!r}: {exc}'
+        ) from exc
 
 
 def _context_scoped_to_site(context: dict[str, Any], site: str) -> bool:
-    """Return whether a config-context applies to ``site`` (by name or slug).
+    """Return whether a config-context's *site* scoping admits ``site``.
 
-    A context with no location/site assignment applies everywhere (NetBox
-    treats an empty assignment set as global); an assigned context must name
-    the site in its ``locations`` or ``sites``.
+    This evaluates the site dimension only — a context with no ``locations`` /
+    ``sites`` assignment is admitted, because NetBox treats an empty assignment
+    set for a dimension as "any". The other dimensions NetBox ANDs in (region,
+    site-group, role, platform, tenant, tenant-group, cluster, tags) are
+    deliberately not evaluated here: this filter exists to keep a *site*-scoped
+    profile from leaking across sites, and cannot rule a context in or out on
+    dimensions the caller has not supplied. Callers therefore get a superset —
+    every context that could apply to the site.
     """
     scoped = False
     for key in ("locations", "sites"):
@@ -185,12 +234,17 @@ class BaseNetBoxClient:
         verify: bool | str = True,
         public_url: str | None = None,
         headers: dict[str, str] | Callable[[], dict[str, str]] | None = None,
+        timeout: float = _DEFAULT_TIMEOUT,
     ) -> None:
         self._base_url = netbox_url.rstrip("/")
         self._token = token
         self._ssl = _build_ssl(verify)
         self._public_url = (public_url or netbox_url).rstrip("/")
-        self._headers_factory = headers
+        # Extra headers merged into (never replacing) the generated ones, so a
+        # caller cannot accidentally drop Authorization. Accepts a callable for
+        # values that must be recomputed per request.
+        self._extra_headers = headers
+        self._timeout = timeout
         self._session_obj: aiohttp.ClientSession | None = None
 
     @classmethod
@@ -202,6 +256,7 @@ class BaseNetBoxClient:
             token=str(conn["token"]),
             verify=conn["verify"],
             public_url=str(conn["public_url"]) or None,
+            timeout=float(conn["timeout"]),
         )
 
     # -- lifecycle -----------------------------------------------------------
@@ -209,7 +264,7 @@ class BaseNetBoxClient:
     def _session(self) -> aiohttp.ClientSession:
         if self._session_obj is None or self._session_obj.closed:
             self._session_obj = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=_DEFAULT_TIMEOUT)
+                timeout=aiohttp.ClientTimeout(total=self._timeout)
             )
         return self._session_obj
 
@@ -229,15 +284,14 @@ class BaseNetBoxClient:
         return f"{self._base_url}/{path.lstrip('/')}"
 
     def _request_headers(self) -> dict[str, str]:
-        if callable(self._headers_factory):
-            return dict(self._headers_factory())
-        if self._headers_factory:
-            return dict(self._headers_factory)
         headers = {"Accept": "application/json"}
         if self._token:
             # v2 tokens ("nbt_<key>.<secret>") use the Bearer scheme; v1 use Token.
             scheme = "Bearer" if self._token.startswith("nbt_") else "Token"
             headers["Authorization"] = f"{scheme} {self._token}"
+        extra = self._extra_headers() if callable(self._extra_headers) else self._extra_headers
+        if extra:
+            headers.update(extra)
         return headers
 
     def _raise_status(self, status: int, body: str) -> None:
@@ -248,7 +302,10 @@ class BaseNetBoxClient:
         if status == 403:
             raise DCIMAuthorizationError(f"NetBox authorization failed ({status})")
         if status == 404:
-            raise DCIMNotFoundError("NetBox record not found")
+            # Include the body: render's ``_safe_list`` treats 404 as "optional
+            # plugin absent", so an operator diagnosing empty render data needs to
+            # be able to tell that apart from a genuinely missing record.
+            raise DCIMNotFoundError(f"NetBox record not found: {body[:200]}")
         if status == 409:
             raise DCIMConflictError(f"NetBox reported a conflict ({status}): {body[:200]}")
         raise DCIMConnectivityError(f"NetBox request failed ({status}): {body[:200]}")
@@ -314,11 +371,18 @@ class BaseNetBoxClient:
     async def rest_list(
         self, path: str, params: list[tuple[str, str]] | None = None, page_size: int = 250
     ) -> list[dict[str, Any]]:
-        """Return all results from a paginated NetBox REST list endpoint."""
+        """Return all results from a paginated NetBox REST list endpoint.
+
+        Walks ``offset``/``limit`` until the endpoint reports no further page.
+        Stops early — with a warning — if a page does not advance the offset or if
+        more results arrive than the endpoint's own ``count``, so an endpoint that
+        reports ``next`` without honouring ``offset`` cannot spin forever
+        accumulating duplicate rows.
+        """
         base = list(params or [])
         offset = 0
         out: list[dict[str, Any]] = []
-        while True:
+        for _ in range(_MAX_LIST_PAGES):
             page = await self.rest_request(
                 "GET",
                 path,
@@ -330,7 +394,18 @@ class BaseNetBoxClient:
             out.extend(results)
             if not page.get("next") or not results:
                 break
+            count = page.get("count")
+            if isinstance(count, int) and len(out) >= count:
+                break
             offset += len(results)
+        else:
+            logger.warning(
+                "Stopped paginating %s after %d pages (%d rows); the endpoint kept "
+                "reporting a next page — it may not honour the offset parameter",
+                path,
+                _MAX_LIST_PAGES,
+                len(out),
+            )
         return out
 
     async def config_contexts_for_profile(

@@ -270,3 +270,30 @@ async def test_cross_object_resolution_error_is_noop():
             raise RuntimeError("boom")
 
     assert await _vrf_changed(_event("ipam.vrf", "9"), _Boom()) == ()
+
+
+async def test_a_malformed_device_id_drops_the_fanout_instead_of_raising():
+    """A device id that is not a NetBox PK cannot be UUID-encoded. The device and
+    parent-device handlers must drop it (like the best-effort cross-object
+    handlers) rather than raise into the dispatcher."""
+    assert await _device_changed(_event("dcim.device", "not-a-pk"), None) == ()
+    event = _event("dcim.interface", "11", {"device": {"id": "not-a-pk"}})
+    assert await _parent_device_changed(event, None) == ()
+
+
+async def test_parent_device_handler_reads_a_bare_device_pk():
+    # The record's `device` may be a bare PK rather than a nested object.
+    requests = await _parent_device_changed(_event("dcim.interface", "11", {"device": 7}), None)
+    assert [decode_device_id(r.device_id) for r in requests] == ["7"]
+
+
+async def test_multi_device_fanout_dedupes_and_preserves_order():
+    client = _FanoutClient(
+        rest_get={"dcim/cables/3/": {"a_terminations": [], "b_terminations": []}}
+    )
+    # Resolver order is preserved and repeats collapse to one request each.
+    from nv_config_manager_dcim_netbox.events import _requests_multi
+
+    requests = _requests_multi(_event("dcim.cable", "3"), [9, 4, 9, None, 4])
+    assert [decode_device_id(r.device_id) for r in requests] == ["9", "4"]
+    assert await _cable_changed(_event("dcim.cable", "3"), client) == ()

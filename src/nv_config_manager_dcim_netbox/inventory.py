@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from nv_config_manager_dcim import (
+    DCIMAuthenticationError,
+    DCIMAuthorizationError,
     DCIMConflictError,
     DCIMDeviceSelection,
     DCIMInvalidDataError,
@@ -23,7 +25,9 @@ from nv_config_manager_dcim_netbox._mappers import (
 )
 
 if TYPE_CHECKING:
-    from nv_config_manager_dcim import DeviceMetadata
+    from collections.abc import Callable
+
+    from nv_config_manager_dcim import DCIMDeviceSelectionFilter, DeviceMetadata
     from nv_config_manager_dcim.workflow_models import (
         DeviceInventoryFilter,
         HostDeviceData,
@@ -31,9 +35,10 @@ if TYPE_CHECKING:
         NetworkDeviceData,
     )
 
-    from nv_config_manager_dcim_netbox.models import DCIMDeviceSelectionFilter
-
 logger = logging.getLogger(__name__)
+
+# Named-workflow-model rows returned by ``_map_unique_by_name`` (both have ``name``).
+_T = TypeVar("_T", "NetworkDeviceData", "HostDeviceData")
 
 _DEVICE_METADATA_QUERY = """
 query ($id: ID!) {
@@ -98,13 +103,18 @@ class NetBoxInventoryMixin:
     """Device and interface inventory reads."""
 
     async def get_device_metadata(self, device_id: str) -> DeviceMetadata | None:
-        # Degrades to None on any failure so metadata caching stays resilient.
+        # Degrades to None on a per-device failure so metadata caching stays
+        # resilient. Credential failures are re-raised: they are not per-device
+        # and would otherwise return None for the whole fleet, indistinguishable
+        # from "no such device".
         try:
             data = await self.graphql_query(_DEVICE_METADATA_QUERY, {"id": device_id})
             device = data.get("device")
             if not device:
                 return None
             return device_metadata_from_gql(device, self.get_device_ui_url(device_id))
+        except (DCIMAuthenticationError, DCIMAuthorizationError):
+            raise
         except Exception:  # noqa: BLE001 - metadata read is best-effort
             logger.exception("Failed to read NetBox metadata for device %s", device_id)
             return None
@@ -142,21 +152,19 @@ class NetBoxInventoryMixin:
         )
 
     async def list_devices(self, filters: DCIMDeviceSelectionFilter) -> list[DCIMDeviceSelection]:
+        # Every value is coerced to str: aiohttp requires string query params (see
+        # ``rest_request``), and the SDK's filter fields are only str by convention.
         params: list[tuple[str, str]] = [("has_primary_ip", "true")]
-        for site in filters.sites:
-            params.append(("site", site))
-        for status in filters.statuses:
-            params.append(("status", status))
-        for role in filters.roles:
-            params.append(("role", role))
-        for tenant in filters.tenants:
-            params.append(("tenant", tenant))
-        for device_type_id in filters.device_type_ids:
-            params.append(("device_type_id", device_type_id))
-        for manufacturer in filters.manufacturers:
-            params.append(("manufacturer", manufacturer))
-        for platform in filters.platforms:
-            params.append(("platform", platform))
+        for key, values in (
+            ("site", filters.sites),
+            ("status", filters.statuses),
+            ("role", filters.roles),
+            ("tenant", filters.tenants),
+            ("device_type_id", filters.device_type_ids),
+            ("manufacturer", filters.manufacturers),
+            ("platform", filters.platforms),
+        ):
+            params.extend((key, str(value)) for value in values or ())
         if filters.managed_only:
             # "Managed" is modeled by the ``nvcm_render_enabled`` device custom
             # field (the same proxy ``get_managed_device_metadata`` uses). Guarded
@@ -188,32 +196,7 @@ class NetBoxInventoryMixin:
         if params is None:
             return []
         devices = await self.rest_list("dcim/devices/", params)
-        seen: set[str] = set()
-        out: list[NetworkDeviceData] = []
-        for device in devices:
-            name = device["name"]
-            # A duplicate device name is a data-integrity error: the workflow
-            # keys devices by name, so two rows sharing one name is ambiguous and
-            # must not be silently collapsed (parity with the reference provider's
-            # de-duplication guard).
-            if name in seen:
-                raise DCIMInvalidDataError(
-                    f"Duplicate device name in NetBox inventory: {name!r}"
-                )
-            seen.add(name)
-            try:
-                mapped = network_device_from_rest(device)
-            except DCIMInvalidDataError as exc:
-                # A device that cannot be mapped (e.g. no platform) must not fail
-                # the whole listing; skip it and keep the rest. This no-platform
-                # skip is a deliberate NetBox improvement over the reference,
-                # which has no such notion.
-                logger.warning(
-                    "Skipping NetBox device %s from inventory: %s", device.get("id"), exc
-                )
-                continue
-            out.append(mapped)
-        return out
+        return self._map_unique_by_name(devices, network_device_from_rest)
 
     async def get_host_device(self, device_id: str) -> HostDeviceData:
         data = await self.graphql_query(_HOST_DEVICE_QUERY, {"id": device_id})
@@ -236,23 +219,43 @@ class NetBoxInventoryMixin:
 
     # -- shared helpers ------------------------------------------------------
 
+    @staticmethod
+    def _map_unique_by_name(devices: list[dict], mapper: Callable[[dict], _T]) -> list[_T]:
+        """Map device rows, skipping unmappable ones and rejecting duplicate names.
+
+        A device that cannot be mapped — no platform, or no name (``Device.name``
+        is nullable in NetBox) — must not fail the whole listing; it is logged and
+        skipped. The no-platform skip is a deliberate NetBox improvement over the
+        reference provider, which has no such notion.
+
+        A *duplicate* name is different: it is a data-integrity error. The
+        workflow keys devices by name, so two rows sharing one name is ambiguous
+        and must not be silently collapsed (parity with the reference provider's
+        de-duplication guard).
+        """
+        seen: set[str] = set()
+        out: list[_T] = []
+        for device in devices:
+            try:
+                mapped = mapper(device)
+            except DCIMInvalidDataError as exc:
+                logger.warning(
+                    "Skipping NetBox device %s from inventory: %s", device.get("id"), exc
+                )
+                continue
+            if mapped.name in seen:
+                raise DCIMInvalidDataError(
+                    f"Duplicate device name in NetBox inventory: {mapped.name!r}"
+                )
+            seen.add(mapped.name)
+            out.append(mapped)
+        return out
+
     async def _host_devices_by_ids(self, ids: list[str]) -> list[HostDeviceData]:
         if not ids:
             return []
         data = await self.graphql_query(_HOST_DEVICES_BY_IDS_QUERY, {"ids": ids})
-        seen: set[str] = set()
-        out: list[HostDeviceData] = []
-        for device in data.get("device_list") or []:
-            name = device["name"]
-            # Duplicate device names are a data-integrity error; do not silently
-            # collapse them (parity with the reference provider).
-            if name in seen:
-                raise DCIMInvalidDataError(
-                    f"Duplicate device name in NetBox inventory: {name!r}"
-                )
-            seen.add(name)
-            out.append(host_device_from_gql(device))
-        return out
+        return self._map_unique_by_name(data.get("device_list") or [], host_device_from_gql)
 
     async def _device_filter_params(
         self, filters: DeviceInventoryFilter
@@ -268,19 +271,18 @@ class NetBoxInventoryMixin:
         """
         params: list[tuple[str, str]] = []
         if filters.site:
-            params.append(("site", filters.site))
-        for role in filters.roles or []:
-            params.append(("role", role))
-        for status in filters.statuses or []:
-            params.append(("status", status))
+            params.append(("site", str(filters.site)))
         if filters.tenant:
-            params.append(("tenant", filters.tenant))
-        for device_type_id in filters.device_type_ids or []:
-            params.append(("device_type_id", device_type_id))
+            params.append(("tenant", str(filters.tenant)))
+        for key, values in (
+            ("role", filters.roles),
+            ("status", filters.statuses),
+            ("device_type_id", filters.device_type_ids),
+            ("id", filters.device_ids),
+        ):
+            params.extend((key, str(value)) for value in values or ())
         for platform in filters.platforms or []:
-            params.append(("platform", platform.value))
-        for device_id in filters.device_ids or []:
-            params.append(("id", str(device_id)))
+            params.append(("platform", str(platform.value)))
         # NVCM status-flag filters map to boolean device custom fields. ``managed``
         # reuses ``nvcm_render_enabled`` as its proxy (the same field
         # ``get_managed_device_metadata`` uses), so only fold it in when an
@@ -302,9 +304,7 @@ class NetBoxInventoryMixin:
         # Reject an entirely unfiltered request before it becomes a whole-fleet
         # query. A MAC-only filter is legitimate: it is resolved below.
         if not params and not filters.mac_addresses:
-            raise DCIMInvalidDataError(
-                "At least one device inventory filter must be supplied"
-            )
+            raise DCIMInvalidDataError("At least one device inventory filter must be supplied")
         # MAC filtering on devices is done via the interfaces endpoint in NetBox.
         # A requested MAC that matches no interface must exclude everything, not
         # fall through to an unfiltered query.

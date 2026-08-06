@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Ad-hoc probe: call one DCIMClient method against a configured NetBox.
 
-Override via env: SERVER, TOKEN, DEVICE_ID. While methods are stubbed this
-prints a DCIMOperationNotSupportedError (no NetBox contact needed).
+Override via env: SERVER, TOKEN, DEVICE_ID. Prints the returned model, or the
+error type and message if the call fails — a quick check that credentials,
+connectivity, and the device id all work end to end.
 """
 
 from __future__ import annotations

@@ -16,7 +16,7 @@ interact with it only through the SDK's `DCIMClient` protocol.
 **Implemented.** All `DCIMClient` operations are implemented against NetBox
 (REST + GraphQL), grouped by functional area (one module per area — see
 [Layout](#layout)). The provider factory, settings validation, discovery, and
-the aiohttp transport are functional. The unit suite passes (250 tests, 87% lines).
+the aiohttp transport are functional. The unit suite passes (368 tests, 93% lines).
 
 Change-event integration is live: `register_render_event_handlers` and
 `normalize_event` are wired, so automatic render-on-change works via the
@@ -43,7 +43,8 @@ src/nv_config_manager_dcim_netbox/
 ├── __init__.py          # exports NetBoxProvider, NetBoxDCIMClient
 ├── provider.py          # NetBoxProvider factory + NetBoxDCIMClient composition
 ├── client.py            # BaseNetBoxClient: aiohttp transport, settings, close, ui-url
-├── _support.py          # unsupported() helper (raises DCIMOperationNotSupportedError)
+├── _mappers.py          # NetBox response shapes -> provider-neutral SDK models
+├── fabric_common.py     # shared plugin REST paths + overlay lookup helpers
 ├── inventory.py         # Core inventory / DCIM
 ├── reference.py         # Reference / selection lists
 ├── ipam.py              # IPAM / VRF
@@ -94,6 +95,7 @@ server = "http://localhost:8000"
 token  = "<netbox-api-token>"
 # public_url = "http://localhost:8000"   # optional; used for UI links
 # verify     = true                        # bool or path to a CA bundle
+# timeout    = 30                          # optional; per-request seconds
 ```
 
 ## Deployment (external DCIM provider)
@@ -145,7 +147,7 @@ that subject; the render service consumes them and calls `normalize_event`. If
 the two disagree, changes are published but never delivered.
 
 **`dcim.options`.** Provider-specific, non-secret options. The NetBox provider
-reads only `server` / `token` / `public_url` / `verify` from its settings; any
+reads only `server` / `token` / `public_url` / `verify` / `timeout` from its settings; any
 other keys (including everything under `options`) are ignored, so extra options
 never break client creation. Tenant is resolved per-operation from request data
 — there is **no** global tenant-scope filter today (a possible future option).
@@ -209,6 +211,8 @@ The provider registers render-event handlers for these native object types
 | `ipam.ipaddress` | the interface's device |
 | `extras.configcontext` | devices matching the context's scope (locations/roles/platforms/tenants/tags…) |
 | `netbox_bgp.bgpsession` | the session's device |
+| `ipam.asn` | every device whose BGP session references the ASN (`local_as` / `remote_as`) |
+| `netbox_bgp.bgppeergroup` | every device whose BGP session uses the peer group |
 | `netbox_nv_config_manager.overlayassignment` | the assigned device, or the assigned interface's device |
 | `netbox_nv_config_manager.deviceconfigstatus` | the device |
 
@@ -241,7 +245,10 @@ Each operation lives in its functional-area module (see [Layout](#layout)).
 Reads use `self.graphql_query(...)`; writes use `self.rest_request("PATCH", ...)`.
 Return the SDK Pydantic models — never raw NetBox responses. Map backend failures
 to the SDK error taxonomy (see `client.py`). Where NetBox genuinely cannot satisfy
-an operation, it raises `DCIMOperationNotSupportedError` with a clear explanation.
+an operation, raise the SDK's `DCIMOperationNotSupportedError` directly, with an
+explanation of what NetBox lacks. Shared NetBox response-shape helpers live in
+`_mappers.py` and shared plugin REST paths in `fabric_common.py` — reach for those
+rather than adding a second local copy.
 
 See NVCM's *Contribute a DCIM Provider* guide for the full authoring contract.
 

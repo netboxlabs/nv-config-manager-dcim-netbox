@@ -14,7 +14,16 @@ from nv_config_manager_dcim import create_dcim_client
 SETTINGS = {"server": "https://netbox.example", "token": "t"}
 
 
-def fake_client(*, gql=None, rest_list=None, rest_get=None, post=None, record=None, patch=None):
+def fake_client(
+    *,
+    gql=None,
+    rest_list=None,
+    rest_get=None,
+    post=None,
+    record=None,
+    patch=None,
+    queries=None,
+):
     """Return a NetBox client with a routable, stubbed transport.
 
     * ``gql`` — dict returned by ``graphql_query`` (single canned payload).
@@ -26,6 +35,11 @@ def fake_client(*, gql=None, rest_list=None, rest_get=None, post=None, record=No
       ``{'id': 99}``) so ``["id"]`` reads on create succeed.
     * ``record`` — a list that receives ``(method, path, json)`` for every write.
     * ``patch`` — ``{attr: async_callable}`` to override provider helper methods.
+    * ``queries`` — a list that receives ``(path, params)`` for every ``rest_list``
+      call. Use it to assert the NetBox *filter names* a read depends on: those
+      spellings (``cf_nvcm_render_enabled``, ``cf_ib_guid__ie``, ``has_primary_ip``,
+      …) are this provider's contract with NetBox, and a typo in one is invisible
+      to a fake that only matches on path.
     """
     client = create_dcim_client("netbox", SETTINGS)
 
@@ -33,6 +47,8 @@ def fake_client(*, gql=None, rest_list=None, rest_get=None, post=None, record=No
         return gql or {}
 
     async def _rest_list(path, params=None, **kwargs):
+        if queries is not None:
+            queries.append((path, list(params or [])))
         rows = list((rest_list or {}).get(path, []))
         for key, value in params or []:
             if key == "assigned_object_id":
@@ -52,3 +68,8 @@ def fake_client(*, gql=None, rest_list=None, rest_get=None, post=None, record=No
     for attr, fn in (patch or {}).items():
         setattr(client, attr, fn)
     return client
+
+
+def params_for(queries, path):
+    """Return the flattened ``(key, value)`` params of every recorded call to ``path``."""
+    return [param for called_path, params in queries if called_path == path for param in params]

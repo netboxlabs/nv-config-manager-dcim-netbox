@@ -118,9 +118,7 @@ async def test_get_host_devices_duplicate_name_raises():
 
 
 def test_network_device_status_flags_from_custom_fields():
-    device = _rest_device(
-        custom_fields={"nvcm_render_enabled": True, "nvcm_ztp_enabled": True}
-    )
+    device = _rest_device(custom_fields={"nvcm_render_enabled": True, "nvcm_ztp_enabled": True})
     nd = network_device_from_rest(device)
     assert nd.render_enabled is True
     assert nd.ztp_enabled is True
@@ -141,9 +139,7 @@ def test_network_device_status_flags_default_false_without_custom_fields():
 
 async def test_status_flag_filters_become_cf_query_params():
     client = _capture(rest_rows={"dcim/devices/": []})
-    await client.get_network_devices(
-        DeviceInventoryFilter(render_enabled=True, ztp_enabled=False)
-    )
+    await client.get_network_devices(DeviceInventoryFilter(render_enabled=True, ztp_enabled=False))
     path, params = client._calls[-1]
     assert path == "dcim/devices/"
     assert ("cf_nvcm_render_enabled", "true") in params

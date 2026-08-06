@@ -53,7 +53,7 @@ def strip_mask(address: str | None) -> str | None:
 
 
 def canonical_mac(value: str | None) -> str | None:
-    """Return a canonical MAC string, or ``None`` for empty/invalid input.
+    """Return a canonical MAC string; unparseable input is returned unchanged.
 
     Normalizes to a lowercase, colon-separated, zero-padded form so MAC
     comparisons are case- and separator-insensitive (``AA-BB-CC-00-00-01`` and
@@ -61,6 +61,10 @@ def canonical_mac(value: str | None) -> str | None:
     already stores MACs on a first-class ``MACAddress`` model, so this is used at
     matching boundaries (e.g. deduplicating an interface's MACs) rather than to
     rewrite values NetBox returns for display.
+
+    Empty input returns ``None``. A value netaddr cannot parse is returned as
+    supplied rather than dropped, so a malformed MAC still compares equal to an
+    identical malformed MAC instead of collapsing every bad value onto ``None``.
     """
     if not value:
         return None
@@ -70,17 +74,77 @@ def canonical_mac(value: str | None) -> str | None:
         return value
 
 
+# --- NetBox response-shape helpers -----------------------------------------------
+#
+# NetBox returns a related object as a nested brief dict in most serializers but
+# as a bare PK in some (notably plugin write serializers), and a choice field as
+# ``{"value": …, "label": …}`` in REST but a bare string in GraphQL. These read
+# either shape so call sites do not each re-implement the check.
+
+
+def fk_id(value: Any) -> Any:
+    """Return an id from either a nested object dict (``{"id": …}``) or a bare PK."""
+    return value.get("id") if isinstance(value, dict) else value
+
+
+def choice_value(value: Any) -> Any:
+    """Return a NetBox choice's raw value (``{"value": …}``) or the value itself.
+
+    Preserves the value's type — use this when comparing against a non-string
+    (e.g. ``family`` against ``4``). See :func:`choice_str` for the string form.
+    """
+    return value.get("value") if isinstance(value, dict) else value
+
+
+def choice_str(value: Any) -> str:
+    """Normalize a NetBox status/choice (``{"value": …}`` or a bare string) to ``str``."""
+    if isinstance(value, dict):
+        return str(value.get("value") or value.get("label") or "")
+    return str(value or "")
+
+
+def tag_names(obj: dict[str, Any] | None) -> set[str]:
+    """Return the tag names *and* slugs on an object (callers may match on either)."""
+    names: set[str] = set()
+    for tag in (obj or {}).get("tags") or []:
+        if isinstance(tag, dict):
+            for key in ("name", "slug"):
+                value = tag.get(key)
+                if isinstance(value, str) and value:
+                    names.add(value)
+    return names
+
+
 def _cf_flag(device: dict[str, Any], field: str) -> bool:
     """Read a boolean NVCM status custom field, defaulting absent/None to False."""
     return bool((device.get("custom_fields") or {}).get(field))
 
 
-def _slug(obj: Any) -> str:
+def slug_of(obj: Any) -> str:
+    """Return a nested object's slug, or ``""`` (NetBox roles/platforms key by slug)."""
     return (obj or {}).get("slug") or ""
 
 
-def _name(obj: Any) -> str | None:
+def name_of(obj: Any) -> str | None:
+    """Return a nested object's name, or ``None``."""
     return (obj or {}).get("name") if obj else None
+
+
+def require_device_name(device: dict[str, Any]) -> str:
+    """Return a device's name, raising when NetBox has none.
+
+    ``Device.name`` is nullable in NetBox, but every workflow model built here
+    keys devices by name, so an unnamed device cannot be represented. Raising the
+    SDK error (rather than a ``KeyError``) lets single-device reads report a
+    proper provider failure and lets list reads skip the row — both paths already
+    handle ``DCIMInvalidDataError``.
+    """
+    name = device.get("name")
+    if not name:
+        raise DCIMInvalidDataError(
+            f"NetBox device {device.get('id')} has no name; it cannot be identified by name"
+        )
+    return str(name)
 
 
 def platform_from_slug(slug: str | None, device_name: str) -> Platform:
@@ -104,11 +168,11 @@ def device_metadata_from_gql(device: dict[str, Any], device_url: str) -> DeviceM
     """
     return DeviceMetadata(
         device_id=str(device["id"]),
-        name=device["name"],
-        site=_name(device.get("site")) or "Unknown",
-        platform=_name(device.get("platform")),
-        role=_name(device.get("role")),
-        rack=_name(device.get("rack")),
+        name=require_device_name(device),
+        site=name_of(device.get("site")) or "Unknown",
+        platform=name_of(device.get("platform")),
+        role=name_of(device.get("role")),
+        rack=name_of(device.get("rack")),
         primary_ip4=strip_mask((device.get("primary_ip4") or {}).get("address")),
         device_url=device_url,
     )
@@ -126,16 +190,16 @@ def network_device_from_rest(device: dict[str, Any]) -> NetworkDeviceData:
     reads back as ``None`` and degrades to ``False``, so this is safe to apply
     before every flag exists in a given NetBox instance.
     """
-    name = device["name"]
+    name = require_device_name(device)
     return NetworkDeviceData(
         id=str(device["id"]),
         name=name,
-        rack=_name(device.get("rack")),
+        rack=name_of(device.get("rack")),
         position=device.get("position"),
-        role=_slug(device.get("role")),
-        site=_name(device.get("site")) or "",
-        device_type=_slug(device.get("device_type")),
-        platform=platform_from_slug(_slug(device.get("platform")) or None, name),
+        role=slug_of(device.get("role")),
+        site=name_of(device.get("site")) or "",
+        device_type=slug_of(device.get("device_type")),
+        platform=platform_from_slug(slug_of(device.get("platform")) or None, name),
         primary_ip4=strip_mask((device.get("primary_ip4") or {}).get("address")),
         primary_ip6=strip_mask((device.get("primary_ip6") or {}).get("address")),
         intent=device.get("config_context"),
@@ -154,7 +218,7 @@ def interface_from_rest(interface: dict[str, Any]) -> InterfaceData:
     return InterfaceData(
         name=interface["name"],
         id=str(interface["id"]),
-        host=_name(interface.get("device")) or "",
+        host=name_of(interface.get("device")) or "",
         mac_address=interface.get("mac_address") or None,
         vrf_id=str(vrf["id"]) if vrf.get("id") is not None else None,
     )
@@ -176,7 +240,7 @@ def _interface_from_gql(interface: dict[str, Any], host_name: str) -> InterfaceD
 
 def host_device_from_gql(device: dict[str, Any]) -> HostDeviceData:
     """Map a GraphQL device object (with device bays + interfaces) to ``HostDeviceData``."""
-    name = device["name"]
+    name = require_device_name(device)
     bays = [
         DeviceBayData(
             name=bay["name"],
@@ -191,11 +255,11 @@ def host_device_from_gql(device: dict[str, Any]) -> HostDeviceData:
     return HostDeviceData(
         id=str(device["id"]),
         name=name,
-        rack=_name(device.get("rack")),
+        rack=name_of(device.get("rack")),
         position=device.get("position"),
-        role=_slug(device.get("role")),
-        site=_name(device.get("site")) or "",
-        device_type=_slug(device.get("device_type")),
+        role=slug_of(device.get("role")),
+        site=name_of(device.get("site")) or "",
+        device_type=slug_of(device.get("device_type")),
         serial=device.get("serial"),
         device_bays=bays,
         interfaces=interfaces,
@@ -220,8 +284,8 @@ def host_metadata_from_gql(device: dict[str, Any]) -> HostMetadata:
     alias = (device.get("custom_fields") or {}).get(_ALIAS_FIELD)
     return HostMetadata(
         device_id=str(device["id"]),
-        name=device["name"],
-        tenant=_name(device.get("tenant")) or "",
+        name=require_device_name(device),
+        tenant=name_of(device.get("tenant")) or "",
         alias=alias if isinstance(alias, str) and alias else None,
         interfaces=tuple(interfaces),
     )

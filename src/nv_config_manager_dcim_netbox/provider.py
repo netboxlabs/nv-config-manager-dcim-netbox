@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 from nv_config_manager_dcim import (
@@ -40,6 +41,19 @@ from nv_config_manager_dcim_netbox.ztp import NetBoxZTPMixin
 logger = logging.getLogger(__name__)
 
 
+def _provider_version() -> str:
+    """Read the installed package version so it is declared in one place only.
+
+    Falls back to "0.0.0" when the package metadata is unavailable (running from a
+    source tree that was never installed).
+    """
+    try:
+        return version("nv-config-manager-dcim-netbox")
+    except PackageNotFoundError:  # pragma: no cover - not installed
+        logger.warning("nv-config-manager-dcim-netbox is not installed; reporting version 0.0.0")
+        return "0.0.0"
+
+
 @with_device_id_decoding
 class NetBoxDCIMClient(
     NetBoxInventoryMixin,
@@ -59,9 +73,10 @@ class NetBoxDCIMClient(
 ):
     """One broad NetBox implementation of the SDK's ``DCIMClient`` contract.
 
-    Each functional area is a mixin in its own module; every operation currently
-    raises ``DCIMOperationNotSupportedError`` and is implemented incrementally.
-    ``close`` and ``get_device_ui_url`` are provided by ``BaseNetBoxClient``.
+    Each functional area is a mixin in its own module; the whole protocol is
+    implemented against native NetBox REST and GraphQL, with no unsupported
+    stubs. ``close`` and ``get_device_ui_url`` are provided by
+    ``BaseNetBoxClient``.
     """
 
 
@@ -71,7 +86,7 @@ class NetBoxProvider:
     metadata = DCIMProviderMetadata(
         name="netbox",
         display_name="NetBox",
-        provider_version="0.1.0",
+        provider_version=_provider_version(),
         supported_api_versions=(DCIM_PROVIDER_API_VERSION,),
     )
 

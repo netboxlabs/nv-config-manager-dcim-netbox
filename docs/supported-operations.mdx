@@ -20,7 +20,7 @@ render-data field mapping see [NetBox data mapping](./netbox-data-mapping.mdx).
 | **Render** (2) | `get_render_data`, `get_intended_interface_neighbors` | Returns the provider-neutral `RenderData`; portable REST + one GraphQL query. |
 | **Config lifecycle / state** (9) | `get_render_device_status`, `get_render_enabled_device_ids`, `get_render_template_versions`, `upsert_intended_configuration`, `update_render_template_version`, `get_backup_enabled_device_ids`, `get_configuration_backup_metadata`, `record_configuration_backup`, `has_recorded_config_drift` | Backed by the plugin's `DeviceConfigStatus` / `IntendedConfig` / `BackupConfig` models, not device custom fields. |
 | **DHCP** (4) | `get_dhcp_site_options`, `get_dhcp_contexts`, `get_dhcp_static_data`, `get_dhcp_auto_subnets` | **Read-only** (generates Kea config); does not write DCIM. |
-| **ZTP** (2) | `get_ztp_device`, `mark_ztp_device_provisioned` | `provisioned` maps to NetBox status `active`. |
+| **ZTP** (2) | `get_ztp_device`, `mark_ztp_device_provisioned` | Writes NetBox device status `provisioned` — an extra choice the companion plugin registers (see below). |
 | **Firmware** (4) | `get_os_image_versions`, `set_intended_os_image`, `get_firmware_bundle`, `set_device_firmware_intent` | Sourced from the merged `config_context`. |
 | **Hosts / MAC correlation** (6) | `find_host_devices_by_mac`, `update_dpu_device_inventory`, `get_interface_hosts_by_mac`, `get_host_metadata_by_macs`, `get_host_metadata_by_names`, `get_connected_switch_port_by_remote_mac` | MAC is a first-class `MACAddress` object. |
 | **Secrets** (3) | `get_device_password_mapping_users`, `get_device_secret_versions`, `get_device_password_secret_names` | Returns secret **references** from `config_context`; no secret store. |
@@ -43,12 +43,15 @@ NetBox-native concept rather than a 1:1 equivalent:
 - **`assign_vrf_to_device` → all interfaces.** NetBox has no device↔VRF link
   (VRFs attach to interfaces/prefixes/IPs), so the VRF is set on every one of the
   device's interfaces — which is exactly how `get_device_vrfs` reads them back.
-- **Statuses** are per-model **choice fields**, not `Status` objects. Extensible
-  fields (`Device`/`IPAddress`/`Prefix`/`VLAN`/BGP `Session`) are extended via
-  `FIELD_CHOICES`; models with no status field (Interface/VRF/ASN) use the
-  `nvcm_status` custom field; `dcim.cable` remaps `active` → `connected`.
-  `list_statuses` reads them from the endpoint's `OPTIONS` response and returns
-  the status **value** (e.g. `active`), which round-trips into `?status=` filters.
+- **Statuses** are per-model **choice fields**, not `Status` objects.
+  `list_statuses` reads them from the endpoint's `OPTIONS` response
+  (`actions.POST.status.choices`) and returns the status **value** (e.g.
+  `active`), which round-trips into `?status=` filters. Whatever choices a model
+  actually offers are what you get — including any the companion plugin adds via
+  `FIELD_CHOICES` (this is how `mark_ztp_device_provisioned` can write
+  `provisioned`), and including model-specific sets such as `dcim.cable`'s
+  `connected`. A content type with no status field, or an unknown one, raises
+  `DCIMInvalidDataError` rather than returning an empty list.
 - **MAC = `MACAddress` model.** NetBox 4.x has no scalar `interface.mac_address`;
   MACs are `MACAddress` objects with the interface's `primary_mac_address`
   pointing at one. `update_dpu_device_inventory` upserts them.
@@ -62,7 +65,9 @@ NetBox-native concept rather than a 1:1 equivalent:
 - **"Site" is a NetBox Location name.** Overlay/Spectrum-X operations key on
   `dcim.Location` (the `Overlay.location` FK); a NetBox *Site* name resolves only
   if a Location of that name exists.
-- **Interface `role`** has no native NetBox field and is not currently emitted.
+- **Interface `role`** has no native NetBox field; it is read from the
+  `nvcm_interface_role` custom field, which the render and DHCP paths both use to
+  gate per-role behaviour (uplink/downlink templates, per-role DHCP options).
 - **Cabling requires both ends.** A `connected_interface` to a device that isn't
   modeled in NetBox cannot form a cable, so those far-ends are not populated
   (a NetBox data-model difference, not a data error).

@@ -9,6 +9,7 @@ custom field. UFM host/pkey resolution walks NetBox devices and their site.
 
 from __future__ import annotations
 
+import asyncio
 import re
 
 from nv_config_manager_dcim import (
@@ -26,7 +27,11 @@ from nv_config_manager_dcim import (
 )
 
 from nv_config_manager_dcim_netbox._mappers import strip_mask
-from nv_config_manager_dcim_netbox.fabric_common import FABRIC_STATUS, normalize_pkey
+from nv_config_manager_dcim_netbox.fabric_common import (
+    FABRIC_STATUS,
+    INTERFACES_PATH,
+    normalize_pkey,
+)
 
 _IB_PKEY_ISOLATION = "ib_pkey"
 _IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
@@ -40,6 +45,27 @@ def _normalize_membership(value: str | None) -> str:
     redundant PATCH thrash on values that are semantically equal.
     """
     return (value or "full").strip().lower() or "full"
+
+
+def _fk_name(value: object) -> str:
+    """Return a nested object's name, or ``""`` for a bare PK / missing object."""
+    return str(value.get("name") or "") if isinstance(value, dict) else ""
+
+
+def _ib_guid(row: dict, device_name: str = "") -> IBInterfaceGuid:
+    """Build an :class:`IBInterfaceGuid` from an interface row.
+
+    The port GUID is the ``ib_guid`` interface custom field. ``device_name`` is the
+    fallback used when the row carries no nested device (e.g. one fetched by a
+    query that already knows which device it asked about).
+    """
+    return IBInterfaceGuid(
+        interface_id=str(row["id"]),
+        device_name=_fk_name(row.get("device")) or device_name,
+        interface_name=row["name"],
+        guid=(row.get("custom_fields") or {}).get("ib_guid") or "",
+    )
+
 
 _SWITCH_TOPOLOGY_QUERY = """
 query ($ids: [ID!]!) {
@@ -117,16 +143,10 @@ class NetBoxInfiniBandMixin:
         return IBSwitchTopology(switch_names=switch_names, intended_neighbors=neighbors)
 
     async def get_ib_interface_guid(self, interface_id: str) -> IBInterfaceGuid:
-        iface = await self.rest_request("GET", f"dcim/interfaces/{interface_id}/")
+        iface = await self.rest_request("GET", f"{INTERFACES_PATH}{interface_id}/")
         if not iface:
             raise DCIMNotFoundError(f"NetBox interface {interface_id} not found")
-        device = iface.get("device") or {}
-        return IBInterfaceGuid(
-            interface_id=str(iface["id"]),
-            device_name=device.get("name") if isinstance(device, dict) else "",
-            interface_name=iface["name"],
-            guid=(iface.get("custom_fields") or {}).get("ib_guid") or "",
-        )
+        return _ib_guid(iface)
 
     async def get_ib_interface_guids(
         self, device_interface_pairs: set[tuple[str, str]]
@@ -142,59 +162,52 @@ class NetBoxInfiniBandMixin:
             for iface in device.get("interfaces") or []:
                 if (dname.lower(), iface["name"]) not in requested:
                     continue
-                out.append(
-                    IBInterfaceGuid(
-                        interface_id=str(iface["id"]),
-                        device_name=dname,
-                        interface_name=iface["name"],
-                        guid=(iface.get("custom_fields") or {}).get("ib_guid") or "",
-                    )
-                )
+                out.append(_ib_guid(iface, dname))
         return out
 
     async def set_ib_interface_guid(self, interface_id: str, guid: str) -> None:
         await self.rest_request(
             "PATCH",
-            f"dcim/interfaces/{interface_id}/",
+            f"{INTERFACES_PATH}{interface_id}/",
             json={"custom_fields": {"ib_guid": guid}},
         )
 
     async def get_ib_interface_records(
         self, device_interface_pairs: list[tuple[str, str]]
     ) -> list[IBInterfaceGuid]:
-        out: list[IBInterfaceGuid] = []
+        # One query per device (``name`` is multi-valued and ORs) instead of one
+        # per pair, and the per-device queries run concurrently.
+        by_device: dict[str, list[str]] = {}
         for device, iface in device_interface_pairs:
-            rows = await self.rest_list("dcim/interfaces/", [("device", device), ("name", iface)])
-            for row in rows:
-                dev = row.get("device") or {}
-                out.append(
-                    IBInterfaceGuid(
-                        interface_id=str(row["id"]),
-                        device_name=dev.get("name") if isinstance(dev, dict) else device,
-                        interface_name=row["name"],
-                        guid=(row.get("custom_fields") or {}).get("ib_guid") or "",
-                    )
+            by_device.setdefault(device, []).append(iface)
+        pages = await asyncio.gather(
+            *(
+                self.rest_list(
+                    INTERFACES_PATH,
+                    [("device", device), *(("name", iface) for iface in ifaces)],
                 )
+                for device, ifaces in by_device.items()
+            )
+        )
+        out: list[IBInterfaceGuid] = []
+        for device, rows in zip(by_device, pages, strict=True):
+            wanted = set(by_device[device])
+            out.extend(_ib_guid(row, device) for row in rows if row.get("name") in wanted)
         return out
 
     async def find_ib_interfaces_by_guids(self, guids: list[str]) -> list[IBInterfaceGuid]:
-        out: list[IBInterfaceGuid] = []
-        for guid in guids:
-            # NetBox exposes a case-insensitive exact lookup (``__ie``) on text
-            # custom fields; UFM reports GUIDs in mixed case, so match on it to
-            # mirror the reference provider rather than requiring exact casing.
-            rows = await self.rest_list("dcim/interfaces/", [("cf_ib_guid__ie", guid)])
-            for row in rows:
-                dev = row.get("device") or {}
-                out.append(
-                    IBInterfaceGuid(
-                        interface_id=str(row["id"]),
-                        device_name=dev.get("name") if isinstance(dev, dict) else "",
-                        interface_name=row["name"],
-                        guid=(row.get("custom_fields") or {}).get("ib_guid") or "",
-                    )
-                )
-        return out
+        # NetBox exposes a case-insensitive exact lookup (``__ie``) on text custom
+        # fields; UFM reports GUIDs in mixed case, so match on it to mirror the
+        # reference provider rather than requiring exact casing. Repeated
+        # ``cf_*__ie`` params are not reliably OR-ed, so query per GUID — but
+        # concurrently.
+        pages = await asyncio.gather(
+            *(
+                self.rest_list(INTERFACES_PATH, [("cf_ib_guid__ie", guid)])
+                for guid in dict.fromkeys(guids)
+            )
+        )
+        return [_ib_guid(row) for rows in pages for row in rows]
 
     # -- partitions ----------------------------------------------------------
 
@@ -207,6 +220,9 @@ class NetBoxInfiniBandMixin:
         membership_type: str,
     ) -> IBPKeyPartition:
         pkey_norm = normalize_pkey(pkey)
+        # Normalized on write as well as on compare, so the stored value cannot
+        # differ from what ensure_/sync_ib_pkey_assignments later compare against.
+        membership_type = _normalize_membership(membership_type)
         location_id = await self._lookup_id("dcim/locations/", location_name)
         if location_id is None:
             raise DCIMInvalidDataError(f"NetBox location {location_name!r} not found")
@@ -300,17 +316,12 @@ class NetBoxInfiniBandMixin:
         return rows[0] if rows else None
 
     async def _create_ib_assignment(self, overlay_id, interface_id, guid, membership_type):
-        return await self.rest_request(
-            "POST",
-            self.ASSIGNMENTS_PATH,
-            json={
-                "overlay": overlay_id,
-                "assigned_object_type": "dcim.interface",
-                "assigned_object_id": int(interface_id),
-                "guid": guid,
-                "membership_type": membership_type,
-                "status": FABRIC_STATUS,
-            },
+        return await self._create_overlay_assignment(
+            overlay_id,
+            "dcim.interface",
+            interface_id,
+            guid=guid,
+            membership_type=membership_type,
         )
 
     async def ensure_ib_pkey_assignments(
@@ -359,7 +370,7 @@ class NetBoxInfiniBandMixin:
                 assignment_id=str(r["id"]),
                 interface_id=str(r["assigned_object_id"]),
                 guid=r.get("guid") or "",
-                membership_type=(r.get("membership_type") or "full").strip().lower(),
+                membership_type=_normalize_membership(r.get("membership_type")),
             )
             for r in rows
             if str(r.get("assigned_object_type")) == "dcim.interface"
@@ -414,20 +425,27 @@ class NetBoxInfiniBandMixin:
             # matching IP -> its interface -> that interface's device. Collect
             # across every matching IP and dedupe by id so the conflict guard
             # below fires when more than one distinct device is implicated.
+            interface_ids = sorted(
+                {
+                    str(iface_id)
+                    for ip in await self.rest_list("ipam/ip-addresses/", [("address", host)])
+                    if ip.get("assigned_object_type") == "dcim.interface"
+                    and (iface_id := (ip.get("assigned_object") or {}).get("id"))
+                }
+            )
             by_id: dict[str, dict] = {}
-            for ip in await self.rest_list("ipam/ip-addresses/", [("address", host)]):
-                if ip.get("assigned_object_type") != "dcim.interface":
-                    continue
-                iface_id = (ip.get("assigned_object") or {}).get("id")
-                if not iface_id:
-                    continue
-                interface = await self.rest_request("GET", f"dcim/interfaces/{iface_id}/")
-                name = ((interface or {}).get("device") or {}).get("name")
-                if not name:
-                    continue
-                found = await self.graphql_query(_HOST_BY_NAME_QUERY, {"names": [name]})
-                for candidate in found.get("device_list") or []:
-                    by_id[str(candidate["id"])] = candidate
+            if interface_ids:
+                # One interfaces query for every matching IP, then one host query
+                # for the distinct device names — rather than a GET plus a GraphQL
+                # round trip per address.
+                interfaces = await self.rest_list(
+                    INTERFACES_PATH, [("id", i) for i in interface_ids]
+                )
+                names = sorted({name for i in interfaces if (name := _fk_name(i.get("device")))})
+                if names:
+                    found = await self.graphql_query(_HOST_BY_NAME_QUERY, {"names": names})
+                    for candidate in found.get("device_list") or []:
+                        by_id[str(candidate["id"])] = candidate
             devices = list(by_id.values())
         if len(devices) > 1:
             raise DCIMConflictError(f"Multiple NetBox devices match host {host!r}")

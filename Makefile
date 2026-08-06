@@ -4,12 +4,14 @@
 #   make render SERVER=https://netbox.example TOKEN=abc DEVICE_ID=<id> ENTRYPOINT=<name>
 #   make setup NVCM=/path/to/nv-config-manager   # branch: zb/pluggable-dcim
 
-NVCM       ?= /Users/ahanson/dev/library/nv-config-manager
+NVCM       ?= ../nv-config-manager
 SERVER     ?= http://localhost:8000
 TOKEN      ?= REPLACE_ME
 DEVICE_ID  ?= REPLACE_ME
 ENTRYPOINT ?= REPLACE_ME
-IMAGE      ?= nv-config-manager-dcim-netbox:0.1.0
+# Tag tracks the version declared in pyproject.toml (the single source of truth).
+VERSION    := $(shell sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
+IMAGE      ?= nv-config-manager-dcim-netbox:$(VERSION)
 
 VENV     := .venv
 PY       := $(VENV)/bin/python
@@ -27,7 +29,7 @@ help:
 	@echo "lint            ruff check + format check"
 	@echo "test            run this provider's unit tests (alias: test-netbox)"
 	@echo "discovery       confirm the 'netbox' provider is discovered"
-	@echo "probe           call get_device_metadata (expect DCIMOperationNotSupportedError)"
+	@echo "probe           call get_device_metadata against SERVER/TOKEN/DEVICE_ID"
 	@echo "cache-query     template-cli: query provider for render data -> rd.json"
 	@echo "render-cli      template-cli: render from rd.json"
 	@echo "test-sdk        run the SDK (components/dcim) tests"

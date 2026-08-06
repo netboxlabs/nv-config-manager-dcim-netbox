@@ -4,9 +4,14 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from nv_config_manager_dcim import DCIMInvalidDataError, DCIMSelection
+
+from nv_config_manager_dcim_netbox.fabric_common import VRFS_PATH
+
+logger = logging.getLogger(__name__)
 
 _LOCATIONS_QUERY = "query { location_list { id name } }"
 _TENANTS_QUERY = "query { tenant_list { id name } }"
@@ -56,6 +61,12 @@ class NetBoxReferenceMixin:
         # "location type" (that is a reference-provider concept); its
         # Region/SiteGroup/Site/Location hierarchy carries no per-location type
         # to filter on, so the argument is accepted only for contract parity.
+        # Logged when supplied so a caller expecting it to filter can see that it
+        # did not, rather than silently receiving every location.
+        if location_types:
+            logger.debug(
+                "NetBox has no location-type concept; ignoring location_types=%r", location_types
+            )
         data = await self.graphql_query(_LOCATIONS_QUERY)
         return _selections(data.get("location_list") or [])
 
@@ -102,7 +113,10 @@ class NetBoxReferenceMixin:
         params: list[tuple[str, str]] = []
         if location:
             params.append(("cf_nvcm_site", location))
-        vrfs = await self.rest_list("ipam/vrfs/", params)
+        vrfs = await self.rest_list(VRFS_PATH, params)
+        # Names only — deliberately not ``_mappers.tag_names``, which also returns
+        # slugs. These are offered to operators as choices, so a tag must appear
+        # once (as its name), not twice (name and slug).
         tags: set[str] = set()
         for vrf in vrfs:
             for tag in vrf.get("tags") or []:
@@ -124,7 +138,7 @@ class NetBoxReferenceMixin:
                 # No NetBox Location by that name -> nothing can match it.
                 return []
             params.append(("location_id", str(location_id)))
-        overlays = await self.rest_list("plugins/nv-config-manager/overlays/", params)
+        overlays = await self.rest_list(self.OVERLAYS_PATH, params)
         return _selections(overlays)
 
     async def list_statuses(self, content_type: str | None = None) -> list[DCIMSelection]:

@@ -279,9 +279,10 @@ async def test_resolve_ib_device_ipv4_fallback():
                     "assigned_object_type": "dcim.interface",
                     "assigned_object": {"id": 11},
                 }
-            ]
+            ],
+            # The matching IPs' interfaces are resolved in one bulk query.
+            "dcim/interfaces/": [{"id": 11, "device": {"name": "host-01"}}],
         },
-        rest_get={"dcim/interfaces/11/": {"id": 11, "device": {"name": "host-01"}}},
     )
 
     async def gql(query, variables=None):

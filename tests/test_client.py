@@ -23,7 +23,7 @@ from nv_config_manager_dcim import (
     create_dcim_client,
 )
 
-from nv_config_manager_dcim_netbox.client import netbox_connection_settings
+from nv_config_manager_dcim_netbox.client import BaseNetBoxClient, netbox_connection_settings
 from nv_config_manager_dcim_netbox.provider import NetBoxProvider
 
 _OK = {"server": "https://netbox.example", "token": "t"}
@@ -66,7 +66,7 @@ def test_extra_settings_keys_are_ignored():
     NetBoxProvider().validate_settings(settings)  # no raise
     resolved = netbox_connection_settings(settings)
     assert resolved["server"] == _OK["server"]
-    assert set(resolved) == {"server", "token", "public_url", "verify"}
+    assert set(resolved) == {"server", "token", "public_url", "verify", "timeout"}
     # create_client tolerates the extra keys too.
     client = create_dcim_client("netbox", settings)
     assert client._base_url == "https://netbox.example"
@@ -229,3 +229,95 @@ async def test_malformed_json_maps_to_invalid_data():
             await client._read(response)
     finally:
         await client.close()
+
+
+# --- rest_list pagination -------------------------------------------------------
+#
+# rest_list is the read path for nearly every operation, but every behavioural
+# suite stubs it wholesale, so its own offset/limit walk was never exercised.
+
+
+def _paginating_client(pages):
+    """Return a client whose ``rest_request`` serves ``pages`` in order, recording params."""
+    client = create_dcim_client("netbox", _OK)
+    calls: list[list[tuple[str, str]]] = []
+    remaining = list(pages)
+
+    async def fake_request(method, path, *, params=None, json=None):
+        calls.append(list(params or []))
+        return remaining.pop(0) if remaining else {"results": [], "next": None}
+
+    client.rest_request = fake_request
+    return client, calls
+
+
+async def test_rest_list_walks_every_page_and_advances_the_offset():
+    client, calls = _paginating_client(
+        [
+            {"count": 3, "next": "?offset=2", "results": [{"id": 1}, {"id": 2}]},
+            {"count": 3, "next": None, "results": [{"id": 3}]},
+        ]
+    )
+    rows = await client.rest_list("dcim/devices/", [("site", "dc1")], page_size=2)
+    assert [r["id"] for r in rows] == [1, 2, 3]
+    # The caller's filter is preserved on every page, and offset advances by the
+    # number of rows actually returned.
+    assert ("site", "dc1") in calls[0] and ("site", "dc1") in calls[1]
+    assert ("limit", "2") in calls[0]
+    assert ("offset", "0") in calls[0]
+    assert ("offset", "2") in calls[1]
+
+
+async def test_rest_list_stops_when_count_is_reached():
+    """An endpoint that reports ``next`` past the end of its own ``count`` must not
+    be followed — otherwise a paginator that ignores ``offset`` loops forever
+    accumulating duplicate rows."""
+    client, calls = _paginating_client(
+        [{"count": 2, "next": "?offset=0", "results": [{"id": 1}, {"id": 2}]}] * 5
+    )
+    rows = await client.rest_list("dcim/devices/", page_size=2)
+    assert [r["id"] for r in rows] == [1, 2]
+    assert len(calls) == 1
+
+
+async def test_rest_list_tolerates_a_non_dict_page():
+    client, _ = _paginating_client([None])
+    assert await client.rest_list("dcim/devices/") == []
+
+
+# --- provider-owned connection settings ------------------------------------------
+
+
+def test_public_url_must_be_an_http_url():
+    """public_url is surfaced to operators in device links, so it is held to the
+    same bar as ``server`` rather than passed through unvalidated."""
+    with pytest.raises(DCIMProviderConfigurationError):
+        netbox_connection_settings({**_OK, "public_url": "netbox.example"})
+    resolved = netbox_connection_settings({**_OK, "public_url": "https://nb.example"})
+    assert resolved["public_url"] == "https://nb.example"
+
+
+def test_timeout_is_configurable_and_validated():
+    assert netbox_connection_settings(_OK)["timeout"] == 30.0  # default
+    assert netbox_connection_settings({**_OK, "timeout": "5"})["timeout"] == 5.0
+    for bad in ("nope", "0", "-1"):
+        with pytest.raises(DCIMProviderConfigurationError):
+            netbox_connection_settings({**_OK, "timeout": bad})
+
+
+def test_unusable_ca_bundle_is_a_configuration_error():
+    """A bad CA path must surface as a provider configuration error, not leak an
+    OSError out of client construction."""
+    with pytest.raises(DCIMProviderConfigurationError):
+        create_dcim_client("netbox", {**_OK, "verify": "/nonexistent/ca.pem"})
+
+
+def test_extra_headers_cannot_drop_authorization():
+    """Supplied headers are merged into the generated ones; a caller passing
+    headers must not silently unauthenticate the client."""
+    client = BaseNetBoxClient(
+        netbox_url="https://netbox.example", token="t", headers={"X-Trace": "abc"}
+    )
+    headers = client._request_headers()
+    assert headers["Authorization"] == "Token t"
+    assert headers["X-Trace"] == "abc"

@@ -10,23 +10,28 @@ structures consumed by the Kea config generator.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
+import logging
 
 from nv_config_manager_dcim import DCIMInvalidDataError, DCIMNotFoundError
 
-from nv_config_manager_dcim_netbox._mappers import strip_mask
+from nv_config_manager_dcim_netbox._mappers import choice_value, fk_id, strip_mask
 from nv_config_manager_dcim_netbox.client import encode_device_id
+
+# Per-device NVCM lifecycle flags (ztp_enabled / is_aggregate_managed) live on the
+# plugin's DeviceConfigStatus model, the same source the render/backup paths read.
+from nv_config_manager_dcim_netbox.fabric_common import PREFIXES_PATH, STATUS_PATH
+
+logger = logging.getLogger(__name__)
 
 # Config-context profile names NV Config Manager stores DHCP data under.
 _SITE_OPTIONS_PROFILE = "nv-config-manager-site-dhcp-option-def"
 _STATIC_DATA_PROFILE = "nv-config-manager-kea-static-data"
-# Per-device NVCM lifecycle flags (ztp_enabled / is_aggregate_managed) live on the
-# plugin's DeviceConfigStatus model, the same source the render/backup paths read.
-_STATUS_PATH = "plugins/nv-config-manager/device-config-statuses/"
 
-
-def _choice_value(value):
-    return value.get("value") if isinstance(value, dict) else value
+_IP_ADDRESSES_PATH = "ipam/ip-addresses/"
+_INTERFACES_PATH = "dcim/interfaces/"
+_DEVICES_PATH = "dcim/devices/"
 
 
 class NetBoxDHCPMixin:
@@ -46,7 +51,7 @@ class NetBoxDHCPMixin:
         params = [("cf_nvcm_ztp_enabled", "true")]
         if is_aggregate_managed is not None:
             params.append(("cf_nvcm_is_aggregate_managed", str(is_aggregate_managed).lower()))
-        devices = await self.rest_list("dcim/devices/", params)
+        devices = await self.rest_list(_DEVICES_PATH, params)
         # Key by the UUID-encoded device id so it matches the device_id the confgen
         # reads back from reservations/option-candidates (which are UUID-encoded so
         # the ZTP boot-file URL resolves in the UUID-keyed config-store).
@@ -55,12 +60,14 @@ class NetBoxDHCPMixin:
     async def get_dhcp_auto_subnets(
         self, family: int = 4, is_aggregate_managed: bool | None = None
     ) -> list[dict[str, object]]:
-        prefixes = await self.rest_list("ipam/prefixes/", [("tag", "dhcp-subnet")])
-        pool_ips = await self.rest_list("ipam/ip-addresses/", [("tag", "dhcp-pool")])
-        reserved_ips = await self.rest_list("ipam/ip-addresses/", [("tag", "dhcp-reserve")])
-        device_cache: dict[str, dict] = {}
-        interface_cache: dict[str, dict] = {}
-        status_cache: dict[str, dict] = {}
+        # The three tag queries are independent, so issue them together.
+        prefixes, pool_ips, reserved_ips = await asyncio.gather(
+            # Filter by family server-side; the client-side check below still
+            # guards a NetBox that ignores the parameter.
+            self.rest_list(PREFIXES_PATH, [("tag", "dhcp-subnet"), ("family", str(family))]),
+            self.rest_list(_IP_ADDRESSES_PATH, [("tag", "dhcp-pool")]),
+            self.rest_list(_IP_ADDRESSES_PATH, [("tag", "dhcp-reserve")]),
+        )
 
         # Parse the family-filtered tagged subnets up front so each pool/reserve IP
         # can be assigned to its *most-specific* containing subnet only. NetBox's
@@ -71,7 +78,7 @@ class NetBoxDHCPMixin:
         # the flat, non-overlapping case).
         candidates: list[tuple[dict, object]] = []
         for prefix in prefixes:
-            if _choice_value(prefix.get("family")) != family:
+            if choice_value(prefix.get("family")) != family:
                 continue
             try:
                 network = ipaddress.ip_network(prefix["prefix"], strict=False)
@@ -80,16 +87,16 @@ class NetBoxDHCPMixin:
                 continue
             candidates.append((prefix, network))
 
-        pools_by_subnet: dict[object, list[dict]] = {}
-        for ip in pool_ips:
-            subnet_id = self._most_specific_subnet_id(ip, candidates)
-            if subnet_id is not None:
-                pools_by_subnet.setdefault(subnet_id, []).append(ip)
-        reserves_by_subnet: dict[object, list[dict]] = {}
-        for ip in reserved_ips:
-            subnet_id = self._most_specific_subnet_id(ip, candidates)
-            if subnet_id is not None:
-                reserves_by_subnet.setdefault(subnet_id, []).append(ip)
+        pools_by_subnet = self._bucket_by_subnet(pool_ips, candidates)
+        reserves_by_subnet = self._bucket_by_subnet(reserved_ips, candidates)
+
+        # Warm the interface/device/status caches in three bulk queries rather than
+        # letting _resolve_interface_ip fetch each one individually (it still falls
+        # back to a single fetch for anything not prefetched).
+        device_cache, interface_cache, status_cache = await self._prefetch_ip_owners(
+            [ip for ips in pools_by_subnet.values() for ip in ips]
+            + [ip for ips in reserves_by_subnet.values() for ip in ips]
+        )
 
         subnets: list[dict[str, object]] = []
         for prefix, network in candidates:
@@ -104,25 +111,27 @@ class NetBoxDHCPMixin:
                 continue
             pools = pools_by_subnet.get(prefix["id"], [])
             reserves = reserves_by_subnet.get(prefix["id"], [])
-            reservations = []
-            for ip in reserves:
-                entry = await self._reservation_entry(
-                    ip, is_aggregate_managed, device_cache, interface_cache, status_cache
-                )
-                if entry is not None:
-                    reservations.append(entry)
+            caches = (device_cache, interface_cache, status_cache)
+            reservations = [
+                entry
+                for ip in reserves
+                if (entry := await self._dhcp_entry(ip, is_aggregate_managed, *caches))
+            ]
             # Pool IPs assigned to an interface are also option candidates: the
             # confgen applies their interface-role subnet_options at the subnet
             # level (so a pool/DHCP client — e.g. an OOB management leaf's uplink —
             # still receives its ZTP boot-file, which reservations alone can't
-            # deliver). Mirrors the reference DCIM provider.
-            option_candidates = []
-            for ip in pools:
-                entry = await self._option_candidate_entry(
-                    ip, is_aggregate_managed, device_cache, interface_cache, status_cache
+            # deliver). Mirrors the reference DCIM provider. Unlike a reservation,
+            # a candidate additionally needs an addressable identity (MAC or serial).
+            option_candidates = [
+                entry
+                for ip in pools
+                if (
+                    entry := await self._dhcp_entry(
+                        ip, is_aggregate_managed, *caches, require_identity=True
+                    )
                 )
-                if entry is not None:
-                    option_candidates.append(entry)
+            ]
             # The kea config-gen consumes these as ipaddress objects (subnet
             # containment checks, address.version), so hand back typed values.
             subnets.append(
@@ -130,9 +139,7 @@ class NetBoxDHCPMixin:
                     "id": prefix["id"],
                     "prefix": network,
                     "gateway": ipaddress.ip_address(gateway),
-                    "pool_ips": [
-                        ipaddress.ip_address(strip_mask(ip["address"])) for ip in pools
-                    ],
+                    "pool_ips": [ipaddress.ip_address(strip_mask(ip["address"])) for ip in pools],
                     "option_candidates": option_candidates,
                     "reservations": reservations,
                 }
@@ -149,6 +156,71 @@ class NetBoxDHCPMixin:
             return ipaddress.ip_interface(addr).ip in network
         except ValueError:
             return False
+
+    def _bucket_by_subnet(
+        self, ips: list[dict], candidates: list[tuple[dict, object]]
+    ) -> dict[object, list[dict]]:
+        """Group ``ips`` under the id of the most-specific subnet containing each."""
+        buckets: dict[object, list[dict]] = {}
+        for ip in ips:
+            subnet_id = self._most_specific_subnet_id(ip, candidates)
+            if subnet_id is not None:
+                buckets.setdefault(subnet_id, []).append(ip)
+        return buckets
+
+    async def _prefetch_ip_owners(
+        self, ips: list[dict]
+    ) -> tuple[dict[str, dict], dict[str, dict], dict[str, dict]]:
+        """Bulk-load the interfaces, devices, and config-statuses ``ips`` resolve to.
+
+        Returns the three caches ``_resolve_interface_ip`` consumes. Without this,
+        that method issues three requests per address; here it is three requests
+        total. Anything a bulk query does not return is simply absent from the
+        cache and falls back to the per-item fetch.
+        """
+        interface_cache: dict[str, dict] = {}
+        device_cache: dict[str, dict] = {}
+        status_cache: dict[str, dict] = {}
+
+        interface_ids = {
+            str(iface_id)
+            for ip in ips
+            if ip.get("assigned_object_type") == "dcim.interface"
+            and (iface_id := (ip.get("assigned_object") or {}).get("id"))
+        }
+        if not interface_ids:
+            return device_cache, interface_cache, status_cache
+
+        for row in await self.rest_list(
+            _INTERFACES_PATH, [("id", i) for i in sorted(interface_ids)]
+        ):
+            if row.get("id") is not None:
+                interface_cache[str(row["id"])] = row
+
+        device_ids = {
+            str(pk)
+            for row in interface_cache.values()
+            if (pk := fk_id(row.get("device"))) is not None
+        }
+        if not device_ids:
+            return device_cache, interface_cache, status_cache
+
+        devices, statuses = await asyncio.gather(
+            self.rest_list(_DEVICES_PATH, [("id", i) for i in sorted(device_ids)]),
+            self.rest_list(STATUS_PATH, [("device_id", i) for i in sorted(device_ids)]),
+        )
+        for row in devices:
+            if row.get("id") is not None:
+                device_cache[str(row["id"])] = row
+        for row in statuses:
+            pk = fk_id(row.get("device"))
+            if pk is not None:
+                status_cache.setdefault(str(pk), row)
+        # A device with no DeviceConfigStatus row caches as {} so the per-item path
+        # does not re-query it; _aggregate_matches treats that as "flag unset".
+        for device_id in device_ids:
+            status_cache.setdefault(device_id, {})
+        return device_cache, interface_cache, status_cache
 
     def _most_specific_subnet_id(self, ip: dict, candidates: list[tuple[dict, object]]):
         """Return the id of the longest-prefix candidate subnet containing ``ip``.
@@ -178,7 +250,7 @@ class NetBoxDHCPMixin:
         if isinstance(gateway, dict):
             explicit = strip_mask(gateway.get("address"))
         elif gateway:
-            ip = await self.rest_request("GET", f"ipam/ip-addresses/{gateway}/")
+            ip = await self.rest_request("GET", f"{_IP_ADDRESSES_PATH}{gateway}/")
             explicit = strip_mask((ip or {}).get("address"))
         if explicit:
             # Validate the override actually lies within the subnet, matching the
@@ -220,7 +292,7 @@ class NetBoxDHCPMixin:
         interface = interface_cache.get(str(iface_id))
         if interface is None:
             try:
-                interface = await self.rest_request("GET", f"dcim/interfaces/{iface_id}/")
+                interface = await self.rest_request("GET", f"{_INTERFACES_PATH}{iface_id}/")
             except DCIMNotFoundError:
                 # Stale assignment pointing at a deleted interface: skip it
                 # rather than failing the whole subnet fetch.
@@ -228,19 +300,26 @@ class NetBoxDHCPMixin:
             interface_cache[str(iface_id)] = interface or {}
         if not interface:
             return None
-        device_ref = interface.get("device") or {}
-        device_id = device_ref.get("id") if isinstance(device_ref, dict) else device_ref
+        device_id = fk_id(interface.get("device") or {})
         if not device_id:
             return None
         device = device_cache.get(str(device_id))
         if device is None:
-            device = await self.rest_request("GET", f"dcim/devices/{device_id}/")
+            try:
+                device = await self.rest_request("GET", f"{_DEVICES_PATH}{device_id}/")
+            except DCIMNotFoundError:
+                # Stale interface pointing at a deleted device: skip it rather
+                # than failing the whole subnet fetch (same policy as the
+                # interface lookup above).
+                device = None
             device_cache[str(device_id)] = device or {}
+        if not device:
+            return None
         # ZTP-enabled and aggregate-managed are per-device lifecycle flags on the
         # plugin's DeviceConfigStatus model (not device custom fields).
         status = status_cache.get(str(device_id))
         if status is None:
-            rows = await self.rest_list(_STATUS_PATH, [("device_id", str(device_id))])
+            rows = await self.rest_list(STATUS_PATH, [("device_id", str(device_id))])
             status = rows[0] if rows else {}
             status_cache[str(device_id)] = status
         return interface, device, status, address, device_id
@@ -283,44 +362,37 @@ class NetBoxDHCPMixin:
             return True
         return bool(status.get("is_aggregate_managed")) == is_aggregate_managed
 
-    async def _reservation_entry(
-        self, ip: dict, is_aggregate_managed, device_cache, interface_cache, status_cache
+    async def _dhcp_entry(
+        self,
+        ip: dict,
+        is_aggregate_managed,
+        device_cache,
+        interface_cache,
+        status_cache,
+        *,
+        require_identity: bool = False,
     ) -> dict | None:
-        resolved = await self._resolve_interface_ip(
-            ip, device_cache, interface_cache, status_cache
-        )
+        """Build one reservation / option-candidate entry for an interface-assigned IP.
+
+        Both kinds share their eligibility rules, matching the reference DCIM
+        provider: the IP must resolve to a device, ZTP must not be *explicitly*
+        disabled, and the aggregate-managed flag must match. ``require_identity``
+        adds the option-candidate rule that the interface carry a MAC or the device
+        a serial. Returns ``None`` when the IP is not eligible.
+        """
+        resolved = await self._resolve_interface_ip(ip, device_cache, interface_cache, status_cache)
         if resolved is None:
             return None
         interface, device, status, address, device_id = resolved
         # ZTP defaults to enabled: only an *explicit* ztp_enabled=False drops the
-        # reservation. A device with no status (empty dict) or an unset flag is
-        # still ZTP-eligible — matching the option-candidate path below and the
-        # reference DCIM provider's default-True semantics. Using ``not
-        # status.get("ztp_enabled")`` here wrongly excluded no-status devices.
+        # entry. A device with no status (empty dict) or an unset flag is still
+        # ZTP-eligible, matching the reference DCIM provider's default-True
+        # semantics. Using ``not status.get("ztp_enabled")`` here wrongly excluded
+        # no-status devices.
         if status.get("ztp_enabled") is False:
             return None
         if not self._aggregate_matches(status, is_aggregate_managed):
             return None
-        return self._entry_dict(interface, device, address, device_id)
-
-    async def _option_candidate_entry(
-        self, ip: dict, is_aggregate_managed, device_cache, interface_cache, status_cache
-    ) -> dict | None:
-        # A pool IP assigned to an interface is an option candidate: it carries an
-        # interface role whose subnet_options the confgen applies at the subnet
-        # level. Matches the reference DCIM provider — ZTP must not be explicitly
-        # disabled, the aggregate-managed flag must match, and the interface needs
-        # a MAC or the device a serial.
-        resolved = await self._resolve_interface_ip(
-            ip, device_cache, interface_cache, status_cache
-        )
-        if resolved is None:
-            return None
-        interface, device, status, address, device_id = resolved
-        if status.get("ztp_enabled") is False:
-            return None
-        if not self._aggregate_matches(status, is_aggregate_managed):
-            return None
-        if not interface.get("mac_address") and not device.get("serial"):
+        if require_identity and not interface.get("mac_address") and not device.get("serial"):
             return None
         return self._entry_dict(interface, device, address, device_id)

@@ -168,9 +168,7 @@ async def test_get_spectrum_x_vrfs_filters_by_namespace_tag():
             {"id": "9", "name": "b", "rd": "1:2", "tags": [{"name": "ns2"}], "interfaces": []},
         ]
     }
-    client = _spx_client(
-        gql=gql, rest_list={_VXLANS: [{"vrf": 8}, {"vrf": 9}]}, overlay={"id": 10}
-    )
+    client = _spx_client(gql=gql, rest_list={_VXLANS: [{"vrf": 8}, {"vrf": 9}]}, overlay={"id": 10})
     vrfs = await client.get_spectrum_x_vrfs("SpX", "DM-Akron", namespace="ns2")
     assert [v.vrf_id for v in vrfs] == ["9"]
     # Site falls back to the overlay's site when no interface device is present.
@@ -197,9 +195,7 @@ async def test_get_os_image_versions_scopes_targets_to_device_site():
         seen["site"] = site
         return [{"data": {"firmware-targets": {"leaf": {"cumulus-linux": "5.2.0"}}}}]
 
-    client = fake_client(
-        rest_get={_DEVICE: device}, patch={"config_contexts_for_profile": targets}
-    )
+    client = fake_client(rest_get={_DEVICE: device}, patch={"config_contexts_for_profile": targets})
     assert await client.get_os_image_versions("1") == ("5.1.0", "5.2.0", "10.0.0.9")
     # The config-context lookup is scoped to the device's site.
     assert seen["site"] == "DM-Akron"

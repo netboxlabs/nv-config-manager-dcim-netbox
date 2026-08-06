@@ -10,10 +10,11 @@ from nv_config_manager_dcim import DCIMInvalidDataError, DCIMNotFoundError, ZTPD
 
 from nv_config_manager_dcim_netbox._mappers import strip_mask
 from nv_config_manager_dcim_netbox.client import encode_device_id
+from nv_config_manager_dcim_netbox.fabric_common import INTENDED_PATH as _INTENDED_PATH
 
-# Per-device intended-config records (written by the render pipeline) carry the
-# config_store_instance the device's rendered files live under.
-_INTENDED_PATH = "plugins/nv-config-manager/intended-configs/"
+# ``_INTENDED_PATH`` holds the per-device intended-config records written by the
+# render pipeline; each carries the config_store_instance the device's rendered
+# files live under.
 
 # NetBox has no "provisioned" device status out of the box (stock statuses:
 # offline, active, planned, staged, failed, inventory, decommissioning). NVCM
@@ -65,9 +66,7 @@ class NetBoxZTPMixin:
             # uses it as the endpoint); a None here 404s as "No config store file
             # found". ui->api-mtls mirrors the reference DCIM provider.
             config_store_instance = None
-            intended = await self.rest_list(
-                _INTENDED_PATH, [("device_id", str(device_id))]
-            )
+            intended = await self.rest_list(_INTENDED_PATH, [("device_id", str(device_id))])
             if intended and intended[0].get("config_store_instance"):
                 config_store_instance = re.sub(
                     "ui", "api-mtls", intended[0]["config_store_instance"]

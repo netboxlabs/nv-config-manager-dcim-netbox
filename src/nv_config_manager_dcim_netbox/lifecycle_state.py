@@ -22,17 +22,44 @@ from nv_config_manager_dcim import (
     RenderTemplateVersion,
 )
 
+from nv_config_manager_dcim_netbox._mappers import fk_id
 from nv_config_manager_dcim_netbox.client import encode_device_id
+from nv_config_manager_dcim_netbox.fabric_common import (
+    BACKUP_PATH as _BACKUP_PATH,
+)
+from nv_config_manager_dcim_netbox.fabric_common import (
+    INTENDED_PATH as _INTENDED_PATH,
+)
+from nv_config_manager_dcim_netbox.fabric_common import (
+    STATUS_PATH as _STATUS_PATH,
+)
 
 if TYPE_CHECKING:
     from nv_config_manager_dcim import ConfigurationBackupIntent, IntendedConfigurationUpdate
 
-_STATUS_PATH = "plugins/nv-config-manager/device-config-statuses/"
-_INTENDED_PATH = "plugins/nv-config-manager/intended-configs/"
-_BACKUP_PATH = "plugins/nv-config-manager/backup-configs/"
-
 # Platform slugs eligible for backup (matches the managed-fleet platforms).
 _BACKUP_PLATFORMS = ("arista-eos", "cumulus-linux", "nv-os")
+
+# Device ids per ``device_id`` list query. Repeating the param for a whole fleet
+# builds a query string long enough for a proxy to reject with 414, so the reads
+# that filter by many ids walk the fleet in chunks.
+_ID_CHUNK = 100
+
+
+def _device_pk(row: dict) -> str | None:
+    """Return the NetBox device PK from a plugin row's ``device`` field.
+
+    The plugin's serializers may render the FK as a nested brief object or a bare
+    PK depending on the endpoint, so read either shape.
+    """
+    pk = fk_id(row.get("device"))
+    return str(pk) if pk is not None else None
+
+
+def _chunked(values: list[str], size: int = _ID_CHUNK):
+    """Yield ``values`` in fixed-size chunks."""
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
 
 
 class NetBoxLifecycleStateMixin:
@@ -65,26 +92,32 @@ class NetBoxLifecycleStateMixin:
         if is_aggregate_managed is not None:
             params.append(("is_aggregate_managed", str(is_aggregate_managed).lower()))
         statuses = await self.rest_list(_STATUS_PATH, params)
-        return [
-            encode_device_id(s["device"]) for s in statuses if s.get("device") is not None
-        ]
+        return [encode_device_id(pk) for s in statuses if (pk := _device_pk(s))]
 
     async def get_render_template_versions(self) -> list[RenderTemplateVersion]:
         statuses = await self.rest_list(_STATUS_PATH, [("render_enabled", "true")])
-        render_device_ids = [str(s["device"]) for s in statuses if s.get("device") is not None]
+        render_device_ids = [pk for s in statuses if (pk := _device_pk(s))]
         if not render_device_ids:
             return []
-        intended = await self.rest_list(
-            _INTENDED_PATH, [("device_id", did) for did in render_device_ids]
+        # Chunked: one query per _ID_CHUNK devices rather than every id in a
+        # single query string (see _ID_CHUNK).
+        pages = await asyncio.gather(
+            *(
+                self.rest_list(_INTENDED_PATH, [("device_id", did) for did in chunk])
+                for chunk in _chunked(render_device_ids)
+            )
         )
         versions = {
-            str(row["device"]): row.get("template_version")
-            for row in intended
-            if row.get("device") is not None
+            pk: row.get("template_version")
+            for page in pages
+            for row in page
+            if (pk := _device_pk(row))
         }
+        # device_id is UUID-encoded, matching every other id this provider hands
+        # back to NVCM (see get_render_enabled_device_ids / client.encode_device_id).
         return [
-            RenderTemplateVersion(device_id=device_id, template_version=versions.get(device_id))
-            for device_id in render_device_ids
+            RenderTemplateVersion(device_id=encode_device_id(pk), template_version=versions.get(pk))
+            for pk in render_device_ids
         ]
 
     async def upsert_intended_configuration(self, update: IntendedConfigurationUpdate) -> None:
@@ -127,7 +160,7 @@ class NetBoxLifecycleStateMixin:
             ),
             self.rest_list("dcim/devices/", params),
         )
-        backup_enabled = {str(s["device"]) for s in statuses if s.get("device") is not None}
+        backup_enabled = {pk for s in statuses if (pk := _device_pk(s))}
         eligible = {str(d["id"]) for d in devices}
         return {encode_device_id(pk) for pk in backup_enabled & eligible}
 

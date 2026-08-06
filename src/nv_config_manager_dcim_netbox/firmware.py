@@ -16,17 +16,9 @@ from nv_config_manager_dcim import (
 )
 from nv_config_manager_dcim.models import FirmwareComponent
 
+from nv_config_manager_dcim_netbox._mappers import name_of, slug_of
+
 _FIRMWARE_TARGETS_PROFILE = "location-firmware-targets"
-
-
-def _slug(obj: object) -> str | None:
-    """Return a nested object's slug (NetBox roles/platforms key by slug)."""
-    return obj.get("slug") if isinstance(obj, dict) else None
-
-
-def _name(obj: object) -> str | None:
-    """Return a nested object's name."""
-    return obj.get("name") if isinstance(obj, dict) else None
 
 
 def _deep_merge(base: dict, updates: dict) -> None:
@@ -54,11 +46,11 @@ class NetBoxFirmwareMixin:
         ztp_ipv4 = ztp_ipv4_list[0] if ztp_ipv4_list else ""
         # Key the firmware-targets table by role + platform *slug* on both sides
         # (NetBox's canonical, stable identifiers) so lookups don't silently miss.
-        role = _slug(device.get("role"))
-        platform = _slug(device.get("platform"))
+        role = slug_of(device.get("role"))
+        platform = slug_of(device.get("platform"))
         # NetBox devices carry a direct site FK; scope the targets table to the
         # device's site so per-site desired versions don't leak across sites.
-        site = _name(device.get("site"))
+        site = name_of(device.get("site"))
         desired = ""
         if role and platform:
             targets = await self._firmware_targets(site)
@@ -126,6 +118,10 @@ class NetBoxFirmwareMixin:
         return (contexts[0].get("data") or {}).get("firmware-targets") or {}
 
     async def _merge_local_context(self, device_id: str, data: dict) -> None:
+        # Read-modify-write: NetBox exposes no conditional update for
+        # local_context_data, so two concurrent firmware writes to one device can
+        # lose an update. NVCM drives these per device, so writes do not overlap in
+        # practice; revisit if that changes.
         device = await self.rest_request("GET", f"dcim/devices/{device_id}/")
         local = (device or {}).get("local_context_data") or {}
         # Deep-merge so nested objects (e.g. ``intended-firmware``) keep their

@@ -4,6 +4,10 @@
 
 Mixed into the composed client so the Spectrum-X and InfiniBand mixins share
 overlay lookup, id resolution, and the plugin REST paths.
+
+This module is also the single home for the companion plugin's REST paths — the
+lifecycle-state, ZTP, and DHCP mixins import them from here rather than each
+redeclaring the same string.
 """
 
 from __future__ import annotations
@@ -16,8 +20,25 @@ from nv_config_manager_dcim import (
     DCIMNotFoundError,
 )
 
+from nv_config_manager_dcim_netbox._mappers import fk_id
+
 # Default fabric status value (plugin uses a choice field, not a status object).
 FABRIC_STATUS = "active"
+
+# Companion-plugin (netbox_nv_config_manager) REST paths.
+STATUS_PATH = "plugins/nv-config-manager/device-config-statuses/"
+INTENDED_PATH = "plugins/nv-config-manager/intended-configs/"
+BACKUP_PATH = "plugins/nv-config-manager/backup-configs/"
+NVLINK_DOMAINS_PATH = "plugins/nv-config-manager/nvlink-domains/"
+
+# Core NetBox paths shared across more than one mixin.
+VRFS_PATH = "ipam/vrfs/"
+VLANS_PATH = "ipam/vlans/"
+PREFIXES_PATH = "ipam/prefixes/"
+INTERFACES_PATH = "dcim/interfaces/"
+
+# netbox-bgp exposes no GraphQL, so BGP is read over REST.
+BGP_SESSIONS_PATH = "plugins/bgp/session/"
 
 _PKEY_RE = re.compile(r"\A0[xX]([0-9a-fA-F]{1,4})\Z")
 
@@ -32,9 +53,7 @@ def normalize_pkey(value: str) -> str:
     """
     match = _PKEY_RE.match(value.strip()) if value else None
     if not match:
-        raise DCIMInvalidDataError(
-            f"pkey {value!r} does not match required format (e.g. '0x8001')"
-        )
+        raise DCIMInvalidDataError(f"pkey {value!r} does not match required format (e.g. '0x8001')")
     return f"0x{int(match.group(1), 16):04x}"
 
 
@@ -83,10 +102,29 @@ class FabricCommonMixin:
             return int(tenant)
         return await self._lookup_id("tenancy/tenants/", tenant)
 
-    @staticmethod
-    def _fk_id(value):
-        """Return an id from either a nested object dict or a bare PK."""
-        return value.get("id") if isinstance(value, dict) else value
+    # Kept as a method for the mixins' ``self._fk_id(...)`` call sites; the
+    # implementation is the shared one in ``_mappers``.
+    _fk_id = staticmethod(fk_id)
+
+    async def _create_overlay_assignment(
+        self, overlay_id, object_type: str, object_id, **extra
+    ) -> dict:
+        """Create one overlay assignment; ``extra`` carries per-caller fields.
+
+        Shared by the Spectrum-X (device/interface/VRF) and InfiniBand (interface
+        + ``guid``/``membership_type``) assignment paths.
+        """
+        return await self.rest_request(
+            "POST",
+            self.ASSIGNMENTS_PATH,
+            json={
+                "overlay": overlay_id,
+                "assigned_object_type": object_type,
+                "assigned_object_id": int(object_id),
+                "status": FABRIC_STATUS,
+                **extra,
+            },
+        )
 
     async def _safe_delete(self, path: str) -> None:
         try:
