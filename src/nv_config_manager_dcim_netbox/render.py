@@ -42,6 +42,8 @@ from nv_config_manager_dcim import (
     RenderAccessData,
     RenderBGPInstance,
     RenderBGPPeer,
+    RenderConnectedDevice,
+    RenderConnectedInterface,
     RenderCredentialReference,
     RenderData,
     RenderDeviceIdentity,
@@ -72,6 +74,8 @@ from nv_config_manager_dcim import (
     RenderVlan,
     RenderVrf,
 )
+
+from nv_config_manager_dcim_netbox.client import decode_device_id
 
 if TYPE_CHECKING:
     from nv_config_manager_dcim import RenderDataRequest
@@ -109,12 +113,29 @@ query ($id: ID!) {
       description
       mode
       mac_addresses { mac_address }
-      vrf { name rd }
+      vrf { name rd import_targets { name } export_targets { name } }
       parent { name }
+      lag { id }
+      custom_fields
       untagged_vlan { vid name }
       tagged_vlans { vid name }
       ip_addresses { address role }
       tags { name }
+      connected_endpoints {
+        ... on InterfaceType {
+          name
+          vrf { name }
+          ip_addresses { address role }
+          device {
+            id
+            name
+            role { name }
+            tenant { name }
+            tags { name }
+            config_context
+          }
+        }
+      }
     }
   }
 }
@@ -187,10 +208,20 @@ def _is_ip(value: Any) -> bool:
 
 
 def _render_vrf(vrf: dict[str, Any] | None) -> RenderVrf | None:
-    """Build a :class:`RenderVrf` from a NetBox VRF dict (``name`` + ``rd``)."""
+    """Build a :class:`RenderVrf` from a NetBox VRF dict.
+
+    ``import_targets`` / ``export_targets`` (route-targets) drive the EVPN
+    ``route-target import/export`` stanzas; both the GraphQL ``vrf`` selection and
+    the REST ``ipam/vrfs`` serializer expose them as ``[{name}]`` lists.
+    """
     if not isinstance(vrf, dict) or not vrf.get("name"):
         return None
-    return RenderVrf(name=str(vrf["name"]), route_distinguisher=_str_or_none(vrf.get("rd")))
+    return RenderVrf(
+        name=str(vrf["name"]),
+        route_distinguisher=_str_or_none(vrf.get("rd")),
+        import_targets=_targets(vrf.get("import_targets")),
+        export_targets=_targets(vrf.get("export_targets")),
+    )
 
 
 def _render_vlan(vlan: dict[str, Any] | None) -> RenderVlan | None:
@@ -233,8 +264,64 @@ def _render_ip(addr: str, role: Any, site_networks: list[Any]) -> RenderIPAddres
     )
 
 
-def _render_interface(iface: dict[str, Any], site_networks: list[Any]) -> RenderInterface:
-    """Map one NetBox interface into the typed :class:`RenderInterface`."""
+def _render_connected_interface(
+    iface: dict[str, Any], site_networks: list[Any]
+) -> RenderConnectedInterface | None:
+    """Build the cabling peer for one interface from its connected endpoint.
+
+    Templates that derive routing from adjacency (e.g. the superpod plugin's
+    ``vrf.j2``, which forms a BGP neighbour from ``intf.connected_interface``)
+    read the peer interface's IPv4 (``peer_ipv4``) and the peer device's role
+    and routing ASN. The peer ASN comes from the peer device's merged
+    ``config_context.bgp.asn`` (the loader seeds it per device). Returns ``None``
+    for uncabled interfaces so those never emit a neighbour.
+    """
+    endpoint = next(iter(iface.get("connected_endpoints") or []), None)
+    if not endpoint:
+        return None
+    peer_device = endpoint.get("device") or {}
+    if not peer_device.get("name"):
+        return None
+    peer_context = peer_device.get("config_context")
+    peer_context = peer_context if isinstance(peer_context, dict) else {}
+    peer_bgp = peer_context.get("bgp") if isinstance(peer_context.get("bgp"), dict) else {}
+    addresses = tuple(
+        filter(
+            None,
+            (
+                _render_ip(a["address"], a.get("role"), site_networks)
+                for a in endpoint.get("ip_addresses") or []
+                if a.get("address")
+            ),
+        )
+    )
+    return RenderConnectedInterface(
+        name=str(endpoint.get("name") or ""),
+        vrf=(endpoint.get("vrf") or {}).get("name"),
+        addresses=addresses,
+        device=RenderConnectedDevice(
+            id=_str_or_none(peer_device.get("id")),
+            name=str(peer_device["name"]),
+            role=(peer_device.get("role") or {}).get("name") or "",
+            tenant=(peer_device.get("tenant") or {}).get("name"),
+            tags=_tags(peer_device),
+            routing_asn=_str_or_none(peer_bgp.get("asn")),
+        ),
+    )
+
+
+def _render_interface(
+    iface: dict[str, Any],
+    site_networks: list[Any],
+    lag_members: dict[str, tuple[str, ...]] | None = None,
+) -> RenderInterface:
+    """Map one NetBox interface into the typed :class:`RenderInterface`.
+
+    ``role`` comes from the ``nvcm_interface_role`` custom field (NetBox has no
+    native interface role; templates gate uplink/downlink on it). ``member_interfaces``
+    is the inverse of the child ``lag`` FK — the names of interfaces whose ``lag``
+    points at this one — supplied precomputed in ``lag_members`` keyed by LAG id.
+    """
     name = _require(iface.get("name"), "interface name")
     iface_type = iface.get("type")
     if not iface_type:
@@ -257,16 +344,49 @@ def _render_interface(iface: dict[str, Any], site_networks: list[Any]) -> Render
         mtu=iface.get("mtu"),
         description=iface.get("description") or "",
         tags=_tags(iface),
+        role=(iface.get("custom_fields") or {}).get("nvcm_interface_role"),
         mac_address=macs[0] if macs else None,
         vrf=_render_vrf(iface.get("vrf")),
         management_only=bool(iface.get("mgmt_only", False)),
+        member_interfaces=(lag_members or {}).get(str(iface.get("id")), ()),
         parent_interface=(iface.get("parent") or {}).get("name") or None,
         untagged_vlan=_render_vlan(iface.get("untagged_vlan")),
         tagged_vlans=tuple(
             filter(None, (_render_vlan(v) for v in iface.get("tagged_vlans") or []))
         ),
         addresses=addresses,
+        connected_interface=_render_connected_interface(iface, site_networks),
     )
+
+
+def _lag_member_map(interfaces: list[dict[str, Any]]) -> dict[str, tuple[str, ...]]:
+    """Map each LAG interface id → the names of its member interfaces.
+
+    NetBox stores the relation as the child's ``lag`` FK; the render contract
+    (and the spine ``bond`` templates) want the inverse — the parent's member
+    list. Order-stable by interface iteration order.
+    """
+    members: dict[str, list[str]] = {}
+    for iface in interfaces:
+        lag = iface.get("lag")
+        if isinstance(lag, dict) and lag.get("id") and iface.get("name"):
+            members.setdefault(str(lag["id"]), []).append(str(iface["name"]))
+    return {lag_id: tuple(names) for lag_id, names in members.items()}
+
+
+def _loopback_interface_name(interfaces: list[dict[str, Any]]) -> str | None:
+    """Pick the device's loopback interface — the BGP router-id interface.
+
+    Prefer the interface whose ``nvcm_interface_role`` custom field is ``Loopback``,
+    then a conventionally-named ``lo``. Returns ``None`` if neither exists.
+    """
+    for iface in interfaces:
+        if (iface.get("custom_fields") or {}).get("nvcm_interface_role") == "Loopback":
+            return str(iface["name"])
+    for iface in interfaces:
+        if str(iface.get("name")) == "lo":
+            return "lo"
+    return None
 
 
 def _device_vrfs(interfaces: list[dict[str, Any]]) -> tuple[RenderVrf, ...]:
@@ -309,12 +429,17 @@ def _location_hierarchy(device: dict[str, Any]) -> tuple[RenderLocation, RenderL
     return device_location, site_location
 
 
-def _bgp_instances(sessions: list[dict[str, Any]]) -> tuple[RenderBGPInstance, ...]:
+def _bgp_instances(
+    sessions: list[dict[str, Any]], router_id_interface: str | None = None
+) -> tuple[RenderBGPInstance, ...]:
     """Group ``netbox-bgp`` sessions for a device into BGP instances keyed by local ASN.
 
     ``netbox-bgp`` models each peering as a ``session`` with nested ``local_as`` /
     ``remote_as`` / ``remote_address`` / ``peer_group``. It exposes no VRF
-    association, so peers use the default source VRF.
+    association nor a router-id, so peers use the default source VRF and the
+    router-id interface is supplied by the caller (the device loopback) — the
+    ``bgp_routing_instance()`` template filter treats it as required and raises
+    without it whenever a session exists.
     """
     instances: dict[str, dict[str, Any]] = {}
     for session in sessions:
@@ -348,7 +473,12 @@ def _bgp_instances(sessions: list[dict[str, Any]]) -> tuple[RenderBGPInstance, .
             )
         )
     return tuple(
-        RenderBGPInstance(status=data["status"], asn=asn, peers=tuple(data["peers"]))
+        RenderBGPInstance(
+            status=data["status"],
+            asn=asn,
+            router_id_interface=router_id_interface,
+            peers=tuple(data["peers"]),
+        )
         for asn, data in instances.items()
     )
 
@@ -523,12 +653,14 @@ def _evpn(context: dict[str, Any]) -> RenderEvpnData:
 
 
 def _routing_from_context(
-    bgp_sessions: list[dict[str, Any]], context: dict[str, Any]
+    bgp_sessions: list[dict[str, Any]],
+    context: dict[str, Any],
+    router_id_interface: str | None = None,
 ) -> RenderRoutingData:
     """Native ``netbox-bgp`` instances plus effective routing policy (ASN/ISIS/EVPN)."""
     bgp = context.get("bgp") if isinstance(context.get("bgp"), dict) else {}
     return RenderRoutingData(
-        bgp_instances=_bgp_instances(bgp_sessions),
+        bgp_instances=_bgp_instances(bgp_sessions, router_id_interface),
         default_asn=_str_or_none(bgp.get("asn")),
         local_asn=_str_or_none(bgp.get("local-asn")),
         site_asn=_str_or_none(context.get("site_asn")),
@@ -669,7 +801,9 @@ class NetBoxRenderMixin:
 
     async def get_render_data(self, request: RenderDataRequest) -> RenderData:
         """Assemble the provider-neutral, fully typed render payload for one device."""
-        device_id = request.device_id
+        # request.device_id is a UUID-shaped id from NVCM (the client decorator only
+        # decodes plain `device_id` args, not ones wrapped in a request object).
+        device_id = decode_device_id(request.device_id)
         data = await self.graphql_query(_RENDER_DEVICE_QUERY, {"id": device_id})
         device = _require(data.get("device"), "device")
 
@@ -708,7 +842,11 @@ class NetBoxRenderMixin:
             _str_or_none(nvlink_domains[0].get("topology")) if nvlink_domains else None
         )
 
-        render_interfaces = tuple(_render_interface(i, site_networks) for i in interfaces)
+        lag_members = _lag_member_map(interfaces)
+        render_interfaces = tuple(
+            _render_interface(i, site_networks, lag_members) for i in interfaces
+        )
+        router_id_interface = _loopback_interface_name(interfaces)
 
         return RenderData(
             device=DeviceRenderData(
@@ -725,7 +863,7 @@ class NetBoxRenderMixin:
                 network=RenderNetworkData(
                     vrfs=_device_vrfs(interfaces), nvlink_topology=nvlink_topology
                 ),
-                routing=_routing_from_context(bgp_sessions, context),
+                routing=_routing_from_context(bgp_sessions, context, router_id_interface),
                 overlays=overlays,
                 firmware=_firmware_from_context(context),
                 services=_services_from_context(context),

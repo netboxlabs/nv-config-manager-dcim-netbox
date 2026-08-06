@@ -10,8 +10,11 @@ queries, payloads, and SDK-model construction.
 
 from __future__ import annotations
 
+import functools
+import inspect
 import logging
 import ssl
+import uuid
 from collections.abc import Callable
 from typing import Any, Self
 from urllib.parse import urlparse
@@ -77,6 +80,99 @@ def _build_ssl(verify: bool | str) -> bool | ssl.SSLContext:
     if verify is False:
         return False
     return ssl.create_default_context(cafile=str(verify))
+
+
+def _context_scoped_to_site(context: dict[str, Any], site: str) -> bool:
+    """Return whether a config-context applies to ``site`` (by name or slug).
+
+    A context with no location/site assignment applies everywhere (NetBox
+    treats an empty assignment set as global); an assigned context must name
+    the site in its ``locations`` or ``sites``.
+    """
+    scoped = False
+    for key in ("locations", "sites"):
+        for entry in context.get(key) or []:
+            if not isinstance(entry, dict):
+                continue
+            scoped = True
+            if entry.get("name") == site or entry.get("slug") == site:
+                return True
+    return not scoped
+
+
+# --- device-id UUID codec -------------------------------------------------
+#
+# NetBox device PKs are integers, but some downstream NVCM services (notably the
+# config-store, whose API/DB/locks assume UUID device ids) require the device
+# identifier to be a UUID. Nothing in the DCIM provider *contract* requires a
+# UUID, so we bridge the gap here: the provider presents each NetBox device id to
+# NVCM as a deterministic, reversible UUID (`uuid.UUID(int=<pk>)`) and decodes it
+# back to the integer PK before touching NetBox. Decoding tolerates raw NetBox
+# ids (pass-through), so it is safe to apply defensively and idempotently.
+
+_DEVICE_ID_PARAMS = frozenset({"device_id"})
+_DEVICE_ID_LIST_PARAMS = frozenset({"device_ids", "switch_device_ids"})
+
+
+def encode_device_id(pk: object) -> str:
+    """Present a NetBox integer device PK as a UUID string (for UUID-keyed NVCM services)."""
+    return str(uuid.UUID(int=int(pk)))
+
+
+def decode_device_id(device_id: object) -> str:
+    """Inverse of :func:`encode_device_id`; non-UUID ids pass through unchanged."""
+    try:
+        return str(uuid.UUID(str(device_id)).int)
+    except (ValueError, AttributeError, TypeError):
+        return str(device_id)
+
+
+def _decode_device_args(sig: inspect.Signature, args: tuple, kwargs: dict) -> tuple[tuple, dict]:
+    """Return (args, kwargs) with device-id params decoded to NetBox PKs."""
+    bound = sig.bind_partial(*args, **kwargs)
+    for name, value in list(bound.arguments.items()):
+        if name in _DEVICE_ID_PARAMS and value is not None:
+            bound.arguments[name] = decode_device_id(value)
+        elif name in _DEVICE_ID_LIST_PARAMS and value:
+            bound.arguments[name] = [decode_device_id(v) for v in value]
+    return bound.args, bound.kwargs
+
+
+def with_device_id_decoding(cls: type) -> type:
+    """Class decorator: decode UUID-shaped device ids on every method (across the
+    MRO) whose signature has a ``device_id`` / ``device_ids`` / ``switch_device_ids``
+    parameter, so NetBox queries always receive integer PKs regardless of the
+    UUID form NVCM passes in."""
+    id_params = _DEVICE_ID_PARAMS | _DEVICE_ID_LIST_PARAMS
+    handled: set[str] = set()
+    for klass in cls.__mro__:
+        if klass is object:
+            continue
+        for name, method in list(vars(klass).items()):
+            if name in handled or name.startswith("__") or not callable(method):
+                continue
+            try:
+                sig = inspect.signature(method)
+            except (TypeError, ValueError):
+                continue
+            if not id_params & set(sig.parameters):
+                continue
+            handled.add(name)
+            if inspect.iscoroutinefunction(method):
+
+                @functools.wraps(method)
+                async def wrapper(*args, _m=method, _s=sig, **kwargs):
+                    a, kw = _decode_device_args(_s, args, kwargs)
+                    return await _m(*a, **kw)
+            else:
+
+                @functools.wraps(method)
+                def wrapper(*args, _m=method, _s=sig, **kwargs):
+                    a, kw = _decode_device_args(_s, args, kwargs)
+                    return _m(*a, **kw)
+
+            setattr(cls, name, wrapper)
+    return cls
 
 
 class BaseNetBoxClient:
@@ -237,13 +333,24 @@ class BaseNetBoxClient:
             offset += len(results)
         return out
 
-    async def config_contexts_for_profile(self, profile_name: str) -> list[dict[str, Any]]:
-        """Return active config-contexts whose profile is named ``profile_name``."""
+    async def config_contexts_for_profile(
+        self, profile_name: str, site: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return active config-contexts whose profile is named ``profile_name``.
+
+        When ``site`` is given the results are scoped to that site: a context is
+        kept when it is assigned to the site (via its ``locations`` / ``sites``)
+        or is unscoped. An empty assignment set means "applies everywhere",
+        matching NetBox's own config-context rendering.
+        """
         contexts = await self.rest_list("extras/config-contexts/", [("is_active", "true")])
         out = []
         for context in contexts:
             profile = context.get("profile")
             name = profile.get("name") if isinstance(profile, dict) else None
-            if name == profile_name:
-                out.append(context)
+            if name != profile_name:
+                continue
+            if site is not None and not _context_scoped_to_site(context, site):
+                continue
+            out.append(context)
         return out

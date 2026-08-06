@@ -124,5 +124,6 @@ async def test_get_host_devices():
         rest_list={"dcim/devices/": [{"id": 1, "name": "dpu-01"}]},
         gql={"device_list": [_HOST_GQL]},
     )
-    result = await client.get_host_devices(DeviceInventoryFilter())
+    # An entirely unfiltered request now raises; supply a real filter.
+    result = await client.get_host_devices(DeviceInventoryFilter(roles=["dpu"]))
     assert [h.name for h in result] == ["dpu-01"]

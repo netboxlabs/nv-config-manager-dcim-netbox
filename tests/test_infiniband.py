@@ -193,7 +193,9 @@ async def test_remove_ib_pkey_assignments():
     record = []
     client = _client(rest_list={_ASSIGN: [{"id": 30, "assigned_object_id": 11}]}, record=record)
     removed, unassigned = await client.remove_ib_pkey_assignments("10", ["11", "12"])
-    assert removed == ["11"] and unassigned == ["12"]
+    # Contract: removed carries ASSIGNMENT ids (row 30); unassigned carries the
+    # interface id (12) that had no assignment.
+    assert removed == ["30"] and unassigned == ["12"]
     assert (f"{_ASSIGN}30/") in [p for m, p, _ in record if m == "DELETE"]
 
 
@@ -227,7 +229,8 @@ async def test_sync_ib_pkey_assignments():
     added, removed, unchanged = await client.sync_ib_pkey_assignments(
         "10", [("12", "0xBB", "full")]
     )
-    assert added == ["12"] and removed == ["11"] and unchanged == []
+    # Contract: all three lists carry ASSIGNMENT ids -- new row 31 added, row 30 removed.
+    assert added == ["31"] and removed == ["30"] and unchanged == []
 
 
 async def test_sync_ib_pkey_assignments_patches_membership_change():
@@ -246,7 +249,8 @@ async def test_sync_ib_pkey_assignments_patches_membership_change():
     added, removed, unchanged = await client.sync_ib_pkey_assignments(
         "10", [("11", "0xAA", "limited")]
     )
-    assert added == [] and removed == [] and unchanged == ["11"]
+    # unchanged carries the ASSIGNMENT id (row 30) that stayed, PATCHed in place.
+    assert added == [] and removed == [] and unchanged == ["30"]
     patches = [(p, body) for m, p, body in record if m == "PATCH"]
     assert patches == [(f"{_ASSIGN}30/", {"membership_type": "limited"})]
 

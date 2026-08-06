@@ -31,6 +31,16 @@ from nv_config_manager_dcim_netbox.fabric_common import FABRIC_STATUS, normalize
 _IB_PKEY_ISOLATION = "ib_pkey"
 _IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
 
+
+def _normalize_membership(value: str | None) -> str:
+    """Canonicalize an IB PKey membership type (default ``full``, stripped/lower).
+
+    UFM and NetBox may report the membership as ``""``, ``"Full"``, or with
+    surrounding whitespace; normalizing both sides of a comparison avoids
+    redundant PATCH thrash on values that are semantically equal.
+    """
+    return (value or "full").strip().lower() or "full"
+
 _SWITCH_TOPOLOGY_QUERY = """
 query ($ids: [ID!]!) {
   device_list(filters: {id: {in_list: $ids}}) {
@@ -59,8 +69,21 @@ query ($names: [String!]!) {
     id
     name
     primary_ip4 { address }
+    tenant { id name }
     site { id name }
-    location { id name }
+    location {
+      id
+      name
+      parent {
+        id
+        name
+        parent {
+          id
+          name
+          parent { id name }
+        }
+      }
+    }
   }
 }
 """
@@ -157,7 +180,10 @@ class NetBoxInfiniBandMixin:
     async def find_ib_interfaces_by_guids(self, guids: list[str]) -> list[IBInterfaceGuid]:
         out: list[IBInterfaceGuid] = []
         for guid in guids:
-            rows = await self.rest_list("dcim/interfaces/", [("cf_ib_guid", guid)])
+            # NetBox exposes a case-insensitive exact lookup (``__ie``) on text
+            # custom fields; UFM reports GUIDs in mixed case, so match on it to
+            # mirror the reference provider rather than requiring exact casing.
+            rows = await self.rest_list("dcim/interfaces/", [("cf_ib_guid__ie", guid)])
             for row in rows:
                 dev = row.get("device") or {}
                 out.append(
@@ -292,9 +318,10 @@ class NetBoxInfiniBandMixin:
     ) -> list[str]:
         result: list[str] = []
         for interface_id, guid, membership_type in assignments:
+            membership_type = _normalize_membership(membership_type)
             existing = await self._find_ib_assignment(overlay_id, interface_id)
             if existing:
-                if (existing.get("membership_type") or "") != membership_type:
+                if _normalize_membership(existing.get("membership_type")) != membership_type:
                     await self.rest_request(
                         "PATCH",
                         f"{self.ASSIGNMENTS_PATH}{existing['id']}/",
@@ -311,13 +338,16 @@ class NetBoxInfiniBandMixin:
     async def remove_ib_pkey_assignments(
         self, overlay_id: str, interface_ids: list[str]
     ) -> tuple[list[str], list[str]]:
+        # Contract: ``removed`` carries ASSIGNMENT ids (the rows deleted), while
+        # ``unassigned`` carries the INTERFACE ids that had no assignment to
+        # remove -- matching the reference DCIM provider's return identity.
         removed: list[str] = []
         unassigned: list[str] = []
         for interface_id in interface_ids:
             existing = await self._find_ib_assignment(overlay_id, interface_id)
             if existing:
                 await self._safe_delete(f"{self.ASSIGNMENTS_PATH}{existing['id']}/")
-                removed.append(str(interface_id))
+                removed.append(str(existing["id"]))
             else:
                 unassigned.append(str(interface_id))
         return removed, unassigned
@@ -345,28 +375,31 @@ class NetBoxInfiniBandMixin:
             if str(r.get("assigned_object_type")) == "dcim.interface"
         }
         desired = {
-            str(iface): (guid, membership) for iface, guid, membership in desired_assignments
+            str(iface): (guid, _normalize_membership(membership))
+            for iface, guid, membership in desired_assignments
         }
+        # Contract: all three lists carry ASSIGNMENT ids (matching the reference
+        # DCIM provider), not interface ids.
         added: list[str] = []
         removed: list[str] = []
         unchanged: list[str] = []
         for iface, row in current.items():
             if iface not in desired:
                 await self._safe_delete(f"{self.ASSIGNMENTS_PATH}{row['id']}/")
-                removed.append(iface)
+                removed.append(str(row["id"]))
         for iface, (guid, membership) in desired.items():
             if iface in current:
                 row = current[iface]
-                if (row.get("membership_type") or "") != membership:
+                if _normalize_membership(row.get("membership_type")) != membership:
                     await self.rest_request(
                         "PATCH",
                         f"{self.ASSIGNMENTS_PATH}{row['id']}/",
                         json={"membership_type": membership},
                     )
-                unchanged.append(iface)
+                unchanged.append(str(row["id"]))
             else:
-                await self._create_ib_assignment(overlay_id, iface, guid, membership)
-                added.append(iface)
+                created = await self._create_ib_assignment(overlay_id, iface, guid, membership)
+                added.append(str(created["id"]))
         return added, removed, unchanged
 
     # -- host / pkey-context resolution -------------------------------------
@@ -375,9 +408,13 @@ class NetBoxInfiniBandMixin:
         data = await self.graphql_query(_HOST_BY_NAME_QUERY, {"names": [host]})
         devices = data.get("device_list") or []
         if not devices and _IPV4_RE.match(host):
-            # Fall back to matching a device whose primary IPv4 host equals `host`.
-            # Resolve via the IP address record instead of scanning the whole
-            # fleet: the matching IP -> its interface -> that interface's device.
+            # Fall back to matching a device that carries `host` on ANY interface,
+            # not just its primary IPv4 (mirrors the reference provider). Resolve
+            # via the IP address record instead of scanning the whole fleet: the
+            # matching IP -> its interface -> that interface's device. Collect
+            # across every matching IP and dedupe by id so the conflict guard
+            # below fires when more than one distinct device is implicated.
+            by_id: dict[str, dict] = {}
             for ip in await self.rest_list("ipam/ip-addresses/", [("address", host)]):
                 if ip.get("assigned_object_type") != "dcim.interface":
                     continue
@@ -389,13 +426,9 @@ class NetBoxInfiniBandMixin:
                 if not name:
                     continue
                 found = await self.graphql_query(_HOST_BY_NAME_QUERY, {"names": [name]})
-                devices = [
-                    c
-                    for c in (found.get("device_list") or [])
-                    if strip_mask((c.get("primary_ip4") or {}).get("address")) == host
-                ]
-                if devices:
-                    break
+                for candidate in found.get("device_list") or []:
+                    by_id[str(candidate["id"])] = candidate
+            devices = list(by_id.values())
         if len(devices) > 1:
             raise DCIMConflictError(f"Multiple NetBox devices match host {host!r}")
         return devices[0] if devices else None
@@ -406,18 +439,51 @@ class NetBoxInfiniBandMixin:
             raise DCIMNotFoundError(f"No NetBox device for IB host {host!r}")
         return strip_mask((device.get("primary_ip4") or {}).get("address")) or device["name"]
 
-    async def resolve_ib_host_site(self, host: str) -> IBHostSite:
-        device = await self._resolve_ib_device(host)
-        if not device:
-            raise DCIMNotFoundError(f"No NetBox device for IB host {host!r}")
+    @staticmethod
+    def _ib_location_chain(location: dict | None) -> list[dict]:
+        """Return a device's location followed by each of its parent locations.
+
+        NetBox scopes overlays by ``location``; the reference provider matches a
+        PKey at the device location *or any ancestor*. NetBox models this as the
+        self-referential ``Location`` tree (rather than a typed location chain),
+        so we walk the ``parent`` links fetched by the host GraphQL query.
+        """
+        chain: list[dict] = []
+        current = location
+        seen: set = set()
+        while current and current.get("id") not in seen:
+            seen.add(current.get("id"))
+            chain.append(current)
+            current = current.get("parent")
+        return chain
+
+    def _ib_host_site(self, device: dict) -> IBHostSite:
+        """Build the public host-site model, requiring a Site on the device.
+
+        The reference provider requires a Site-typed ancestor in the location
+        hierarchy. NetBox models Site as a first-class Device field, so the
+        NetBox-idiomatic guard is a non-empty ``device.site``; a device with no
+        Site cannot resolve to an IB host site.
+        """
         site = device.get("site") or {}
+        site_id = self._fk_id(site)
+        if not site_id:
+            raise DCIMInvalidDataError(
+                f"NetBox device {device.get('name')!r} has no Site; cannot resolve IB host site"
+            )
         return IBHostSite(
             device_id=str(device["id"]),
             device_name=device["name"],
             device_primary_ip=strip_mask((device.get("primary_ip4") or {}).get("address")),
-            site_id=str(site.get("id") or ""),
-            site_name=site.get("name") or "",
+            site_id=str(site_id),
+            site_name=(site.get("name") if isinstance(site, dict) else "") or "",
         )
+
+    async def resolve_ib_host_site(self, host: str) -> IBHostSite:
+        device = await self._resolve_ib_device(host)
+        if not device:
+            raise DCIMNotFoundError(f"No NetBox device for IB host {host!r}")
+        return self._ib_host_site(device)
 
     async def resolve_ib_pkey_context(
         self, host: str, pkey: str, *, create_overlay_for_orphan: bool = False
@@ -426,24 +492,28 @@ class NetBoxInfiniBandMixin:
         device = await self._resolve_ib_device(host)
         if not device:
             raise DCIMNotFoundError(f"No NetBox device for IB host {host!r}")
-        host_site = IBHostSite(
-            device_id=str(device["id"]),
-            device_name=device["name"],
-            device_primary_ip=strip_mask((device.get("primary_ip4") or {}).get("address")),
-            site_id=str((device.get("site") or {}).get("id") or ""),
-            site_name=(device.get("site") or {}).get("name") or "",
-        )
-        location_id = (device.get("location") or {}).get("id")
+        host_site = self._ib_host_site(device)
+        # Match the PKey at the device location OR any ancestor location: scope
+        # the overlay query to every location id in the parent chain (NetBox's
+        # ``location_id`` filter is multi-valued and ORs repeated params).
+        location_chain = self._ib_location_chain(device.get("location"))
+        location_id = self._fk_id(device.get("location") or {})
         params = [("isolation_type", _IB_PKEY_ISOLATION)]
-        if location_id:
-            params.append(("location_id", str(location_id)))
+        for chain_location in location_chain:
+            chain_id = self._fk_id(chain_location)
+            if chain_id is not None:
+                params.append(("location_id", str(chain_id)))
         overlays = await self.rest_list(self.OVERLAYS_PATH, params)
         overlays_by_id = {str(overlay["id"]): overlay for overlay in overlays}
         # One pkey query, then match against the location/isolation-scoped
         # overlays, instead of a pkeys query per overlay.
         matches = []
         for pk in await self.rest_list(self.PKEYS_PATH, [("pkey", pkey_norm)]):
-            if normalize_pkey(pk.get("pkey", "")) != pkey_norm:
+            try:
+                stored = normalize_pkey(pk.get("pkey", ""))
+            except DCIMInvalidDataError:
+                continue  # skip malformed stored pkeys instead of failing the walk
+            if stored != pkey_norm:
                 continue
             overlay = overlays_by_id.get(str(self._fk_id(pk.get("overlay"))))
             if overlay is not None:
@@ -469,8 +539,23 @@ class NetBoxInfiniBandMixin:
         orphans = [r for r in rows if self._fk_id(r.get("overlay")) is None]
         if not orphans:
             raise DCIMNotFoundError(f"No orphan PKey {pkey_norm!r} to adopt")
+        if len(orphans) > 1:
+            details = ", ".join(f"id={r.get('id')}" for r in orphans)
+            raise DCIMConflictError(
+                f"Multiple orphan PKeys {pkey_norm!r} ({details}); "
+                "resolve the duplicates before adopting"
+            )
         if location_id is None:
             raise DCIMInvalidDataError("Device has no location to host an orphan PKey overlay")
+        # The reference provider requires a Tenant on the device before it will
+        # auto-create an overlay for an orphan PKey; enforce the same guard here.
+        tenant_id = self._fk_id(device.get("tenant") or {})
+        if not tenant_id:
+            raise DCIMInvalidDataError(
+                f"Device {device.get('name')!r} has no Tenant; cannot auto-create an overlay "
+                f"for orphan PKey {pkey_norm}. Set a Tenant on the device or pre-create an "
+                "overlay and link the PKey to it."
+            )
         overlay_name = f"ib-pkey-overlay-{pkey_norm}"
         overlay = await self._find_overlay(overlay_name, location_id)
         if not overlay:
@@ -479,13 +564,19 @@ class NetBoxInfiniBandMixin:
                 "location": location_id,
                 "isolation_type": _IB_PKEY_ISOLATION,
                 "status": FABRIC_STATUS,
+                "tenant": tenant_id,
             }
-            tenant_id = self._fk_id(device.get("tenant") or {})
-            if tenant_id:
-                body["tenant"] = tenant_id
             overlay = await self.rest_request("POST", self.OVERLAYS_PATH, json=body)
         pk = orphans[0]
-        await self.rest_request(
-            "PATCH", f"{self.PKEYS_PATH}{pk['id']}/", json={"overlay": overlay["id"]}
-        )
+        # Refuse to relink a PKey that is already attached to a different overlay.
+        current_overlay_id = self._fk_id(pk.get("overlay"))
+        if current_overlay_id is not None and str(current_overlay_id) != str(overlay["id"]):
+            raise DCIMConflictError(
+                f"PKey {pkey_norm!r} (id={pk['id']}) is already linked to overlay "
+                f"{current_overlay_id!r}; refusing to relink to {overlay['id']!r}"
+            )
+        if current_overlay_id is None:
+            await self.rest_request(
+                "PATCH", f"{self.PKEYS_PATH}{pk['id']}/", json={"overlay": overlay["id"]}
+            )
         return overlay, pk

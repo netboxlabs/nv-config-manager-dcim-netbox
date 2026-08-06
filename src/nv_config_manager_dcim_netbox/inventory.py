@@ -110,6 +110,10 @@ class NetBoxInventoryMixin:
             return None
 
     async def get_managed_device_metadata(self, page_size: int = 100) -> list[DeviceMetadata]:
+        # Fail-closed by design: "managed" is scoped to the ``nvcm_render_enabled``
+        # custom field. If that field is not defined on the NetBox instance,
+        # NetBox rejects the ``cf_nvcm_render_enabled`` filter with HTTP 400
+        # rather than ignoring it, so this never silently returns the whole fleet.
         devices = await self.rest_list(
             "dcim/devices/", [("cf_nvcm_render_enabled", "true")], page_size=page_size
         )
@@ -153,8 +157,12 @@ class NetBoxInventoryMixin:
             params.append(("manufacturer", manufacturer))
         for platform in filters.platforms:
             params.append(("platform", platform))
-        # NOTE: filters.managed_only relies on the NVCM state custom field (not yet
-        # present in NetBox); it is intentionally not applied here.
+        if filters.managed_only:
+            # "Managed" is modeled by the ``nvcm_render_enabled`` device custom
+            # field (the same proxy ``get_managed_device_metadata`` uses). Guarded
+            # on that field: NetBox 400s if it is not defined rather than widening
+            # the result set.
+            params.append(("cf_nvcm_render_enabled", "true"))
         devices = await self.rest_list("dcim/devices/", params)
         selections = []
         for device in devices:
@@ -183,18 +191,27 @@ class NetBoxInventoryMixin:
         seen: set[str] = set()
         out: list[NetworkDeviceData] = []
         for device in devices:
-            if device["name"] in seen:
-                continue
+            name = device["name"]
+            # A duplicate device name is a data-integrity error: the workflow
+            # keys devices by name, so two rows sharing one name is ambiguous and
+            # must not be silently collapsed (parity with the reference provider's
+            # de-duplication guard).
+            if name in seen:
+                raise DCIMInvalidDataError(
+                    f"Duplicate device name in NetBox inventory: {name!r}"
+                )
+            seen.add(name)
             try:
                 mapped = network_device_from_rest(device)
             except DCIMInvalidDataError as exc:
-                # One un-mappable device (e.g. no platform) must not fail the
-                # whole listing; skip it and keep the rest.
+                # A device that cannot be mapped (e.g. no platform) must not fail
+                # the whole listing; skip it and keep the rest. This no-platform
+                # skip is a deliberate NetBox improvement over the reference,
+                # which has no such notion.
                 logger.warning(
                     "Skipping NetBox device %s from inventory: %s", device.get("id"), exc
                 )
                 continue
-            seen.add(device["name"])
             out.append(mapped)
         return out
 
@@ -226,9 +243,14 @@ class NetBoxInventoryMixin:
         seen: set[str] = set()
         out: list[HostDeviceData] = []
         for device in data.get("device_list") or []:
-            if device["name"] in seen:
-                continue
-            seen.add(device["name"])
+            name = device["name"]
+            # Duplicate device names are a data-integrity error; do not silently
+            # collapse them (parity with the reference provider).
+            if name in seen:
+                raise DCIMInvalidDataError(
+                    f"Duplicate device name in NetBox inventory: {name!r}"
+                )
+            seen.add(name)
             out.append(host_device_from_gql(device))
         return out
 
@@ -239,7 +261,10 @@ class NetBoxInventoryMixin:
 
         Returns ``None`` when a MAC-address filter was requested but matched no
         interface — callers must treat that as an empty result rather than an
-        unfiltered (whole-fleet) query.
+        unfiltered (whole-fleet) query. Raises ``DCIMInvalidDataError`` when no
+        filter of any kind was supplied, so an empty filter can never degrade
+        into a full-fleet listing (parity with the reference provider's
+        "must apply at least one filter" guard).
         """
         params: list[tuple[str, str]] = []
         if filters.site:
@@ -256,6 +281,30 @@ class NetBoxInventoryMixin:
             params.append(("platform", platform.value))
         for device_id in filters.device_ids or []:
             params.append(("id", str(device_id)))
+        # NVCM status-flag filters map to boolean device custom fields. ``managed``
+        # reuses ``nvcm_render_enabled`` as its proxy (the same field
+        # ``get_managed_device_metadata`` uses), so only fold it in when an
+        # explicit render filter was not already supplied. Each is guarded on the
+        # field being defined: NetBox 400s on an unknown ``cf_*`` filter rather
+        # than widening the result.
+        render_enabled = filters.render_enabled
+        if filters.managed_only and render_enabled is None:
+            render_enabled = True
+        status_flags = {
+            "nvcm_render_enabled": render_enabled,
+            "nvcm_deploy_enabled": filters.deploy_enabled,
+            "nvcm_backup_enabled": filters.backup_enabled,
+            "nvcm_ztp_enabled": filters.ztp_enabled,
+        }
+        for field, value in status_flags.items():
+            if value is not None:
+                params.append((f"cf_{field}", str(value).lower()))
+        # Reject an entirely unfiltered request before it becomes a whole-fleet
+        # query. A MAC-only filter is legitimate: it is resolved below.
+        if not params and not filters.mac_addresses:
+            raise DCIMInvalidDataError(
+                "At least one device inventory filter must be supplied"
+            )
         # MAC filtering on devices is done via the interfaces endpoint in NetBox.
         # A requested MAC that matches no interface must exclude everything, not
         # fall through to an unfiltered query.
@@ -265,8 +314,6 @@ class NetBoxInventoryMixin:
                 return None
             for device_id in mac_device_ids:
                 params.append(("id", device_id))
-        # NOTE: render/deploy/backup/ztp_enabled and managed_only depend on the
-        # NVCM state custom field (not yet present); those filters are not applied.
         return params
 
     async def _interfaces_for_macs(self, mac_addresses: list[str] | None) -> list[dict]:

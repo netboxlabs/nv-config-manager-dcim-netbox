@@ -37,8 +37,10 @@ _STATUS_ENDPOINTS = {
     "virtualization.virtualmachine": "virtualization/virtual-machines/",
     "virtualization.vminterface": "virtualization/interfaces/",
 }
-# NetBox has no global status list; default to device statuses (the primary
-# selection context) when no content type is given.
+# NetBox has no global status list. The reference provider returns a global set
+# for a null content type; NetBox's closest sensible default is the device
+# status set (the primary selection context), which is what a null content type
+# resolves to here.
 _DEFAULT_STATUS_CONTENT_TYPE = "dcim.device"
 
 
@@ -50,17 +52,38 @@ class NetBoxReferenceMixin:
     """Read-only reference data used to populate workflow forms."""
 
     async def list_locations(self, location_types: tuple[str, ...] = ()) -> list[DCIMSelection]:
-        # NetBox locations have no "location type" concept; the arg is ignored.
+        # NOTE: ``location_types`` is inert. NetBox has no first-class
+        # "location type" (that is a reference-provider concept); its
+        # Region/SiteGroup/Site/Location hierarchy carries no per-location type
+        # to filter on, so the argument is accepted only for contract parity.
         data = await self.graphql_query(_LOCATIONS_QUERY)
         return _selections(data.get("location_list") or [])
 
+    async def _managed_device_selections(self, field: str) -> list[DCIMSelection]:
+        """Return distinct ``tenant``/``role`` choices across managed devices.
+
+        "Managed" is scoped by the ``nvcm_render_enabled`` device custom field —
+        the same proxy ``get_managed_device_metadata`` uses. Guarded on that
+        field: NetBox 400s if it is undefined rather than scanning the fleet.
+        """
+        devices = await self.rest_list("dcim/devices/", [("cf_nvcm_render_enabled", "true")])
+        selections: dict[str, DCIMSelection] = {}
+        for device in devices:
+            obj = device.get(field)
+            if isinstance(obj, dict) and obj.get("id") is not None and obj.get("name"):
+                key = str(obj["id"])
+                selections[key] = DCIMSelection(id=key, name=str(obj["name"]))
+        return list(selections.values())
+
     async def list_tenants(self, managed_only: bool = False) -> list[DCIMSelection]:
-        # managed_only relies on the NVCM state custom field; not applied here.
+        if managed_only:
+            return await self._managed_device_selections("tenant")
         data = await self.graphql_query(_TENANTS_QUERY)
         return _selections(data.get("tenant_list") or [])
 
     async def list_roles(self, managed_only: bool = False) -> list[DCIMSelection]:
-        # managed_only relies on the NVCM state custom field; not applied here.
+        if managed_only:
+            return await self._managed_device_selections("role")
         data = await self.graphql_query(_DEVICE_ROLES_QUERY)
         return _selections(data.get("device_role_list") or [])
 
@@ -69,11 +92,17 @@ class NetBoxReferenceMixin:
 
         NetBox has no first-class IPAM namespace: a namespace is a VRF, and a
         namespace *zone* is emulated with a tag on the VRFs in it. These tag
-        names are the namespace selectors NVCM offers as choices. ``location``
-        is accepted for contract parity but does not constrain the result —
-        NetBox VRFs are global, so there is no location dimension to filter on.
+        names are the namespace selectors NVCM offers as choices.
+
+        ``location`` scopes the VRFs server-side via the ``nvcm_site`` VRF custom
+        field (NetBox VRFs have no native site link). This is guarded on that
+        field: when ``location`` is omitted no scoping is applied, and where the
+        field is undefined the query is simply unconstrained.
         """
-        vrfs = await self.rest_list("ipam/vrfs/")
+        params: list[tuple[str, str]] = []
+        if location:
+            params.append(("cf_nvcm_site", location))
+        vrfs = await self.rest_list("ipam/vrfs/", params)
         tags: set[str] = set()
         for vrf in vrfs:
             for tag in vrf.get("tags") or []:
@@ -106,7 +135,14 @@ class NetBoxReferenceMixin:
         (``actions.POST.status.choices`` → ``value`` / ``display_name``). The
         returned ``id`` is the NetBox status value (e.g. ``"active"``), which is
         exactly what object filters expect, so it round-trips into selection.
-        ``content_type`` defaults to ``dcim.device`` (NetBox has no global list).
+
+        A ``None`` content type resolves to the device status set — the sensible
+        NetBox default, since it has no global status list. A *known* content
+        type with no status field, or a genuinely unknown one, raises
+        ``DCIMInvalidDataError``: the SDK contract (pinned by the provider test
+        suite) requires a hard failure here rather than an empty list, so a
+        caller cannot mistake "this model has no statuses" for "no statuses are
+        defined".
         """
         resolved = content_type or _DEFAULT_STATUS_CONTENT_TYPE
         endpoint = _STATUS_ENDPOINTS.get(resolved)

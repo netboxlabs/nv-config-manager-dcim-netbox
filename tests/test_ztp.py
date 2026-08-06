@@ -18,11 +18,26 @@ async def test_get_ztp_device():
         "config_context": {"intended-firmware": {"version": "5.1.0"}},
         "interfaces": [{"ip_addresses": [{"address": "10.0.0.5/24"}]}],
     }
-    ztp = await fake_client(gql={"device": device}).get_ztp_device("1")
+    client = fake_client(
+        gql={"device": device},
+        rest_list={
+            "plugins/nv-config-manager/intended-configs/": [
+                {"config_store_instance": "https://ui.nvcm.example"}
+            ]
+        },
+    )
+    ztp = await client.get_ztp_device("1")
     assert ztp.name == "leaf-01"
     assert ztp.platform_name == "Cumulus Linux"
     assert ztp.firmware_version == "5.1.0"
     assert ztp.addresses == ["10.0.0.5"]
+    # device_id is UUID-encoded so it keys the UUID-populated config-store
+    # (boot-script / startup.yaml) that the ZTP service reads.
+    assert ztp.device_id == "00000000-0000-0000-0000-000000000001"
+    # config_store_instance is read from the intended-config (render pipeline set it)
+    # and ui->api-mtls transformed, matching the reference DCIM provider. Without it,
+    # ZTP load_file 404s ("No config store file found").
+    assert ztp.config_store_instance == "https://api-mtls.nvcm.example"
 
 
 async def test_get_ztp_device_missing_raises():

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from nv_config_manager_dcim_netbox.client import decode_device_id
 from tests._fake import fake_client as _client
 
 _STATUS = "plugins/nv-config-manager/device-config-statuses/"
@@ -39,7 +40,8 @@ async def test_get_backup_enabled_device_ids_intersects_eligible():
             "dcim/devices/": [{"id": 5}],  # only 5 is active on a backup platform
         }
     )
-    assert await client.get_backup_enabled_device_ids(True) == {"5"}
+    result = await client.get_backup_enabled_device_ids(True)
+    assert {decode_device_id(i) for i in result} == {"5"}
 
 
 async def test_get_configuration_backup_metadata():

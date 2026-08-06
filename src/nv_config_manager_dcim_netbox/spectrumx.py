@@ -2,22 +2,27 @@
 # SPDX-License-Identifier: Apache-2.0
 """Spectrum-X overlay operations (backed by the NetBox fabric plugin).
 
-NetBox has no IPAM namespace, so a Spectrum-X tenant is one VRF (the upstream
-model created one VRF per namespace); the ``namespace`` argument is retained on
-the SDK models but not used to scope objects here.
+NetBox has no first-class IPAM namespace, so — consistent with the rest of this
+provider (see ``ipam.py`` / ``reference.py``) — a namespace is emulated as a
+**tag** on the VRF. ``provision_spectrum_x_vrf`` fans out one VRF (tagged with
+the namespace), overlay-assignment, and VXLAN per namespace, and
+``get_spectrum_x_vrfs`` reads the namespace back from the VRF's tag while
+deriving the site from the VRF's attached-interface devices.
+
+NOTE: NetBox enforces global uniqueness on ``ipam.VRF.rd`` and on the fabric
+plugin's ``VXLAN.vnid`` (the upstream model scoped both by namespace). Multiple
+namespaces sharing a single ``route_distinguisher`` / ``vnid`` therefore cannot
+coexist in NetBox; distinct namespaces require distinct values.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
 
-from nv_config_manager_dcim import DCIMInvalidDataError, SpectrumXVRF
+from nv_config_manager_dcim import DCIMConflictError, DCIMInvalidDataError, SpectrumXVRF
 
 from nv_config_manager_dcim_netbox.fabric_common import FABRIC_STATUS
-
-if TYPE_CHECKING:
-    pass
+from nv_config_manager_dcim_netbox.ipam import _vrf_tag_names
 
 _SPECTRUMX_VRFS_QUERY = """
 query ($ids: [ID!]!) {
@@ -25,7 +30,8 @@ query ($ids: [ID!]!) {
     id
     name
     rd
-    interfaces { name device { name } }
+    tags { name slug }
+    interfaces { name device { name site { name } } }
   }
 }
 """
@@ -50,17 +56,34 @@ class NetBoxSpectrumXMixin:
         data = await self.graphql_query(_SPECTRUMX_VRFS_QUERY, {"ids": vrf_ids})
         out: list[SpectrumXVRF] = []
         for vrf in data.get("vrf_list") or []:
+            # Namespace is emulated as a VRF tag; derive it from the data (and
+            # apply the namespace filter against it) rather than echoing args.
+            tag_names = _vrf_tag_names(vrf)
+            if namespace and namespace not in tag_names:
+                continue
+            vrf_namespace = namespace or next(iter(sorted(tag_names)), "")
+            interface_rows = vrf.get("interfaces") or []
             interfaces = tuple(
                 f"{(i.get('device') or {}).get('name')}:{i['name']}"
-                for i in vrf.get("interfaces") or []
+                for i in interface_rows
                 if i.get("device")
+            )
+            # NetBox VRFs carry no location, so derive the site from an attached
+            # interface's device, falling back to the overlay's site.
+            vrf_site = next(
+                (
+                    ((i.get("device") or {}).get("site") or {}).get("name")
+                    for i in interface_rows
+                    if ((i.get("device") or {}).get("site") or {}).get("name")
+                ),
+                site,
             )
             out.append(
                 SpectrumXVRF(
                     vrf_id=str(vrf["id"]),
                     name=vrf["name"],
-                    namespace=namespace or "",
-                    site=site,
+                    namespace=vrf_namespace,
+                    site=vrf_site or site,
                     route_distinguisher=vrf.get("rd") or "",
                     interfaces=interfaces,
                 )
@@ -78,13 +101,20 @@ class NetBoxSpectrumXMixin:
     ) -> None:
         tenant_id = await self._resolve_tenant_id(tenant)
         vrf_name = f"SpXTenant{vnid}"
-        created_vxlan_id: int | None = None
-        created_assignment_id: int | None = None
-        created_vrf_id: int | None = None
         created_overlay_id: int | None = None
+        # Track every object created across all namespaces for reverse-order rollback.
+        created: list[tuple[str, int]] = []
 
         overlay = await self._find_overlay(overlay_name, site)
         if overlay:
+            # Guard against cross-tenant contamination: reusing an existing
+            # overlay is only safe when it already belongs to this tenant.
+            existing_tenant = self._fk_id(overlay.get("tenant"))
+            if str(existing_tenant or "") != str(tenant_id or ""):
+                raise DCIMConflictError(
+                    f"Spectrum-X overlay {overlay_name!r} already belongs to tenant "
+                    f"{existing_tenant!r}, expected {tenant_id!r}"
+                )
             overlay_id = overlay["id"]
         else:
             location_id = await self._resolve_location_id(site)
@@ -106,46 +136,56 @@ class NetBoxSpectrumXMixin:
             overlay_id = created_overlay_id = row["id"]
 
         try:
-            vrf = await self.rest_request(
-                "POST",
-                "ipam/vrfs/",
-                json={"name": vrf_name, "rd": route_distinguisher, "tenant": tenant_id},
-            )
-            created_vrf_id = vrf["id"]
-            assignment = await self.rest_request(
-                "POST",
-                self.ASSIGNMENTS_PATH,
-                json={
-                    "overlay": overlay_id,
-                    "assigned_object_type": "ipam.vrf",
-                    "assigned_object_id": created_vrf_id,
-                    "status": FABRIC_STATUS,
-                },
-            )
-            created_assignment_id = assignment["id"]
-            vxlan = await self.rest_request(
-                "POST",
-                self.VXLANS_PATH,
-                json={
-                    "vnid": vnid,
-                    "name": vrf_name,
-                    "vni_type": _L3_VNI,
-                    "vrf": created_vrf_id,
-                    "overlay": overlay_id,
-                    "status": FABRIC_STATUS,
-                },
-            )
-            created_vxlan_id = vxlan["id"]
+            # Fan out one VRF + assignment + VXLAN per namespace (mirrors the
+            # reference provider). See the module NOTE: shared rd/vnid values can
+            # back only one namespace under NetBox's global uniqueness rules.
+            for namespace in namespaces:
+                vrf = await self.rest_request(
+                    "POST",
+                    "ipam/vrfs/",
+                    json={"name": vrf_name, "rd": route_distinguisher, "tenant": tenant_id},
+                )
+                created.append(("ipam/vrfs/", vrf["id"]))
+                if namespace:
+                    # Emulate the namespace as a VRF tag (NetBox has no IPAM
+                    # namespace). Applied as a follow-up PATCH so the create
+                    # payload stays minimal. NOTE: the tag is expected to pre-exist.
+                    await self.rest_request(
+                        "PATCH",
+                        f"ipam/vrfs/{vrf['id']}/",
+                        json={"tags": [{"name": namespace}]},
+                    )
+                assignment = await self.rest_request(
+                    "POST",
+                    self.ASSIGNMENTS_PATH,
+                    json={
+                        "overlay": overlay_id,
+                        "assigned_object_type": "ipam.vrf",
+                        "assigned_object_id": vrf["id"],
+                        "status": FABRIC_STATUS,
+                    },
+                )
+                created.append((self.ASSIGNMENTS_PATH, assignment["id"]))
+                vxlan = await self.rest_request(
+                    "POST",
+                    self.VXLANS_PATH,
+                    json={
+                        "vnid": vnid,
+                        "name": vrf_name,
+                        "vni_type": _L3_VNI,
+                        "vrf": vrf["id"],
+                        "overlay": overlay_id,
+                        "status": FABRIC_STATUS,
+                    },
+                )
+                created.append((self.VXLANS_PATH, vxlan["id"]))
         except Exception:
-            # Roll back in reverse creation order.
-            for path, obj_id in (
-                (self.VXLANS_PATH, created_vxlan_id),
-                (self.ASSIGNMENTS_PATH, created_assignment_id),
-                ("ipam/vrfs/", created_vrf_id),
-                (self.OVERLAYS_PATH, created_overlay_id),
-            ):
+            # Roll back in reverse creation order, overlay last (only if created).
+            for path, obj_id in reversed(created):
                 if obj_id is not None:
                     await self._safe_delete(f"{path}{obj_id}/")
+            if created_overlay_id is not None:
+                await self._safe_delete(f"{self.OVERLAYS_PATH}{created_overlay_id}/")
             raise
 
     async def delete_spectrum_x_vrf(self, vrf_id: str, vnid: int) -> None:

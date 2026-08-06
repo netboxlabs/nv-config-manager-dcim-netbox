@@ -96,7 +96,9 @@ async def test_get_network_device_missing_raises():
 
 async def test_get_network_devices():
     client = _client(rest_list={"dcim/devices/": [_REST_DEVICE]})
-    result = await client.get_network_devices(DeviceInventoryFilter())
+    # An entirely unfiltered request now raises; supply a real filter (the mock
+    # returns the canned device regardless of the params sent).
+    result = await client.get_network_devices(DeviceInventoryFilter(roles=["leaf"]))
     assert [d.name for d in result] == ["leaf-01"]
 
 

@@ -90,7 +90,11 @@ _REST = {
     ],
     "ipam/vrfs/": [{"id": 8, "name": "Tenant-A", "rd": "65000:1"}],
     "ipam/prefixes/": [
-        {"prefix": "10.0.0.0/24", "role": {"value": "loopback"}, "tags": [{"name": "mgmt"}]},
+        {
+            "prefix": "10.0.0.0/24",
+            "role": {"name": "Loopback", "slug": "loopback"},
+            "tags": [{"name": "mgmt"}],
+        },
         {"prefix": "10.0.0.4/31"},
         {"prefix": "10.0.1.0/31"},
     ],

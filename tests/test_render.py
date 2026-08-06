@@ -10,6 +10,8 @@ replaced with canned responses.
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 from nv_config_manager_dcim import (
     DCIMInvalidDataError,
@@ -251,3 +253,87 @@ async def test_get_render_data_without_netbox_location_uses_site():
     # With no NetBox location, the device location IS the Site.
     assert rd.device.identity.location.kind == "Site"
     assert rd.device.identity.location.name == "DM-Akron"
+
+
+async def test_render_interface_exposes_cabling_peer_for_bgp_neighbor():
+    """A cabled interface exposes its peer (name, peer IPv4, role, routing ASN)
+    so adjacency-derived templates can form a BGP neighbour; an uncabled
+    interface exposes no peer.
+
+    Regression for the OOB mgmt-leaf: the superpod plugin's ``vrf.j2`` builds a
+    BGP neighbour from ``intf.connected_interface.device`` (peer_ipv4 + ASN,
+    gated on role ``OOB-Server``). Without ``connected_interface`` populated the
+    switch renders zero neighbours, never learns its route to the provisioning
+    network, and fails to POST ``/provisioned``.
+    """
+    device = copy.deepcopy(_DEVICE)
+    device["interfaces"][0]["connected_endpoints"] = [
+        {
+            "name": "eth1",
+            "vrf": None,
+            "ip_addresses": [{"address": "10.120.0.0/31", "role": None}],
+            "device": {
+                "id": "99",
+                "name": "oob-mgmt-server",
+                "role": {"name": "OOB-Server"},
+                "tenant": {"name": "Public Demo"},
+                "tags": [{"name": "air-trial"}],
+                "config_context": {"bgp": {"asn": "65000"}},
+            },
+        }
+    ]
+    client = _client_with(device, _REST_MAP)
+    try:
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+    by_name = {i.name: i for i in rd.device.interfaces}
+
+    peer = by_name["swp1"].connected_interface
+    assert peer is not None, "cabled interface must expose its connected peer"
+    assert peer.name == "eth1"
+    assert str(peer.addresses[0].host) == "10.120.0.0"  # -> template peer_ipv4
+    assert peer.device.name == "oob-mgmt-server"
+    assert peer.device.role == "OOB-Server"  # neighbour gate in vrf.j2
+    assert peer.device.routing_asn == "65000"  # numbered remote-as
+
+    # uncabled interface exposes no peer -> no spurious neighbour
+    assert by_name["swp2"].connected_interface is None
+
+
+async def test_render_ports_role_lag_targets_and_router_id():
+    """Ports of four computed render gaps: interface role (from nvcm_interface_role
+    CF), LAG member inversion, VRF route-targets, and BGP router-id interface."""
+    device = copy.deepcopy(_DEVICE)
+    device["interfaces"][0]["custom_fields"] = {"nvcm_interface_role": "Uplink"}
+    device["interfaces"][0]["vrf"]["import_targets"] = [{"name": "65000:1"}]
+    device["interfaces"][0]["vrf"]["export_targets"] = [{"name": "65000:2"}]
+    device["interfaces"][1]["lag"] = {"id": "77"}  # swp2 is a member of bond0
+    device["interfaces"].append(
+        {"id": "77", "name": "bond0", "enabled": True, "type": "lag", "ip_addresses": []}
+    )
+    device["interfaces"].append(
+        {
+            "id": "50",
+            "name": "lo",
+            "enabled": True,
+            "type": "virtual",
+            "custom_fields": {"nvcm_interface_role": "Loopback"},
+            "ip_addresses": [],
+        }
+    )
+    client = _client_with(device, _REST_MAP)
+    try:
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+    by = {i.name: i for i in rd.device.interfaces}
+    assert by["swp1"].role == "Uplink"  # from nvcm_interface_role CF
+    assert by["swp1"].vrf.import_targets[0].name == "65000:1"
+    assert by["swp1"].vrf.export_targets[0].name == "65000:2"
+    assert by["bond0"].member_interfaces == ("swp2",)  # inverse lag relation
+    assert by["swp2"].member_interfaces == ()
+    inst = rd.device.routing.bgp_instances[0]
+    assert inst.router_id_interface == "lo"  # loopback drives BGP router-id

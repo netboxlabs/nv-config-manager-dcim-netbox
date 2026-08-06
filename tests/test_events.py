@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from nv_config_manager_dcim import DCIMChangeEvent
 
+from nv_config_manager_dcim_netbox.client import decode_device_id
 from nv_config_manager_dcim_netbox.events import (
     _bgp_session_changed,
     _cable_changed,
@@ -93,7 +94,9 @@ def test_register_render_event_handlers_covers_every_native_type():
         "ipam.vrf",
         "ipam.prefix",
         "ipam.ipaddress",
+        "ipam.asn",
         "netbox_bgp.bgpsession",
+        "netbox_bgp.bgppeergroup",
         _OVERLAY_TYPE,
         "netbox_nv_config_manager.deviceconfigstatus",
     }
@@ -104,14 +107,14 @@ def test_register_render_event_handlers_covers_every_native_type():
 
 async def test_device_change_fans_out_to_itself():
     requests = await _device_changed(_event("dcim.device", "5"), None)
-    assert [r.device_id for r in requests] == ["5"]
+    assert [decode_device_id(r.device_id) for r in requests] == ["5"]
     assert requests[0].commit_message  # a non-empty render reason is set
 
 
 async def test_interface_change_fans_out_to_parent_device():
     event = _event("dcim.interface", "11", {"device": {"id": 7}})
     requests = await _interface_changed(event, None)
-    assert [r.device_id for r in requests] == ["7"]
+    assert [decode_device_id(r.device_id) for r in requests] == ["7"]
 
 
 async def test_interface_change_without_device_is_noop():
@@ -122,7 +125,7 @@ async def test_interface_change_without_device_is_noop():
 async def test_bgp_session_change_fans_out_to_device():
     event = _event("netbox_bgp.bgpsession", "3", {"device": {"id": 9}})
     requests = await _bgp_session_changed(event, None)
-    assert [r.device_id for r in requests] == ["9"]
+    assert [decode_device_id(r.device_id) for r in requests] == ["9"]
 
 
 async def test_overlay_assignment_to_device():
@@ -130,7 +133,7 @@ async def test_overlay_assignment_to_device():
         _OVERLAY_TYPE, "1", {"assigned_object_type": "dcim.device", "assigned_object_id": 4}
     )
     requests = await _overlay_assignment_changed(event, None)
-    assert [r.device_id for r in requests] == ["4"]
+    assert [decode_device_id(r.device_id) for r in requests] == ["4"]
 
 
 async def test_overlay_assignment_to_interface_resolves_device_via_client():
@@ -146,7 +149,7 @@ async def test_overlay_assignment_to_interface_resolves_device_via_client():
     )
     requests = await _overlay_assignment_changed(event, FakeClient())
     assert calls["path"] == "dcim/interfaces/12/"
-    assert [r.device_id for r in requests] == ["8"]
+    assert [decode_device_id(r.device_id) for r in requests] == ["8"]
 
 
 async def test_overlay_assignment_interface_resolution_error_is_noop():
@@ -167,7 +170,7 @@ async def test_overlay_assignment_without_assigned_id_is_noop():
     assert requests == ()
 
 
-# --- cross-object fan-out (parity with the reference Nautobot handlers) ---------
+# --- cross-object fan-out (parity with the reference DCIM provider handlers) ---------
 
 
 async def test_port_and_config_status_fan_out_to_parent_device():
@@ -178,7 +181,7 @@ async def test_port_and_config_status_fan_out_to_parent_device():
     ):
         event = _event(object_type, "1", {"device": {"id": 7}})
         requests = await _parent_device_changed(event, None)
-        assert [r.device_id for r in requests] == ["7"], object_type
+        assert [decode_device_id(r.device_id) for r in requests] == ["7"], object_type
 
 
 async def test_vrf_change_fans_out_to_interface_devices():
@@ -192,7 +195,7 @@ async def test_vrf_change_fans_out_to_interface_devices():
         }
     )
     requests = await _vrf_changed(_event("ipam.vrf", "9"), client)
-    assert sorted(r.device_id for r in requests) == ["3", "5"]  # deduplicated
+    assert sorted(decode_device_id(r.device_id) for r in requests) == ["3", "5"]  # deduplicated
 
 
 async def test_ip_address_change_fans_out_to_assigned_device():
@@ -205,7 +208,7 @@ async def test_ip_address_change_fans_out_to_assigned_device():
         }
     )
     requests = await _ip_address_changed(_event("ipam.ipaddress", "4"), client)
-    assert [r.device_id for r in requests] == ["6"]
+    assert [decode_device_id(r.device_id) for r in requests] == ["6"]
 
 
 async def test_ip_address_not_on_interface_is_noop():
@@ -225,7 +228,7 @@ async def test_cable_change_fans_out_to_both_terminations():
         }
     )
     requests = await _cable_changed(_event("dcim.cable", "2"), client)
-    assert sorted(r.device_id for r in requests) == ["1", "2"]
+    assert sorted(decode_device_id(r.device_id) for r in requests) == ["1", "2"]
 
 
 async def test_prefix_change_fans_out_by_scope():
@@ -234,7 +237,7 @@ async def test_prefix_change_fans_out_by_scope():
         rest_list={"dcim/devices/": [{"id": 10}, {"id": 11}]},
     )
     requests = await _prefix_changed(_event("ipam.prefix", "8"), client)
-    assert sorted(r.device_id for r in requests) == ["10", "11"]
+    assert sorted(decode_device_id(r.device_id) for r in requests) == ["10", "11"]
 
 
 async def test_prefix_without_scope_is_noop():
@@ -250,7 +253,7 @@ async def test_config_context_change_fans_out_to_matching_devices():
         rest_list={"dcim/devices/": [{"id": 20}]},
     )
     requests = await _config_context_changed(_event("extras.configcontext", "5"), client)
-    assert [r.device_id for r in requests] == ["20"]
+    assert [decode_device_id(r.device_id) for r in requests] == ["20"]
 
 
 async def test_cross_object_delete_is_noop():

@@ -22,6 +22,8 @@ from nv_config_manager_dcim import (
     RenderTemplateVersion,
 )
 
+from nv_config_manager_dcim_netbox.client import encode_device_id
+
 if TYPE_CHECKING:
     from nv_config_manager_dcim import ConfigurationBackupIntent, IntendedConfigurationUpdate
 
@@ -63,7 +65,9 @@ class NetBoxLifecycleStateMixin:
         if is_aggregate_managed is not None:
             params.append(("is_aggregate_managed", str(is_aggregate_managed).lower()))
         statuses = await self.rest_list(_STATUS_PATH, params)
-        return [str(s["device"]) for s in statuses if s.get("device") is not None]
+        return [
+            encode_device_id(s["device"]) for s in statuses if s.get("device") is not None
+        ]
 
     async def get_render_template_versions(self) -> list[RenderTemplateVersion]:
         statuses = await self.rest_list(_STATUS_PATH, [("render_enabled", "true")])
@@ -104,9 +108,14 @@ class NetBoxLifecycleStateMixin:
         )
 
     async def get_backup_enabled_device_ids(self, is_aggregate_managed: bool) -> set[str]:
-        # Intersect backup-enabled statuses with active devices on backup-capable
-        # platforms; the two queries are independent, so run them concurrently.
-        params = [("status", "active")]
+        # Intersect backup-enabled statuses with in-service devices on
+        # backup-capable platforms; the two queries are independent, so run them
+        # concurrently. Include both ``active`` and ``provisioned`` — ZTP writes
+        # ``status=provisioned`` (see ztp.py), so a freshly-provisioned device
+        # would otherwise never be backed up. NetBox's ``status`` filter is OR-able
+        # (repeat the param), mirroring the reference provider's {Provisioned,
+        # Active} set.
+        params = [("status", "active"), ("status", "provisioned")]
         params.extend(("platform", slug) for slug in _BACKUP_PLATFORMS)
         statuses, devices = await asyncio.gather(
             self.rest_list(
@@ -120,7 +129,7 @@ class NetBoxLifecycleStateMixin:
         )
         backup_enabled = {str(s["device"]) for s in statuses if s.get("device") is not None}
         eligible = {str(d["id"]) for d in devices}
-        return backup_enabled & eligible
+        return {encode_device_id(pk) for pk in backup_enabled & eligible}
 
     async def get_configuration_backup_metadata(
         self, device_id: str

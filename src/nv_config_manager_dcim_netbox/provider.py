@@ -17,7 +17,11 @@ from nv_config_manager_dcim import (
     ProviderSettings,
 )
 
-from nv_config_manager_dcim_netbox.client import BaseNetBoxClient, netbox_connection_settings
+from nv_config_manager_dcim_netbox.client import (
+    BaseNetBoxClient,
+    netbox_connection_settings,
+    with_device_id_decoding,
+)
 from nv_config_manager_dcim_netbox.dhcp import NetBoxDHCPMixin
 from nv_config_manager_dcim_netbox.events import register_render_event_handlers
 from nv_config_manager_dcim_netbox.fabric_common import FabricCommonMixin
@@ -36,6 +40,7 @@ from nv_config_manager_dcim_netbox.ztp import NetBoxZTPMixin
 logger = logging.getLogger(__name__)
 
 
+@with_device_id_decoding
 class NetBoxDCIMClient(
     NetBoxInventoryMixin,
     NetBoxReferenceMixin,

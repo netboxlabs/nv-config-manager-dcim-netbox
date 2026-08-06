@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import re
 
-from nv_config_manager_dcim import DCIMConflictError, DCIMNotFoundError
+from nv_config_manager_dcim import (
+    DCIMConflictError,
+    DCIMInvalidDataError,
+    DCIMNotFoundError,
+)
 
 # Default fabric status value (plugin uses a choice field, not a status object).
 FABRIC_STATUS = "active"
@@ -19,12 +23,18 @@ _PKEY_RE = re.compile(r"\A0[xX]([0-9a-fA-F]{1,4})\Z")
 
 
 def normalize_pkey(value: str) -> str:
-    """Return a pkey in canonical ``0x%04x`` form (unchanged if unparseable)."""
-    if not value:
-        return value
-    match = _PKEY_RE.match(value.strip())
+    """Return a pkey in canonical ``0x%04x`` form.
+
+    Raises :class:`DCIMInvalidDataError` when *value* is empty or does not match
+    the required ``0x`` + 1-4 hex-digit format. The reference DCIM provider
+    rejects malformed PKeys up front rather than silently passing them through,
+    which otherwise lets bad input propagate into overlay/pkey records.
+    """
+    match = _PKEY_RE.match(value.strip()) if value else None
     if not match:
-        return value
+        raise DCIMInvalidDataError(
+            f"pkey {value!r} does not match required format (e.g. '0x8001')"
+        )
     return f"0x{int(match.group(1), 16):04x}"
 
 

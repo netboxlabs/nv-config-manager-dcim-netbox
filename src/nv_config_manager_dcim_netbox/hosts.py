@@ -8,7 +8,11 @@ from typing import TYPE_CHECKING
 
 from nv_config_manager_dcim import DCIMNotFoundError
 
-from nv_config_manager_dcim_netbox._mappers import host_metadata_from_gql, interface_from_rest
+from nv_config_manager_dcim_netbox._mappers import (
+    canonical_mac,
+    host_metadata_from_gql,
+    interface_from_rest,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -41,6 +45,7 @@ _HOST_METADATA_FIELDS = """
     id
     name
     tenant { name }
+    custom_fields
     interfaces {
       name
       primary_mac_address { mac_address }
@@ -84,11 +89,16 @@ class NetBoxHostsMixin:
         return await self.get_host_device(str(device_id))
 
     async def _set_interface_primary_mac(self, interface_id: str, mac_address: str) -> None:
-        """Upsert ``mac_address`` on the interface and make it the primary MAC."""
-        normalized = mac_address.strip().lower()
+        """Upsert ``mac_address`` on the interface and make it the primary MAC.
+
+        Matching is canonical (case- and separator-insensitive) so an existing
+        MAC recorded in any format is reused rather than duplicated; the value
+        posted for a new MAC is preserved exactly as supplied.
+        """
+        normalized = canonical_mac(mac_address)
         existing = await self.rest_list("dcim/mac-addresses/", [("interface_id", interface_id)])
         match = next(
-            (m for m in existing if (m.get("mac_address") or "").strip().lower() == normalized),
+            (m for m in existing if canonical_mac(m.get("mac_address")) == normalized),
             None,
         )
         if match:

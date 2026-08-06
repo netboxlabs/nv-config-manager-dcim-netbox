@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING
 
 from nv_config_manager_dcim import RenderEventRequest
 
+from nv_config_manager_dcim_netbox.client import encode_device_id
+
 if TYPE_CHECKING:
     from nv_config_manager_dcim import DCIMChangeEvent, DCIMClient, DCIMRenderEventRegistry
 
@@ -34,7 +36,11 @@ def _record_device_id(event: DCIMChangeEvent):
 def _requests(event: DCIMChangeEvent, device_id) -> tuple[RenderEventRequest, ...]:
     if not device_id:
         return ()
-    return (RenderEventRequest(device_id=str(device_id), commit_message=_commit_message(event)),)
+    return (
+        RenderEventRequest(
+            device_id=encode_device_id(device_id), commit_message=_commit_message(event)
+        ),
+    )
 
 
 async def _device_changed(event: DCIMChangeEvent, client: DCIMClient):
@@ -54,7 +60,8 @@ def _requests_multi(event: DCIMChangeEvent, device_ids) -> tuple[RenderEventRequ
         if device_id and str(device_id) not in seen:
             seen.append(str(device_id))
     return tuple(
-        RenderEventRequest(device_id=device_id, commit_message=message) for device_id in seen
+        RenderEventRequest(device_id=encode_device_id(device_id), commit_message=message)
+        for device_id in seen
     )
 
 
@@ -162,6 +169,28 @@ async def _prefix_devices(event, client):
     return {device.get("id") for device in devices}
 
 
+async def _bgp_asn_devices(event, client):
+    # netbox-bgp models an ASN as NetBox core ``ipam.ASN`` (a session's local_as /
+    # remote_as FK to it), so an ASN change arrives as ``ipam.asn``. Editing a
+    # shared ASN must re-render every device whose BGP session references it. The
+    # session endpoint's local_as_id / remote_as_id filters AND when combined, so
+    # query each separately and union the owning devices.
+    asn_id = str(event.object_id)
+    local = await client.rest_list("plugins/bgp/session/", [("local_as_id", asn_id)])
+    remote = await client.rest_list("plugins/bgp/session/", [("remote_as_id", asn_id)])
+    return {_fk_id(session.get("device")) for session in (*local, *remote)}
+
+
+async def _bgp_peer_group_devices(event, client):
+    # A shared netbox-bgp ``BGPPeerGroup`` is referenced by many sessions; editing
+    # it must re-render each referencing session's device. Resolve peer group ->
+    # sessions (peer_group=<pk>) -> devices.
+    sessions = await client.rest_list(
+        "plugins/bgp/session/", [("peer_group", str(event.object_id))]
+    )
+    return {_fk_id(session.get("device")) for session in sessions}
+
+
 async def _config_context_devices(event, client):
     context = await client.rest_request("GET", f"extras/config-contexts/{event.object_id}/")
     filters = []
@@ -194,7 +223,15 @@ async def _config_context_changed(event, client):
     return await _cross(event, client, _config_context_devices)
 
 
-# object_type -> handler. Mirrors the reference Nautobot provider's coverage,
+async def _bgp_asn_changed(event, client):
+    return await _cross(event, client, _bgp_asn_devices)
+
+
+async def _bgp_peer_group_changed(event, client):
+    return await _cross(event, client, _bgp_peer_group_devices)
+
+
+# object_type -> handler. Mirrors the reference DCIM provider's coverage,
 # mapped to NetBox: rear/front ports + device-config-status fan out to their
 # device; cable/vrf/prefix/ipaddress/configcontext resolve cross-object.
 _HANDLERS = {
@@ -207,7 +244,16 @@ _HANDLERS = {
     "ipam.vrf": _vrf_changed,
     "ipam.prefix": _prefix_changed,
     "ipam.ipaddress": _ip_address_changed,
+    # A netbox-bgp session carries only a single ``device`` FK (the local peer);
+    # it has no FK to the remote peer's device — unlike the reference provider's
+    # two-ended peering — so editing a session re-renders the local device only.
     "netbox_bgp.bgpsession": _parent_device_changed,
+    # Shared BGP objects fan out to every dependent device: an ASN is core
+    # ipam.asn (referenced by session local_as/remote_as); a peer group is
+    # netbox_bgp.bgppeergroup. Mirrors the reference provider's ASN / peer-group
+    # fan-out.
+    "ipam.asn": _bgp_asn_changed,
+    "netbox_bgp.bgppeergroup": _bgp_peer_group_changed,
     "netbox_nv_config_manager.overlayassignment": _overlay_assignment_changed,
     "netbox_nv_config_manager.deviceconfigstatus": _parent_device_changed,
 }

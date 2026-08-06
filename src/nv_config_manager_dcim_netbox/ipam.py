@@ -32,6 +32,12 @@ class NetBoxIPAMMixin:
     derived from the device's interfaces."""
 
     async def get_device_vrfs(self, device_id: str) -> list[DeviceVRF]:
+        # NetBox has no native device -> VRF relationship: VRFs attach to
+        # interfaces/prefixes/IPs, never to devices. A device's VRFs are
+        # therefore the union of the VRFs on its interfaces, which is also
+        # exactly how ``assign_vrf_to_device`` writes them back. There is no
+        # device-level VRF set to union in unless a future plugin exposes one;
+        # if it does, merge it into ``vrfs`` below (guarded on its presence).
         interfaces = await self.rest_list("dcim/interfaces/", [("device_id", str(device_id))])
         vrfs: dict[str, str] = {}
         for interface in interfaces:
@@ -71,12 +77,17 @@ class NetBoxIPAMMixin:
         """Return the route distinguishers in use in a namespace zone.
 
         The caller allocates a new, non-conflicting RD, so this returns every RD
-        already used by a VRF (namespace) tagged ``namespace_tag``. ``site`` is
-        accepted for contract parity but does not constrain the result — NetBox
-        VRFs are global, so the tag alone defines the zone. Matches a VRF tag by
-        either its name or slug.
+        already used by a VRF (namespace) tagged ``namespace_tag``. ``site``
+        scopes the candidate VRFs server-side via the ``nvcm_site`` VRF custom
+        field (NetBox VRFs have no native site link), so multi-site deployments
+        do not draw RD candidates from an unrelated site's namespaces. This is
+        guarded on that field being defined; the ``namespace_tag`` (matched by
+        VRF tag name or slug) still defines the zone within the site.
         """
-        vrfs = await self.rest_list(VRFS_PATH)
+        params: list[tuple[str, str]] = []
+        if site:
+            params.append(("cf_nvcm_site", site))
+        vrfs = await self.rest_list(VRFS_PATH, params)
         return [
             NamespaceRouteDistinguisher(
                 namespace_id=str(vrf["id"]),
