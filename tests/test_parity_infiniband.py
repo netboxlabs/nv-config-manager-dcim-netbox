@@ -224,7 +224,7 @@ async def test_find_ib_interfaces_by_guids_uses_case_insensitive_lookup():
     result = await client.find_ib_interfaces_by_guids(["0xAA"])
     assert result[0].interface_id == "11"
     # Mixed-case input matches the lowercase-stored GUID via NetBox's __ie lookup.
-    assert ("dcim/interfaces/", [("cf_ib_guid__ie", "0xAA")]) in captured
+    assert ("dcim/interfaces/", [("cf_ib_guid", "0xAA")]) in captured
 
 
 # -- Fix 6: return assignment ids (not interface ids) ---------------------------

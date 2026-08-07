@@ -91,7 +91,7 @@ async def test_guid_lookup_uses_the_case_insensitive_custom_field_filter():
     # case-insensitive. Losing it silently stops matching real GUIDs.
     client, queries = _client()
     await client.find_ib_interfaces_by_guids(["0xABCD"])
-    assert ("cf_ib_guid__ie", "0xABCD") in params_for(queries, _INTERFACES)
+    assert ("cf_ib_guid", "0xABCD") in params_for(queries, _INTERFACES)
 
 
 @pytest.mark.dhcp

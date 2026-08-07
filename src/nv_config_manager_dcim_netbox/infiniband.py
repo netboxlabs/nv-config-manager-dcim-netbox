@@ -196,14 +196,17 @@ class NetBoxInfiniBandMixin:
         return out
 
     async def find_ib_interfaces_by_guids(self, guids: list[str]) -> list[IBInterfaceGuid]:
-        # NetBox exposes a case-insensitive exact lookup (``__ie``) on text custom
-        # fields; UFM reports GUIDs in mixed case, so match on it to mirror the
-        # reference provider rather than requiring exact casing. Repeated
-        # ``cf_*__ie`` params are not reliably OR-ed, so query per GUID — but
+        # Match on the plain ``cf_ib_guid`` exact filter. NetBox does NOT support a
+        # ``__ie`` lookup on a custom field — it silently *ignores* the unknown
+        # lookup and returns every interface, which then reads back as a bogus
+        # "GUID matched multiple interfaces" (the same interface appears in every
+        # per-GUID page). The plain exact CF filter is already case-insensitive
+        # (Postgres text collation), so it also covers UFM's mixed-case GUIDs.
+        # Repeated ``cf_*`` params are not reliably OR-ed, so query per GUID — but
         # concurrently.
         pages = await asyncio.gather(
             *(
-                self.rest_list(INTERFACES_PATH, [("cf_ib_guid__ie", guid)])
+                self.rest_list(INTERFACES_PATH, [("cf_ib_guid", guid)])
                 for guid in dict.fromkeys(guids)
             )
         )
