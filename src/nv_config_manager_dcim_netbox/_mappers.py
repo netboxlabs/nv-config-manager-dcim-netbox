@@ -28,6 +28,8 @@ from nv_config_manager_dcim.workflow_models import (
     Platform,
 )
 
+from nv_config_manager_dcim_netbox.client import encode_device_id
+
 # NVCM status custom fields on the NetBox device. ``nvcm_render_enabled`` and
 # ``nvcm_ztp_enabled`` are already used elsewhere in this provider (inventory /
 # DHCP); ``nvcm_deploy_enabled`` and ``nvcm_backup_enabled`` are the parity
@@ -125,6 +127,22 @@ def slug_of(obj: Any) -> str:
     return (obj or {}).get("slug") or ""
 
 
+def status_slug(value: Any) -> str:
+    """Normalize a device-status filter value to the NetBox slug.
+
+    NetBox's ``status`` query filter matches the status *slug*, which for device
+    statuses is the lowercased single-word label (``active``, ``provisioned``,
+    ``planned`` …). NVCM workflows, however, default their status filter to the
+    display label the reference DCIM provider uses (e.g. ``["Active",
+    "Provisioned"]``); forwarding that verbatim makes NetBox reject the request
+    with HTTP 400 (``"Active is not one of the available choices"``), which stalls
+    every site-scoped selection (cable/hardware validation, site backup, site
+    password rotation). Lowercasing maps label -> slug and is idempotent for a
+    value that is already a slug.
+    """
+    return str(value).lower()
+
+
 def name_of(obj: Any) -> str | None:
     """Return a nested object's name, or ``None``."""
     return (obj or {}).get("name") if obj else None
@@ -192,7 +210,12 @@ def network_device_from_rest(device: dict[str, Any]) -> NetworkDeviceData:
     """
     name = require_device_name(device)
     return NetworkDeviceData(
-        id=str(device["id"]),
+        # NVCM-facing id must be the UUID the config-store is keyed by (render
+        # writes under uuid(int=pk)); its `intended_config_path` derives from this
+        # id, so a raw NetBox pk here makes deploy/backup's load_intended_configuration
+        # fetch `<pk>/startup.yaml` and 404. Encode it (same boundary as the render /
+        # lifecycle / event id outputs); inbound ids are decoded by the client.
+        id=encode_device_id(device["id"]),
         name=name,
         rack=name_of(device.get("rack")),
         position=device.get("position"),

@@ -87,6 +87,11 @@ async def test_get_network_device():
     client = _client(rest_get={"dcim/devices/1/": _REST_DEVICE})
     dev = await client.get_network_device("1")
     assert dev.name == "leaf-01" and dev.site == "DM-Akron"
+    # id must be the config-store UUID (encoded pk 1), so intended_config_path
+    # resolves against the UUID-keyed config-store — deploy/backup's
+    # load_intended_configuration fetches <uuid>/startup.yaml, not <pk>/startup.yaml.
+    assert dev.id == "00000000-0000-0000-0000-000000000001"
+    assert dev.intended_config_path == "00000000-0000-0000-0000-000000000001/startup.yaml"
 
 
 async def test_get_network_device_missing_raises():
@@ -100,6 +105,36 @@ async def test_get_network_devices():
     # returns the canned device regardless of the params sent).
     result = await client.get_network_devices(DeviceInventoryFilter(roles=["leaf"]))
     assert [d.name for d in result] == ["leaf-01"]
+
+
+async def test_get_network_devices_lowercases_status_filter():
+    # Workflows default their status filter to the display label the reference
+    # DCIM provider uses (["Active", "Provisioned"]). NetBox's status filter
+    # matches the slug (lowercase), so the provider must slugify it; forwarding
+    # "Active" verbatim makes NetBox 400 and stalls every site-scoped selection
+    # (cable/hardware validation, site backup, site password rotation).
+    from tests._fake import params_for
+
+    queries: list = []
+    client = _client(rest_list={"dcim/devices/": [_REST_DEVICE]}, queries=queries)
+    await client.get_network_devices(
+        DeviceInventoryFilter(roles=["tan-hleaf"], statuses=["Active", "Provisioned"])
+    )
+    sent = params_for(queries, "dcim/devices/")
+    status_values = [v for k, v in sent if k == "status"]
+    assert status_values == ["active", "provisioned"]
+
+
+async def test_list_devices_lowercases_status_filter():
+    from nv_config_manager_dcim import DCIMDeviceSelectionFilter
+
+    from tests._fake import params_for
+
+    queries: list = []
+    client = _client(rest_list={"dcim/devices/": [_REST_DEVICE]}, queries=queries)
+    await client.list_devices(DCIMDeviceSelectionFilter(statuses=["Active"]))
+    sent = params_for(queries, "dcim/devices/")
+    assert [v for k, v in sent if k == "status"] == ["active"]
 
 
 async def test_get_device_interfaces():

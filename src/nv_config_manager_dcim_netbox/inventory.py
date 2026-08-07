@@ -22,6 +22,7 @@ from nv_config_manager_dcim_netbox._mappers import (
     host_device_from_gql,
     interface_from_rest,
     network_device_from_rest,
+    status_slug,
 )
 
 if TYPE_CHECKING:
@@ -164,7 +165,10 @@ class NetBoxInventoryMixin:
             ("manufacturer", filters.manufacturers),
             ("platform", filters.platforms),
         ):
-            params.extend((key, str(value)) for value in values or ())
+            # ``status`` must be the NetBox slug (lowercase); workflows pass the
+            # display label ("Active"). See ``status_slug``.
+            coerce = status_slug if key == "status" else str
+            params.extend((key, coerce(value)) for value in values or ())
         if filters.managed_only:
             # "Managed" is modeled by the ``nvcm_render_enabled`` device custom
             # field (the same proxy ``get_managed_device_metadata`` uses). Guarded
@@ -280,7 +284,10 @@ class NetBoxInventoryMixin:
             ("device_type_id", filters.device_type_ids),
             ("id", filters.device_ids),
         ):
-            params.extend((key, str(value)) for value in values or ())
+            # ``status`` must be the NetBox slug (lowercase); workflows pass the
+            # display label ("Active"). See ``status_slug``.
+            coerce = status_slug if key == "status" else str
+            params.extend((key, coerce(value)) for value in values or ())
         for platform in filters.platforms or []:
             params.append(("platform", str(platform.value)))
         # NVCM status-flag filters map to boolean device custom fields. ``managed``
