@@ -132,16 +132,16 @@ async def test_ensure_ib_pkey_partition_creates_overlay_and_pkey():
         record=record,
     )
 
-    async def lookup_id(path, name):
-        return "5"
+    async def resolve_scope(value):
+        return "dcim.location", 5
 
     async def resolve_tenant(name):
         return None
 
-    async def find_overlay(name, location=None):
+    async def find_overlay(name, scope=None):
         return None  # no existing overlay -> create
 
-    client._lookup_id = lookup_id
+    client._resolve_scope = resolve_scope
     client._resolve_tenant_id = resolve_tenant
     client._find_overlay = find_overlay
     part = await client.ensure_ib_pkey_partition("0x7fff", "part-A", "Row 1", None, "full")
@@ -149,6 +149,8 @@ async def test_ensure_ib_pkey_partition_creates_overlay_and_pkey():
     assert part.pkey == "0x7fff" and part.partition_id == "10" and part.pkey_id == "20"
     posts = {path for method, path, _ in record if method == "POST"}
     assert posts == {_OVERLAYS, _PKEYS}
+    overlay_body = next(b for m, p, b in record if m == "POST" and p == _OVERLAYS)
+    assert overlay_body["scope_type"] == "dcim.location" and overlay_body["scope_id"] == 5
 
 
 async def test_ensure_orphan_ib_pkey_creates_when_absent():

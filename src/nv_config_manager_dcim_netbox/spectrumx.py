@@ -120,17 +120,18 @@ class NetBoxSpectrumXMixin:
                 )
             overlay_id = overlay["id"]
         else:
-            location_id = await self._resolve_location_id(site)
-            if location_id is None:
+            scope_type, scope_id = await self._resolve_scope(site)
+            if scope_id is None:
                 raise DCIMInvalidDataError(
-                    f"NetBox has no Location named {site!r} for the Spectrum-X overlay"
+                    f"NetBox has no Site or Location named {site!r} for the Spectrum-X overlay"
                 )
             row = await self.rest_request(
                 "POST",
                 self.OVERLAYS_PATH,
                 json={
                     "name": overlay_name,
-                    "location": location_id,
+                    "scope_type": scope_type,
+                    "scope_id": scope_id,
                     "tenant": tenant_id,
                     "isolation_type": _SPECTRUMX_ISOLATION,
                     "status": FABRIC_STATUS,

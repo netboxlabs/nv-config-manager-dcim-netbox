@@ -30,7 +30,7 @@ def _spx_client(*, gql=None, rest_list=None, record=None, overlay="unset", tenan
     patch = {}
     if overlay != "unset":
 
-        async def fake_find_overlay(name, location=None):
+        async def fake_find_overlay(name, scope=None):
             return overlay
 
         patch["_find_overlay"] = fake_find_overlay
@@ -38,11 +38,12 @@ def _spx_client(*, gql=None, rest_list=None, record=None, overlay="unset", tenan
     async def fake_tenant(name):
         return tenant
 
-    async def fake_location(site):
-        return location
+    async def fake_resolve_scope(value):
+        # ``location`` here is the resolved scope PK; anchor as a Site scope.
+        return "dcim.site", location
 
     patch["_resolve_tenant_id"] = fake_tenant
-    patch["_resolve_location_id"] = fake_location
+    patch["_resolve_scope"] = fake_resolve_scope
     return fake_client(gql=gql, rest_list=rest_list, record=record, patch=patch)
 
 

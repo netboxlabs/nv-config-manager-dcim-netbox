@@ -132,12 +132,13 @@ class NetBoxReferenceMixin:
         if isolation_type:
             params.append(("isolation_type", isolation_type))
         if location:
-            # Callers pass a site/location *name*; the filter needs a numeric PK.
-            location_id = await self._resolve_location_id(location)
-            if location_id is None:
-                # No NetBox Location by that name -> nothing can match it.
+            # Callers pass a site/location name/slug; the overlay is scoped to a
+            # Site or Location (CachedScopeMixin), filtered here by scope_id.
+            _scope_type, scope_id = await self._resolve_scope(location)
+            if scope_id is None:
+                # No NetBox Site/Location by that name -> nothing can match it.
                 return []
-            params.append(("location_id", str(location_id)))
+            params.append(("scope_id", str(scope_id)))
         overlays = await self.rest_list(self.OVERLAYS_PATH, params)
         return _selections(overlays)
 

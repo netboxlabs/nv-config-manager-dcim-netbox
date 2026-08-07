@@ -57,21 +57,21 @@ async def test_provision_spectrum_x_vrf_creates_overlay_vrf_assignment_vxlan():
     location-unresolved error branch was covered."""
     record = []
 
-    async def no_overlay(name, location=None):
+    async def no_overlay(name, scope=None):
         return None
 
     async def tenant_id(name):
         return 7
 
-    async def location_id(site):
-        return 3
+    async def resolve_scope(value):
+        return "dcim.site", 3
 
     client = fake_client(
         record=record,
         patch={
             "_find_overlay": no_overlay,
             "_resolve_tenant_id": tenant_id,
-            "_resolve_location_id": location_id,
+            "_resolve_scope": resolve_scope,
         },
     )
     await client.provision_spectrum_x_vrf(
@@ -83,7 +83,8 @@ async def test_provision_spectrum_x_vrf_creates_overlay_vrf_assignment_vxlan():
         tenant="tenant-a",
     )
     posts = {path: body for method, path, body in record if method == "POST"}
-    assert posts[_OVERLAYS]["name"] == "SpX" and posts[_OVERLAYS]["location"] == 3
+    assert posts[_OVERLAYS]["name"] == "SpX"
+    assert posts[_OVERLAYS]["scope_type"] == "dcim.site" and posts[_OVERLAYS]["scope_id"] == 3
     assert posts[_OVERLAYS]["tenant"] == 7
     assert posts["ipam/vrfs/"] == {"name": "SpXTenant1500", "rd": "65001:1500", "tenant": 7}
     assert posts[_ASSIGN]["assigned_object_type"] == "ipam.vrf"
@@ -143,21 +144,21 @@ async def test_provision_rollback_does_not_mask_the_original_failure():
     the rollback — not the cleanup error, which hides the real cause."""
     record = []
 
-    async def no_overlay(name, location=None):
+    async def no_overlay(name, scope=None):
         return None
 
     async def tenant_id(name):
         return 7
 
-    async def location_id(site):
-        return 3
+    async def resolve_scope(value):
+        return "dcim.site", 3
 
     client = fake_client(
         record=record,
         patch={
             "_find_overlay": no_overlay,
             "_resolve_tenant_id": tenant_id,
-            "_resolve_location_id": location_id,
+            "_resolve_scope": resolve_scope,
         },
     )
     original = DCIMInvalidDataError("VXLAN vnid already in use")

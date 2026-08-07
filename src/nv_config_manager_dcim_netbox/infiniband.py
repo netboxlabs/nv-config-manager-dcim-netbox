@@ -223,18 +223,19 @@ class NetBoxInfiniBandMixin:
         # Normalized on write as well as on compare, so the stored value cannot
         # differ from what ensure_/sync_ib_pkey_assignments later compare against.
         membership_type = _normalize_membership(membership_type)
-        location_id = await self._lookup_id("dcim/locations/", location_name)
-        if location_id is None:
-            raise DCIMInvalidDataError(f"NetBox location {location_name!r} not found")
+        scope_type, scope_id = await self._resolve_scope(location_name)
+        if scope_id is None:
+            raise DCIMInvalidDataError(f"NetBox Site/Location {location_name!r} not found")
         tenant_id = await self._resolve_tenant_id(tenant_name)
 
-        overlay = await self._find_overlay(partition_name, location_id)
+        overlay = await self._find_overlay(partition_name, location_name)
         if overlay:
             overlay_id = overlay["id"]
         else:
             body = {
                 "name": partition_name,
-                "location": location_id,
+                "scope_type": scope_type,
+                "scope_id": scope_id,
                 "isolation_type": _IB_PKEY_ISOLATION,
                 "status": FABRIC_STATUS,
             }
@@ -575,11 +576,17 @@ class NetBoxInfiniBandMixin:
                 "overlay and link the PKey to it."
             )
         overlay_name = f"ib-pkey-overlay-{pkey_norm}"
-        overlay = await self._find_overlay(overlay_name, location_id)
+        # ``location_id`` is the device's Location PK; scope the overlay to that
+        # Location directly (no name resolution needed since we already have the id).
+        existing = await self.rest_list(
+            self.OVERLAYS_PATH, [("name", overlay_name), ("scope_id", str(location_id))]
+        )
+        overlay = existing[0] if existing else None
         if not overlay:
             body = {
                 "name": overlay_name,
-                "location": location_id,
+                "scope_type": "dcim.location",
+                "scope_id": location_id,
                 "isolation_type": _IB_PKEY_ISOLATION,
                 "status": FABRIC_STATUS,
                 "tenant": tenant_id,

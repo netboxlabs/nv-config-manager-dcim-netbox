@@ -88,11 +88,30 @@ class NetBoxIPAMMixin:
         if site:
             params.append(("cf_nvcm_site", site))
         vrfs = await self.rest_list(VRFS_PATH, params)
-        return [
-            NamespaceRouteDistinguisher(
-                namespace_id=str(vrf["id"]),
-                route_distinguishers=(vrf["rd"],) if vrf.get("rd") else (),
+        out: list[NamespaceRouteDistinguisher] = []
+        for vrf in vrfs:
+            if namespace_tag not in tag_names(vrf):
+                continue
+            # ``namespace_id`` is passed straight through to
+            # ``provision_spectrum_x_vrf`` and re-applied as a VRF **tag name**
+            # (that is how a namespace is emulated in NetBox), so it must be the
+            # namespace's tag name — NOT the VRF pk, which would make the provision
+            # tag a nonexistent tag named e.g. "1". Derive it as the VRF's first
+            # tag name that is not the zone marker (``namespace_tag`` may match the
+            # marker by its name *or* slug); this matches how ``get_spectrum_x_vrfs``
+            # reads the namespace back.
+            candidate_names = sorted(
+                t["name"]
+                for t in (vrf.get("tags") or [])
+                if isinstance(t, dict)
+                and t.get("name")
+                and namespace_tag not in (t.get("name"), t.get("slug"))
             )
-            for vrf in vrfs
-            if namespace_tag in tag_names(vrf)
-        ]
+            ns_name = candidate_names[0] if candidate_names else ""
+            out.append(
+                NamespaceRouteDistinguisher(
+                    namespace_id=ns_name,
+                    route_distinguishers=(vrf["rd"],) if vrf.get("rd") else (),
+                )
+            )
+        return out

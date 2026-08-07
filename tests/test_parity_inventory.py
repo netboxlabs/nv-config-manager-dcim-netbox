@@ -165,13 +165,15 @@ async def test_list_statuses_unknown_content_type_still_raises():
 
 
 async def test_namespace_route_distinguishers_scopes_by_site():
-    rows = {"ipam/vrfs/": [{"id": 1, "rd": "65000:1", "tags": [{"name": "z", "slug": "z"}]}]}
+    # Zone marker 'z' + a namespace-name tag 'ns1'; namespace_id is the name.
+    tags = [{"name": "z", "slug": "z"}, {"name": "ns1", "slug": "ns1"}]
+    rows = {"ipam/vrfs/": [{"id": 1, "rd": "65000:1", "tags": tags}]}
     client = _capture(rest_rows=rows)
     result = await client.get_namespace_route_distinguishers("SiteX", "z")
     path, params = client._calls[-1]
     assert path == "ipam/vrfs/"
     assert ("cf_nvcm_site", "SiteX") in params
-    assert [r.namespace_id for r in result] == ["1"]
+    assert [r.namespace_id for r in result] == ["ns1"]
 
 
 async def test_list_namespace_tags_scopes_by_location():

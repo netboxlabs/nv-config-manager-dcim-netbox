@@ -63,31 +63,42 @@ class FabricCommonMixin:
     ASSIGNMENTS_PATH = "plugins/nv-config-manager/overlay-assignments/"
     PKEYS_PATH = "plugins/nv-config-manager/ib-pkeys/"
 
-    async def _find_overlay(self, name: str, location: str | None = None) -> dict | None:
+    async def _find_overlay(self, name: str, scope: str | None = None) -> dict | None:
         params = [("name", name)]
-        if location is not None:
-            location_id = await self._resolve_location_id(location)
-            if location_id is None:
-                # No NetBox Location by that name -> no overlay can match it.
+        if scope is not None:
+            _scope_type, scope_id = await self._resolve_scope(scope)
+            if scope_id is None:
+                # No NetBox Site/Location by that name -> no overlay can match it.
                 return None
-            params.append(("location_id", str(location_id)))
+            params.append(("scope_id", str(scope_id)))
         rows = await self.rest_list(self.OVERLAYS_PATH, params)
         if len(rows) > 1:
             raise DCIMConflictError(f"Multiple overlays named {name!r}")
         return rows[0] if rows else None
 
-    async def _resolve_location_id(self, location: str | int | None) -> int | None:
-        """Resolve a NetBox Location given as a PK or a name to its integer id.
+    async def _resolve_scope(self, value: str | int | None) -> tuple[str | None, int | None]:
+        """Resolve an overlay anchor to ``(scope_type, scope_id)`` for the plugin's
+        ``CachedScopeMixin`` scope GFK.
 
-        NVCM passes a site/location *name*; NetBox's ``location_id`` filter and the
-        Overlay ``location`` FK need a numeric PK. A digit is used as-is; a name is
-        looked up against ``dcim/locations/``. Returns ``None`` when unresolved.
+        NVCM passes a single site/location value; the Overlay scope may be a
+        ``dcim.site`` or a ``dcim.location`` (SpectrumX anchors at a Site,
+        InfiniBand at a sub-Site Location). Resolve by trying a Site first, then a
+        Location, matching either the slug or the name — so the same value works
+        whether the caller passes the site slug (what ``cf_nvcm_site`` stores) or a
+        Location name. Returns ``(None, None)`` when unresolved.
         """
-        if location is None:
-            return None
-        if str(location).isdigit():
-            return int(location)
-        return await self._lookup_id("dcim/locations/", str(location))
+        if value is None or value == "":
+            return None, None
+        val = str(value)
+        candidates = (("dcim/sites/", "dcim.site"), ("dcim/locations/", "dcim.location"))
+        for path, scope_type in candidates:
+            for key in ("slug", "name"):
+                rows = await self.rest_list(path, [(key, val)])
+                if len(rows) > 1:
+                    raise DCIMConflictError(f"Multiple {path} entries with {key}={val!r}")
+                if rows:
+                    return scope_type, rows[0]["id"]
+        return None, None
 
     async def _lookup_id(self, path: str, name: str) -> int | None:
         rows = await self.rest_list(path, [("name", name)])
