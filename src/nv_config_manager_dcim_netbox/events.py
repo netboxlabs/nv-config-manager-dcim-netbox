@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 from nv_config_manager_dcim import RenderEventRequest
 
 from nv_config_manager_dcim_netbox._mappers import fk_id as _fk_id
-from nv_config_manager_dcim_netbox.client import encode_device_id
+from nv_config_manager_dcim_netbox.client import is_netbox_pk
 from nv_config_manager_dcim_netbox.fabric_common import BGP_SESSIONS_PATH
 
 if TYPE_CHECKING:
@@ -35,18 +35,17 @@ def _record_device_id(event: DCIMChangeEvent):
     return _fk_id((event.record or {}).get("device"))
 
 
-def _encoded(device_id) -> str | None:
-    """UUID-encode a NetBox device id, or ``None`` if it is not a NetBox PK.
+def _valid_device_id(device_id) -> str | None:
+    """Return a NetBox device id as a string, or ``None`` if it is not a NetBox PK.
 
     A malformed id in an event envelope must drop that fan-out, not raise into the
     dispatcher — the cross-object handlers are already best-effort and the
     device/parent handlers should behave the same way.
     """
-    try:
-        return encode_device_id(device_id)
-    except (TypeError, ValueError):
+    if not is_netbox_pk(device_id):
         logger.warning("Ignoring unusable NetBox device id in change event: %r", device_id)
         return None
+    return str(device_id)
 
 
 def _requests(event: DCIMChangeEvent, device_id) -> tuple[RenderEventRequest, ...]:
@@ -62,14 +61,14 @@ async def _device_changed(event: DCIMChangeEvent, client: DCIMClient):
 def _requests_multi(event: DCIMChangeEvent, device_ids) -> tuple[RenderEventRequest, ...]:
     """One deduplicated render request per affected device (input order preserved)."""
     message = _commit_message(event)
-    encoded = {}
+    resolved: dict[str, str | None] = {}
     for device_id in device_ids:
-        if device_id and str(device_id) not in encoded:
-            encoded[str(device_id)] = _encoded(device_id)
+        if device_id and str(device_id) not in resolved:
+            resolved[str(device_id)] = _valid_device_id(device_id)
     return tuple(
-        RenderEventRequest(device_id=uuid_id, commit_message=message)
-        for uuid_id in encoded.values()
-        if uuid_id is not None
+        RenderEventRequest(device_id=valid_id, commit_message=message)
+        for valid_id in resolved.values()
+        if valid_id is not None
     )
 
 

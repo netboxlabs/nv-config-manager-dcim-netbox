@@ -10,11 +10,8 @@ queries, payloads, and SDK-model construction.
 
 from __future__ import annotations
 
-import functools
-import inspect
 import logging
 import ssl
-import uuid
 from collections.abc import Callable
 from typing import Any, Self
 from urllib.parse import urlparse
@@ -149,79 +146,29 @@ def _context_scoped_to_site(context: dict[str, Any], site: str) -> bool:
     return not scoped
 
 
-# --- device-id UUID codec -------------------------------------------------
+# --- provider-owned identifiers -------------------------------------------
 #
-# NetBox device PKs are integers, but some downstream NVCM services (notably the
-# config-store, whose API/DB/locks assume UUID device ids) require the device
-# identifier to be a UUID. Nothing in the DCIM provider *contract* requires a
-# UUID, so we bridge the gap here: the provider presents each NetBox device id to
-# NVCM as a deterministic, reversible UUID (`uuid.UUID(int=<pk>)`) and decodes it
-# back to the integer PK before touching NetBox. Decoding tolerates raw NetBox
-# ids (pass-through), so it is safe to apply defensively and idempotently.
-
-_DEVICE_ID_PARAMS = frozenset({"device_id"})
-_DEVICE_ID_LIST_PARAMS = frozenset({"device_ids", "switch_device_ids"})
+# NetBox object PKs are integers, and NVCM stores them verbatim: the Config Store
+# keeps device identifiers as TEXT and delegates the shape check to this provider
+# through ``DCIMClient.is_valid_device_id`` / ``is_valid_location_id``. So the
+# provider hands NVCM the native NetBox id (as a string) and receives it back
+# unchanged — no encoding at the boundary.
 
 
-def encode_device_id(pk: object) -> str:
-    """Present a NetBox integer device PK as a UUID string (for UUID-keyed NVCM services)."""
-    return str(uuid.UUID(int=int(pk)))
+def is_netbox_pk(value: object) -> bool:
+    """Return whether *value* is a canonical NetBox integer primary key.
 
-
-def decode_device_id(device_id: object) -> str:
-    """Inverse of :func:`encode_device_id`; non-UUID ids pass through unchanged."""
+    Canonical means it round-trips through its own text form, mirroring the
+    Nautobot provider's ``str(UUID(value)) == value`` check: ``"7"`` is accepted
+    while ``"007"``, ``" 7"``, ``"7.0"`` and ``"abc"`` are not. NetBox PKs are
+    positive, so ``0`` and negatives are rejected too.
+    """
+    text = str(value)
     try:
-        return str(uuid.UUID(str(device_id)).int)
-    except (ValueError, AttributeError, TypeError):
-        return str(device_id)
-
-
-def _decode_device_args(sig: inspect.Signature, args: tuple, kwargs: dict) -> tuple[tuple, dict]:
-    """Return (args, kwargs) with device-id params decoded to NetBox PKs."""
-    bound = sig.bind_partial(*args, **kwargs)
-    for name, value in list(bound.arguments.items()):
-        if name in _DEVICE_ID_PARAMS and value is not None:
-            bound.arguments[name] = decode_device_id(value)
-        elif name in _DEVICE_ID_LIST_PARAMS and value:
-            bound.arguments[name] = [decode_device_id(v) for v in value]
-    return bound.args, bound.kwargs
-
-
-def with_device_id_decoding(cls: type) -> type:
-    """Class decorator: decode UUID-shaped device ids on every method (across the
-    MRO) whose signature has a ``device_id`` / ``device_ids`` / ``switch_device_ids``
-    parameter, so NetBox queries always receive integer PKs regardless of the
-    UUID form NVCM passes in."""
-    id_params = _DEVICE_ID_PARAMS | _DEVICE_ID_LIST_PARAMS
-    handled: set[str] = set()
-    for klass in cls.__mro__:
-        if klass is object:
-            continue
-        for name, method in list(vars(klass).items()):
-            if name in handled or name.startswith("__") or not callable(method):
-                continue
-            try:
-                sig = inspect.signature(method)
-            except (TypeError, ValueError):
-                continue
-            if not id_params & set(sig.parameters):
-                continue
-            handled.add(name)
-            if inspect.iscoroutinefunction(method):
-
-                @functools.wraps(method)
-                async def wrapper(*args, _m=method, _s=sig, **kwargs):
-                    a, kw = _decode_device_args(_s, args, kwargs)
-                    return await _m(*a, **kw)
-            else:
-
-                @functools.wraps(method)
-                def wrapper(*args, _m=method, _s=sig, **kwargs):
-                    a, kw = _decode_device_args(_s, args, kwargs)
-                    return _m(*a, **kw)
-
-            setattr(cls, name, wrapper)
-    return cls
+        number = int(text)
+    except (TypeError, ValueError):
+        return False
+    return number > 0 and str(number) == text
 
 
 class BaseNetBoxClient:
@@ -273,6 +220,29 @@ class BaseNetBoxClient:
         if self._session_obj is not None and not self._session_obj.closed:
             await self._session_obj.close()
         self._session_obj = None
+
+    async def __aenter__(self) -> Self:
+        """Enter the client's async context; the session opens lazily per request."""
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: object | None,
+    ) -> None:
+        """Close the HTTP session on context exit, including on error."""
+        await self.close()
+
+    # -- provider-owned identifier validation --------------------------------
+
+    def is_valid_device_id(self, value: str) -> bool:
+        """Return whether *value* is a NetBox device PK."""
+        return is_netbox_pk(value)
+
+    def is_valid_location_id(self, value: str) -> bool:
+        """Return whether *value* is a NetBox location PK."""
+        return is_netbox_pk(value)
 
     def get_device_ui_url(self, device_id: str) -> str:
         """Build the user-facing NetBox device URL."""

@@ -144,6 +144,7 @@ async def test_resolve_ib_device_matches_non_primary_interface_ip():
                     {
                         "id": "1",
                         "name": "host-01",
+                        "role": {"name": "UFM"},
                         "primary_ip4": {"address": "192.168.1.1/24"},
                         "site": {"id": "2", "name": "S"},
                     }

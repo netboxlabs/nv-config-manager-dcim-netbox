@@ -25,8 +25,16 @@ from nv_config_manager_dcim_netbox import NetBoxProvider
 
 _SETTINGS = {"server": "https://netbox.example", "token": "t"}
 
-# Methods implemented by the transport (never stubbed).
-_TRANSPORT = {"close", "get_device_ui_url"}
+# Methods implemented by the transport (never stubbed): session lifecycle, the
+# provider-owned identifier checks NVCM validates references with, and UI links.
+_TRANSPORT = {
+    "close",
+    "__aenter__",
+    "__aexit__",
+    "is_valid_device_id",
+    "is_valid_location_id",
+    "get_device_ui_url",
+}
 
 # DCIMClient operations implemented against native NetBox (REST/GraphQL). These
 # no longer raise DCIMOperationNotSupportedError, so they are excluded from the
@@ -50,6 +58,7 @@ _IMPLEMENTED = {
     "get_namespace_route_distinguishers",
     # reference (namespace zone = VRF grouped by tag)
     "list_namespace_tags",
+    "get_location_metadata",
     # hosts
     "find_host_devices_by_mac",
     "update_dpu_device_inventory",
@@ -137,6 +146,7 @@ CATEGORIES: dict[str, tuple[str, ...]] = {
     ),
     "reference": (
         "list_locations",
+        "get_location_metadata",
         "list_tenants",
         "list_roles",
         "list_statuses",

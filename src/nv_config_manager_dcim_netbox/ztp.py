@@ -9,7 +9,6 @@ import re
 from nv_config_manager_dcim import DCIMInvalidDataError, DCIMNotFoundError, ZTPDevice
 
 from nv_config_manager_dcim_netbox._mappers import strip_mask
-from nv_config_manager_dcim_netbox.client import encode_device_id
 from nv_config_manager_dcim_netbox.fabric_common import INTENDED_PATH as _INTENDED_PATH
 
 # ``_INTENDED_PATH`` holds the per-device intended-config records written by the
@@ -74,11 +73,7 @@ class NetBoxZTPMixin:
             return ZTPDevice(
                 # UUID-encode: this device_id keys the config-store lookup for the
                 # boot-script/config files, and the render pipeline persisted them
-                # under the UUID-encoded id. A raw integer here 404s ("No config
-                # store file found"). The @with_device_id_decoding wrapper decoded
-                # the inbound id to the NetBox integer for the GraphQL query, so we
-                # re-encode NetBox's own id here for the config-store key.
-                device_id=encode_device_id(device["id"]),
+                device_id=str(device["id"]),
                 name=device["name"],
                 addresses=addresses,
                 platform_name=(device.get("platform") or {}).get("name") or "",

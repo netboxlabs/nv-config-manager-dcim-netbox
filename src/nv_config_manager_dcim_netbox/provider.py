@@ -21,7 +21,6 @@ from nv_config_manager_dcim import (
 from nv_config_manager_dcim_netbox.client import (
     BaseNetBoxClient,
     netbox_connection_settings,
-    with_device_id_decoding,
 )
 from nv_config_manager_dcim_netbox.dhcp import NetBoxDHCPMixin
 from nv_config_manager_dcim_netbox.events import register_render_event_handlers
@@ -54,7 +53,6 @@ def _provider_version() -> str:
         return "0.0.0"
 
 
-@with_device_id_decoding
 class NetBoxDCIMClient(
     NetBoxInventoryMixin,
     NetBoxReferenceMixin,
@@ -75,8 +73,9 @@ class NetBoxDCIMClient(
 
     Each functional area is a mixin in its own module; the whole protocol is
     implemented against native NetBox REST and GraphQL, with no unsupported
-    stubs. ``close`` and ``get_device_ui_url`` are provided by
-    ``BaseNetBoxClient``.
+    stubs. Device and location identifiers are native NetBox PKs in both
+    directions. ``close``, the async-context and identifier-validation hooks, and
+    ``get_device_ui_url`` are provided by ``BaseNetBoxClient``.
     """
 
 

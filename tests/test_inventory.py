@@ -87,11 +87,11 @@ async def test_get_network_device():
     client = _client(rest_get={"dcim/devices/1/": _REST_DEVICE})
     dev = await client.get_network_device("1")
     assert dev.name == "leaf-01" and dev.site == "DM-Akron"
-    # id must be the config-store UUID (encoded pk 1), so intended_config_path
-    # resolves against the UUID-keyed config-store — deploy/backup's
-    # load_intended_configuration fetches <uuid>/startup.yaml, not <pk>/startup.yaml.
-    assert dev.id == "00000000-0000-0000-0000-000000000001"
-    assert dev.intended_config_path == "00000000-0000-0000-0000-000000000001/startup.yaml"
+    # id is the NetBox pk, and intended_config_path derives from it, so
+    # deploy/backup's load_intended_configuration fetches <pk>/startup.yaml from
+    # the config-store keyed by that same provider-owned id.
+    assert dev.id == "1"
+    assert dev.intended_config_path == "1/startup.yaml"
 
 
 async def test_get_network_device_missing_raises():

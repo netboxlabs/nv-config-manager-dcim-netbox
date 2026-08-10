@@ -8,7 +8,9 @@ isolates the target method's own topology / partition / assignment logic.
 
 from __future__ import annotations
 
+import pytest
 from nv_config_manager_dcim import (
+    DCIMInvalidDataError,
     IBHostSite,
     IBInterfaceGuid,
     IBPKeyAssignment,
@@ -292,13 +294,41 @@ async def test_resolve_ib_device_ipv4_fallback():
         if names == ["host-01"]:  # resolved by IP -> interface -> device name
             return {
                 "device_list": [
-                    {"id": "1", "name": "host-01", "primary_ip4": {"address": "10.0.0.5/24"}}
+                    {
+                        "id": "1",
+                        "name": "host-01",
+                        "role": {"name": "UFM"},
+                        "primary_ip4": {"address": "10.0.0.5/24"},
+                    }
                 ]
             }
         return {"device_list": []}  # first lookup, by the IP-as-name: miss
 
     client.graphql_query = gql
     assert await client.canonicalize_ib_host("10.0.0.5") == "10.0.0.5"
+
+
+async def test_resolve_ib_device_rejects_non_ufm_role():
+    """A device answering to the host name but not carrying the UFM role is not the
+    UFM appliance, so it must be rejected rather than driving UFM operations."""
+    gql = {
+        "device_list": [
+            {
+                "id": "1",
+                "name": "host-01",
+                "role": {"name": "Leaf Switch"},
+                "primary_ip4": {"address": "10.0.0.5/24"},
+            }
+        ]
+    }
+    with pytest.raises(DCIMInvalidDataError, match="not assigned the UFM role"):
+        await _client(gql=gql).canonicalize_ib_host("host-01")
+
+
+async def test_resolve_ib_device_rejects_missing_role():
+    gql = {"device_list": [{"id": "1", "name": "host-01", "primary_ip4": None}]}
+    with pytest.raises(DCIMInvalidDataError, match="not assigned the UFM role"):
+        await _client(gql=gql).canonicalize_ib_host("host-01")
 
 
 async def test_resolve_ib_host_site():

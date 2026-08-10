@@ -23,7 +23,6 @@ from nv_config_manager_dcim import (
 )
 
 from nv_config_manager_dcim_netbox._mappers import fk_id
-from nv_config_manager_dcim_netbox.client import encode_device_id
 from nv_config_manager_dcim_netbox.fabric_common import (
     BACKUP_PATH as _BACKUP_PATH,
 )
@@ -92,7 +91,7 @@ class NetBoxLifecycleStateMixin:
         if is_aggregate_managed is not None:
             params.append(("is_aggregate_managed", str(is_aggregate_managed).lower()))
         statuses = await self.rest_list(_STATUS_PATH, params)
-        return [encode_device_id(pk) for s in statuses if (pk := _device_pk(s))]
+        return [pk for s in statuses if (pk := _device_pk(s))]
 
     async def get_render_template_versions(self) -> list[RenderTemplateVersion]:
         statuses = await self.rest_list(_STATUS_PATH, [("render_enabled", "true")])
@@ -113,10 +112,8 @@ class NetBoxLifecycleStateMixin:
             for row in page
             if (pk := _device_pk(row))
         }
-        # device_id is UUID-encoded, matching every other id this provider hands
-        # back to NVCM (see get_render_enabled_device_ids / client.encode_device_id).
         return [
-            RenderTemplateVersion(device_id=encode_device_id(pk), template_version=versions.get(pk))
+            RenderTemplateVersion(device_id=pk, template_version=versions.get(pk))
             for pk in render_device_ids
         ]
 
@@ -162,7 +159,7 @@ class NetBoxLifecycleStateMixin:
         )
         backup_enabled = {pk for s in statuses if (pk := _device_pk(s))}
         eligible = {str(d["id"]) for d in devices}
-        return {encode_device_id(pk) for pk in backup_enabled & eligible}
+        return backup_enabled & eligible
 
     async def get_configuration_backup_metadata(
         self, device_id: str

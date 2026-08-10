@@ -17,7 +17,6 @@ import logging
 from nv_config_manager_dcim import DCIMInvalidDataError, DCIMNotFoundError
 
 from nv_config_manager_dcim_netbox._mappers import choice_value, fk_id, strip_mask
-from nv_config_manager_dcim_netbox.client import encode_device_id
 
 # Per-device NVCM lifecycle flags (ztp_enabled / is_aggregate_managed) live on the
 # plugin's DeviceConfigStatus model, the same source the render/backup paths read.
@@ -52,10 +51,9 @@ class NetBoxDHCPMixin:
         if is_aggregate_managed is not None:
             params.append(("cf_nvcm_is_aggregate_managed", str(is_aggregate_managed).lower()))
         devices = await self.rest_list(_DEVICES_PATH, params)
-        # Key by the UUID-encoded device id so it matches the device_id the confgen
-        # reads back from reservations/option-candidates (which are UUID-encoded so
-        # the ZTP boot-file URL resolves in the UUID-keyed config-store).
-        return {encode_device_id(d["id"]): (d.get("config_context") or {}) for d in devices}
+        # Keyed by the NetBox device id, matching the device_id the confgen reads
+        # back from reservations / option-candidates.
+        return {str(d["id"]): (d.get("config_context") or {}) for d in devices}
 
     async def get_dhcp_auto_subnets(
         self, family: int = 4, is_aggregate_managed: bool | None = None
@@ -345,10 +343,10 @@ class NetBoxDHCPMixin:
             "interface_name": interface.get("name"),
             "interface_role": self._interface_role(interface),
             "device_name": device.get("name"),
-            # UUID-encode: the confgen substitutes this into the ZTP boot-file URL
+            # The confgen substitutes this into the ZTP boot-file URL
             # (/v1/device/<id>/boot-script), which the ZTP service resolves against
-            # the UUID-keyed config-store. A raw integer id 404s there.
-            "device_id": encode_device_id(device_id),
+            # the config-store under this same provider-owned id.
+            "device_id": str(device_id),
             "address": ipaddress.ip_address(address),
         }
 

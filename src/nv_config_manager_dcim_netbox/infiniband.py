@@ -89,11 +89,16 @@ query ($names: [String!]!) {
 }
 """
 
+# Device role an IB host must carry to be accepted as the UFM appliance. Matches
+# the reference provider's role-name check.
+_UFM_ROLE_NAME = "UFM"
+
 _HOST_BY_NAME_QUERY = """
 query ($names: [String!]!) {
   device_list(filters: {name: {in_list: $names}}) {
     id
     name
+    role { name }
     primary_ip4 { address }
     tenant { id name }
     site { id name }
@@ -453,7 +458,17 @@ class NetBoxInfiniBandMixin:
             devices = list(by_id.values())
         if len(devices) > 1:
             raise DCIMConflictError(f"Multiple NetBox devices match host {host!r}")
-        return devices[0] if devices else None
+        if not devices:
+            return None
+        device = devices[0]
+        # A host resolved here is the UFM appliance that owns the IB fabric. Names
+        # and IPs are not unique to that role, so an unrelated device answering to
+        # the same name must be rejected rather than driving UFM operations.
+        if (device.get("role") or {}).get("name") != _UFM_ROLE_NAME:
+            raise DCIMInvalidDataError(
+                f"Device {device['name']!r} is not assigned the {_UFM_ROLE_NAME} role in NetBox"
+            )
+        return device
 
     async def canonicalize_ib_host(self, host: str) -> str:
         device = await self._resolve_ib_device(host)

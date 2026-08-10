@@ -13,6 +13,19 @@ async def test_list_locations():
     assert [(s.id, s.name) for s in result] == [("1", "Row 1")]
 
 
+async def test_get_location_metadata():
+    # NVCM resolves a workflow's location reference through this, then uses the
+    # returned name as the canonical location, so the id space must match
+    # list_locations.
+    client = _client(gql={"location": {"id": 1, "name": "Row 1"}})
+    location = await client.get_location_metadata("1")
+    assert location is not None and (location.id, location.name) == ("1", "Row 1")
+
+
+async def test_get_location_metadata_missing_returns_none():
+    assert await _client(gql={"location": None}).get_location_metadata("999") is None
+
+
 async def test_list_tenants():
     client = _client(gql={"tenant_list": [{"id": 5, "name": "NGC"}]})
     result = await client.list_tenants()

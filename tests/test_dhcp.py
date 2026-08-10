@@ -30,9 +30,9 @@ async def test_get_dhcp_static_data():
 
 async def test_get_dhcp_contexts():
     client = _client(rest_list={"dcim/devices/": [{"id": 1, "config_context": {"x": 1}}]})
-    # Keyed by the UUID-encoded device id so it matches the (UUID-encoded) device_id
-    # the confgen reads from reservations/option-candidates when resolving options.
-    assert await client.get_dhcp_contexts() == {"00000000-0000-0000-0000-000000000001": {"x": 1}}
+    # Keyed by the NetBox device id so it matches the device_id the confgen reads
+    # from reservations/option-candidates when resolving options.
+    assert await client.get_dhcp_contexts() == {"1": {"x": 1}}
 
 
 async def test_get_dhcp_auto_subnets():
@@ -126,9 +126,9 @@ async def test_get_dhcp_auto_subnets_resolves_interface_reservation():
     assert len(reservations) == 1
     assert reservations[0]["serial"] == "SN2"
     assert reservations[0]["mac_address"] == "aa:bb:cc:00:00:09"
-    # device_id is UUID-encoded so the confgen's ZTP boot-file URL resolves in the
-    # UUID-keyed config-store.
-    assert reservations[0]["device_id"] == "00000000-0000-0000-0000-000000000002"
+    # device_id is the NetBox pk the confgen's ZTP boot-file URL resolves against
+    # in the config-store.
+    assert reservations[0]["device_id"] == "2"
 
 
 async def test_get_dhcp_auto_subnets_builds_option_candidate_from_pool_ip():
@@ -182,4 +182,4 @@ async def test_get_dhcp_auto_subnets_builds_option_candidate_from_pool_ip():
     assert candidates[0]["interface_role"] == "Uplink"
     assert candidates[0]["interface_name"] == "swp1"
     assert str(candidates[0]["address"]) == "10.0.0.5"
-    assert candidates[0]["device_id"] == "00000000-0000-0000-0000-000000000003"
+    assert candidates[0]["device_id"] == "3"

@@ -21,7 +21,6 @@ import ipaddress
 import pytest
 from nv_config_manager_dcim import DCIMChangeEvent, DCIMInvalidDataError
 
-from nv_config_manager_dcim_netbox.client import decode_device_id, encode_device_id
 from nv_config_manager_dcim_netbox.events import (
     _bgp_asn_changed,
     _bgp_peer_group_changed,
@@ -201,7 +200,7 @@ async def test_backup_enabled_includes_provisioned_status():
     result = await client.get_backup_enabled_device_ids(is_aggregate_managed=False)
 
     # Device 2 is backup-enabled but not in-service -> excluded; device 1 kept.
-    assert result == {encode_device_id("1")}
+    assert result == {"1"}
     device_params = next(p for path, p in calls if path == "dcim/devices/")
     assert ("status", "active") in device_params
     assert ("status", "provisioned") in device_params
@@ -253,7 +252,7 @@ async def test_asn_change_fans_out_to_local_and_remote_sessions():
         }
     )
     requests = await _bgp_asn_changed(_event("ipam.asn", "7"), client)
-    assert sorted(decode_device_id(r.device_id) for r in requests) == ["1", "2"]
+    assert sorted(r.device_id for r in requests) == ["1", "2"]
     queried = {key for _, params in client.calls for key, _ in params}
     assert queried == {"local_as_id", "remote_as_id"}
 
@@ -264,7 +263,7 @@ async def test_peer_group_change_fans_out_to_referencing_devices():
     )
     requests = await _bgp_peer_group_changed(_event("netbox_bgp.bgppeergroup", "5"), client)
     # Deduplicated to a single render request for device 3.
-    assert [decode_device_id(r.device_id) for r in requests] == ["3"]
+    assert [r.device_id for r in requests] == ["3"]
 
 
 async def test_shared_bgp_fanout_delete_is_noop():

@@ -31,9 +31,9 @@ async def test_get_ztp_device():
     assert ztp.platform_name == "Cumulus Linux"
     assert ztp.firmware_version == "5.1.0"
     assert ztp.addresses == ["10.0.0.5"]
-    # device_id is UUID-encoded so it keys the UUID-populated config-store
-    # (boot-script / startup.yaml) that the ZTP service reads.
-    assert ztp.device_id == "00000000-0000-0000-0000-000000000001"
+    # device_id is the NetBox pk keying the config-store entries (boot-script /
+    # startup.yaml) that the ZTP service reads.
+    assert ztp.device_id == "1"
     # config_store_instance is read from the intended-config (render pipeline set it)
     # and ui->api-mtls transformed, matching the reference DCIM provider. Without it,
     # ZTP load_file 404s ("No config store file found").

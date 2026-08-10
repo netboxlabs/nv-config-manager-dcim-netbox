@@ -77,7 +77,6 @@ from nv_config_manager_dcim import (
 )
 
 from nv_config_manager_dcim_netbox._mappers import choice_str, fk_id
-from nv_config_manager_dcim_netbox.client import decode_device_id
 from nv_config_manager_dcim_netbox.fabric_common import (
     BGP_SESSIONS_PATH,
     NVLINK_DOMAINS_PATH,
@@ -809,9 +808,7 @@ class NetBoxRenderMixin:
 
     async def get_render_data(self, request: RenderDataRequest) -> RenderData:
         """Assemble the provider-neutral, fully typed render payload for one device."""
-        # request.device_id is a UUID-shaped id from NVCM (the client decorator only
-        # decodes plain `device_id` args, not ones wrapped in a request object).
-        device_id = decode_device_id(request.device_id)
+        device_id = request.device_id
         data = await self.graphql_query(_RENDER_DEVICE_QUERY, {"id": device_id})
         device = _require(data.get("device"), "device")
 

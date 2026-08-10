@@ -28,8 +28,6 @@ from nv_config_manager_dcim.workflow_models import (
     Platform,
 )
 
-from nv_config_manager_dcim_netbox.client import encode_device_id
-
 # NVCM status custom fields on the NetBox device. ``nvcm_render_enabled`` and
 # ``nvcm_ztp_enabled`` are already used elsewhere in this provider (inventory /
 # DHCP); ``nvcm_deploy_enabled`` and ``nvcm_backup_enabled`` are the parity
@@ -210,12 +208,7 @@ def network_device_from_rest(device: dict[str, Any]) -> NetworkDeviceData:
     """
     name = require_device_name(device)
     return NetworkDeviceData(
-        # NVCM-facing id must be the UUID the config-store is keyed by (render
-        # writes under uuid(int=pk)); its `intended_config_path` derives from this
-        # id, so a raw NetBox pk here makes deploy/backup's load_intended_configuration
-        # fetch `<pk>/startup.yaml` and 404. Encode it (same boundary as the render /
-        # lifecycle / event id outputs); inbound ids are decoded by the client.
-        id=encode_device_id(device["id"]),
+        id=str(device["id"]),
         name=name,
         rack=name_of(device.get("rack")),
         position=device.get("position"),

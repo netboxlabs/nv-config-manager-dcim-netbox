@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-from nv_config_manager_dcim_netbox.client import decode_device_id
 from tests._fake import fake_client as _client
 
 _STATUS = "plugins/nv-config-manager/device-config-statuses/"
@@ -20,8 +19,8 @@ async def test_get_render_template_versions():
         }
     )
     result = await client.get_render_template_versions()
-    # device_id is UUID-encoded, like every other id handed back to NVCM.
-    assert [(decode_device_id(r.device_id), r.template_version) for r in result] == [("5", "v1")]
+    # device_id is the native NetBox pk, like every other id handed back to NVCM.
+    assert [(r.device_id, r.template_version) for r in result] == [("5", "v1")]
 
 
 async def test_get_render_template_versions_reads_nested_device_fk():
@@ -34,7 +33,7 @@ async def test_get_render_template_versions_reads_nested_device_fk():
         }
     )
     result = await client.get_render_template_versions()
-    assert [(decode_device_id(r.device_id), r.template_version) for r in result] == [("5", "v1")]
+    assert [(r.device_id, r.template_version) for r in result] == [("5", "v1")]
 
 
 async def test_update_render_template_version_creates_when_absent():
@@ -55,7 +54,7 @@ async def test_get_backup_enabled_device_ids_intersects_eligible():
         }
     )
     result = await client.get_backup_enabled_device_ids(True)
-    assert {decode_device_id(i) for i in result} == {"5"}
+    assert {i for i in result} == {"5"}
 
 
 async def test_get_configuration_backup_metadata():

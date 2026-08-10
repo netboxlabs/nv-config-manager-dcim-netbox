@@ -8,8 +8,6 @@ import logging
 from typing import TYPE_CHECKING, TypeVar
 
 from nv_config_manager_dcim import (
-    DCIMAuthenticationError,
-    DCIMAuthorizationError,
     DCIMConflictError,
     DCIMDeviceSelection,
     DCIMInvalidDataError,
@@ -104,21 +102,15 @@ class NetBoxInventoryMixin:
     """Device and interface inventory reads."""
 
     async def get_device_metadata(self, device_id: str) -> DeviceMetadata | None:
-        # Degrades to None on a per-device failure so metadata caching stays
-        # resilient. Credential failures are re-raised: they are not per-device
-        # and would otherwise return None for the whole fleet, indistinguishable
-        # from "no such device".
-        try:
-            data = await self.graphql_query(_DEVICE_METADATA_QUERY, {"id": device_id})
-            device = data.get("device")
-            if not device:
-                return None
-            return device_metadata_from_gql(device, self.get_device_ui_url(device_id))
-        except (DCIMAuthenticationError, DCIMAuthorizationError):
-            raise
-        except Exception:  # noqa: BLE001 - metadata read is best-effort
-            logger.exception("Failed to read NetBox metadata for device %s", device_id)
+        # Read failures propagate. ``None`` means "NetBox has no such device" and
+        # nothing else, so reference validation can report an unknown device
+        # without conflating it with a transient GraphQL or connectivity failure.
+        data = await self.graphql_query(_DEVICE_METADATA_QUERY, {"id": device_id})
+        device = data.get("device")
+        if not device:
+            logger.warning("Device %s not found in NetBox", device_id)
             return None
+        return device_metadata_from_gql(device, self.get_device_ui_url(device_id))
 
     async def get_managed_device_metadata(self, page_size: int = 100) -> list[DeviceMetadata]:
         # Fail-closed by design: "managed" is scoped to the ``nvcm_render_enabled``

@@ -14,6 +14,7 @@ from nv_config_manager_dcim_netbox.fabric_common import VRFS_PATH
 logger = logging.getLogger(__name__)
 
 _LOCATIONS_QUERY = "query { location_list { id name } }"
+_LOCATION_BY_ID_QUERY = "query ($id: ID!) { location(id: $id) { id name } }"
 _TENANTS_QUERY = "query { tenant_list { id name } }"
 _DEVICE_ROLES_QUERY = "query { device_role_list { id name } }"
 
@@ -69,6 +70,19 @@ class NetBoxReferenceMixin:
             )
         data = await self.graphql_query(_LOCATIONS_QUERY)
         return _selections(data.get("location_list") or [])
+
+    async def get_location_metadata(self, location_id: str) -> DCIMSelection | None:
+        """Return normalized metadata for one NetBox location PK, or ``None``.
+
+        Same id space as :meth:`list_locations`, so an id taken from a workflow
+        form round-trips here. Query failures propagate; only a location that
+        NetBox does not have resolves to ``None``.
+        """
+        data = await self.graphql_query(_LOCATION_BY_ID_QUERY, {"id": location_id})
+        location = data.get("location")
+        if not location:
+            return None
+        return DCIMSelection(id=str(location["id"]), name=location["name"])
 
     async def _managed_device_selections(self, field: str) -> list[DCIMSelection]:
         """Return distinct ``tenant``/``role`` choices across managed devices.
