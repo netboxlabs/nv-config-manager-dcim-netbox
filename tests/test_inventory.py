@@ -7,6 +7,7 @@ from __future__ import annotations
 import pytest
 from nv_config_manager_dcim import (
     DCIMConflictError,
+    DCIMConnectivityError,
     DCIMDeviceSelectionFilter,
     DCIMNotFoundError,
     DeviceInventoryFilter,
@@ -43,6 +44,31 @@ async def test_get_device_metadata():
 
 async def test_get_device_metadata_missing_returns_none():
     assert await _client(gql={"device": None}).get_device_metadata("1") is None
+
+
+async def test_get_device_metadata_not_found_error_returns_none():
+    # How NetBox actually reports it: a GraphQL error on the singular query,
+    # classified by the transport as DCIMNotFoundError.
+    client = _client()
+
+    async def _missing(query, variables=None):
+        raise DCIMNotFoundError("NetBox: Device matching query does not exist.")
+
+    client.graphql_query = _missing
+    assert await client.get_device_metadata("999999") is None
+
+
+async def test_get_device_metadata_propagates_real_failures():
+    # The old blanket except returned None here, making a broken read
+    # indistinguishable from an absent device during reference validation.
+    client = _client()
+
+    async def _broken(query, variables=None):
+        raise DCIMConnectivityError("NetBox GraphQL request failed")
+
+    client.graphql_query = _broken
+    with pytest.raises(DCIMConnectivityError):
+        await client.get_device_metadata("1")
 
 
 async def test_get_device_serial():

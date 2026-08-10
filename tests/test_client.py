@@ -148,6 +148,57 @@ async def test_graphql_errors_map_to_invalid_data():
         await client.close()
 
 
+async def test_graphql_missing_object_maps_to_not_found():
+    """NetBox reports a missing singular object as a GraphQL *error* with data=null,
+    not as a null field. Verified against NetBox 4.7: querying `location(id:)` for an
+    absent id returns exactly the payload below. It must be distinguishable from a
+    real query failure so callers can return "no such object" instead of erroring.
+    """
+    client = create_dcim_client("netbox", _OK)
+
+    async def fake_read(_response):
+        return {
+            "data": None,
+            "errors": [
+                {
+                    "message": "Location matching query does not exist.",
+                    "locations": [{"line": 1, "column": 20}],
+                    "path": ["location"],
+                }
+            ],
+        }
+
+    client._session = lambda: _FakeSession()
+    client._read = fake_read
+    try:
+        with pytest.raises(DCIMNotFoundError, match="does not exist"):
+            await client.graphql_query("query { location(id: 1) { id } }")
+    finally:
+        await client.close()
+
+
+async def test_graphql_mixed_errors_still_map_to_invalid_data():
+    """Only an all-missing-object error set is a not-found; anything else is a
+    genuine query failure and must not be softened into "no such object"."""
+    client = create_dcim_client("netbox", _OK)
+
+    async def fake_read(_response):
+        return {
+            "errors": [
+                {"message": "Device matching query does not exist."},
+                {"message": "Cannot query field 'nope' on type 'DeviceType'."},
+            ]
+        }
+
+    client._session = lambda: _FakeSession()
+    client._read = fake_read
+    try:
+        with pytest.raises(DCIMInvalidDataError):
+            await client.graphql_query("query { device(id: 1) { nope } }")
+    finally:
+        await client.close()
+
+
 class _RaisingCM:
     """Async context manager whose entry raises — models a transport failure."""
 

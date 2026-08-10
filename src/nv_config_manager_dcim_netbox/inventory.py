@@ -105,7 +105,13 @@ class NetBoxInventoryMixin:
         # Read failures propagate. ``None`` means "NetBox has no such device" and
         # nothing else, so reference validation can report an unknown device
         # without conflating it with a transient GraphQL or connectivity failure.
-        data = await self.graphql_query(_DEVICE_METADATA_QUERY, {"id": device_id})
+        # NetBox reports the missing singular object as an error, which the
+        # transport classifies as DCIMNotFoundError.
+        try:
+            data = await self.graphql_query(_DEVICE_METADATA_QUERY, {"id": device_id})
+        except DCIMNotFoundError:
+            logger.warning("Device %s not found in NetBox", device_id)
+            return None
         device = data.get("device")
         if not device:
             logger.warning("Device %s not found in NetBox", device_id)

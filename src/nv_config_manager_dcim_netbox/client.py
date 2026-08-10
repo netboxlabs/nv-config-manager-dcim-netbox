@@ -11,6 +11,7 @@ queries, payloads, and SDK-model construction.
 from __future__ import annotations
 
 import logging
+import re
 import ssl
 from collections.abc import Callable
 from typing import Any, Self
@@ -31,6 +32,10 @@ from nv_config_manager_dcim import (
 logger = logging.getLogger(__name__)
 
 _CONNECTION_KEYS = ("server", "token", "public_url", "verify", "timeout")
+# NetBox's wording when a singular GraphQL query resolves no object, e.g.
+# "Device matching query does not exist." (Django's ObjectDoesNotExist surfaced
+# by strawberry-django).
+_MISSING_OBJECT_RE = re.compile(r"matching query does not exist", re.IGNORECASE)
 _DEFAULT_TIMEOUT = 30.0
 # Upper bound on pages walked by ``rest_list``. Reached only when an endpoint
 # reports a further page without honouring ``offset`` (see ``rest_list``).
@@ -308,8 +313,16 @@ class BaseNetBoxClient:
         except (aiohttp.ClientError, TimeoutError) as exc:
             raise DCIMConnectivityError(f"NetBox GraphQL request failed: {exc}") from exc
         payload = payload or {}
-        if payload.get("errors"):
-            raise DCIMInvalidDataError(f"NetBox GraphQL errors: {payload['errors']}")
+        if errors := payload.get("errors"):
+            # A singular NetBox query (``device(id:)``, ``location(id:)``) reports a
+            # missing object as a GraphQL *error* — "Device matching query does not
+            # exist." — with data=null, rather than returning a null field. Only
+            # list queries return empty. Classify that one case separately so
+            # callers can tell "no such object" from a genuine query failure;
+            # everything else stays an invalid-data error.
+            if all(_MISSING_OBJECT_RE.search(str(e.get("message", ""))) for e in errors):
+                raise DCIMNotFoundError(f"NetBox: {errors[0].get('message')}")
+            raise DCIMInvalidDataError(f"NetBox GraphQL errors: {errors}")
         return payload.get("data", {})
 
     async def rest_request(

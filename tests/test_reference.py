@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+import pytest
+from nv_config_manager_dcim import DCIMInvalidDataError, DCIMNotFoundError
+
 from tests._fake import fake_client as _client
 
 
@@ -23,7 +26,27 @@ async def test_get_location_metadata():
 
 
 async def test_get_location_metadata_missing_returns_none():
-    assert await _client(gql={"location": None}).get_location_metadata("999") is None
+    # NetBox signals the missing location as a GraphQL error, which the transport
+    # classifies as DCIMNotFoundError; the contract wants None so NVCM reports
+    # "Unknown location" (422) rather than failing the request.
+    client = _client()
+
+    async def _missing(query, variables=None):
+        raise DCIMNotFoundError("NetBox: Location matching query does not exist.")
+
+    client.graphql_query = _missing
+    assert await client.get_location_metadata("999999") is None
+
+
+async def test_get_location_metadata_propagates_real_failures():
+    client = _client()
+
+    async def _broken(query, variables=None):
+        raise DCIMInvalidDataError("NetBox GraphQL errors: [...]")
+
+    client.graphql_query = _broken
+    with pytest.raises(DCIMInvalidDataError):
+        await client.get_location_metadata("1")
 
 
 async def test_list_tenants():

@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from nv_config_manager_dcim import DCIMInvalidDataError, DCIMSelection
+from nv_config_manager_dcim import DCIMInvalidDataError, DCIMNotFoundError, DCIMSelection
 
 from nv_config_manager_dcim_netbox.fabric_common import VRFS_PATH
 
@@ -76,9 +76,14 @@ class NetBoxReferenceMixin:
 
         Same id space as :meth:`list_locations`, so an id taken from a workflow
         form round-trips here. Query failures propagate; only a location that
-        NetBox does not have resolves to ``None``.
+        NetBox does not have resolves to ``None`` — which NetBox reports as a
+        GraphQL error on the singular query, classified by the transport as
+        ``DCIMNotFoundError``.
         """
-        data = await self.graphql_query(_LOCATION_BY_ID_QUERY, {"id": location_id})
+        try:
+            data = await self.graphql_query(_LOCATION_BY_ID_QUERY, {"id": location_id})
+        except DCIMNotFoundError:
+            return None
         location = data.get("location")
         if not location:
             return None
