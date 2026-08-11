@@ -54,7 +54,13 @@ setup:
 	uv pip install --python $(PY) \
 	  $(NVCM)/components/dcim \
 	  $(NVCM)/components/network-templates \
-	  -e . pytest pytest-asyncio ruff
+	  -e ".[installer]" pytest pytest-asyncio ruff
+
+# Adds the DSX Air path. The installer is installed from the NVCM checkout
+# (which `nvcm-netbox air` needs regardless, for the chart and the blueprints)
+# rather than from a git ref, so a force-push cannot orphan the pin.
+setup-air: setup
+	uv pip install --python $(PY) -e $(NVCM)/installer
 
 # --- Tier 0: lint + unit tests ---
 lint:

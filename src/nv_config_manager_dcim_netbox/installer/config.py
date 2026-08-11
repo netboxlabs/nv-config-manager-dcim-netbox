@@ -24,6 +24,14 @@ _REPO_PROFILE = Path(__file__).resolve().parents[3] / "deploy" / "configs" / "lo
 
 TOKEN_PLACEHOLDER = "REPLACED_BY_INSTALLER"
 
+# The provider's entry-point name, which must equal DCIMProviderMetadata.name and
+# the `provider` field the plugin stamps on every change event.
+PROVIDER_NAME = "netbox"
+
+# The NVCM branch carrying the pluggable-DCIM framework. `main` has none of it, so
+# a checkout or sim clone on main cannot deploy this provider.
+NVCM_BRANCH = "zb/pluggable-dcim"
+
 
 @dataclass(frozen=True)
 class ConfigOptions:
@@ -47,6 +55,37 @@ def load_profile(path: Path | None = None) -> dict[str, Any]:
     return yaml.safe_load(packaged.read_text())
 
 
+def apply_dcim(config: dict[str, Any], options: ConfigOptions) -> dict[str, Any]:
+    """Point an install config at NetBox, in place.
+
+    Shared by both paths. The kind path applies it to our own profile, where most
+    of this is already true and the writes are idempotent; the Air path applies it
+    to the config NVCM's own generator produced, where none of it is.
+    """
+    dcim = config.setdefault("dcim", {})
+    dcim["provider"] = PROVIDER_NAME
+    dcim["server"] = options.netbox_server
+    dcim["public_url"] = options.netbox_public_url
+
+    # The provider wheelhouse image. Without a provider_packages entry the
+    # `netbox` entry point is never installed into NVCM's pods and provider
+    # discovery fails. This is the block the NVCM TUI has no field for.
+    packages = dcim.get("provider_packages") or [{"name": PROVIDER_NAME}]
+    packages[0]["image"] = options.provider_image
+    dcim["provider_packages"] = packages
+
+    # Shared with NetBox: the plugin's nvcm_init installs this same value, so
+    # neither side has to read it back from the other.
+    config.setdefault("secrets", {}).setdefault("k8s", {}).setdefault("dcim", {}).setdefault(
+        "values", {}
+    )["token"] = options.api_token
+
+    # NetBox is the DCIM provider, so NVCM's bundled one is not deployed.
+    config.setdefault("services", {})["nautobot"] = False
+
+    return config
+
+
 def apply_options(profile: dict[str, Any], options: ConfigOptions) -> dict[str, Any]:
     """Return *profile* with the computed deployment values applied.
 
@@ -58,24 +97,7 @@ def apply_options(profile: dict[str, Any], options: ConfigOptions) -> dict[str, 
     cluster["namespace"] = options.namespace
     cluster["size"] = options.size
 
-    dcim = config.setdefault("dcim", {})
-    dcim["server"] = options.netbox_server
-    dcim["public_url"] = options.netbox_public_url
-
-    # The provider wheelhouse image. Without a provider_packages entry the
-    # `netbox` entry point is never installed into NVCM's pods and provider
-    # discovery fails — this is the block the NVCM TUI has no field for.
-    packages = dcim.get("provider_packages") or [{"name": "netbox"}]
-    packages[0]["image"] = options.provider_image
-    dcim["provider_packages"] = packages
-
-    # Shared with NetBox: the plugin's nvcm_init installs this same value, so
-    # neither side has to read it back from the other.
-    config.setdefault("secrets", {}).setdefault("k8s", {}).setdefault("dcim", {}).setdefault(
-        "values", {}
-    )["token"] = options.api_token
-
-    return config
+    return apply_dcim(config, options)
 
 
 def write_config(config: dict[str, Any], path: Path) -> Path:

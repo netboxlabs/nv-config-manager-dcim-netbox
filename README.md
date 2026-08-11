@@ -22,7 +22,7 @@ You need Docker (≥24 GB for the `small` profile), `kind`, `kubectl`, `helm` an
 `uv`, plus a local clone of the NVCM repo.
 
 ```bash
-git clone https://github.com/nvidia/nv-config-manager
+git clone -b zb/pluggable-dcim https://github.com/nvidia/nv-config-manager
 git clone https://github.com/netboxlabs/netbox-nv-config-manager
 git clone https://github.com/netboxlabs/nv-config-manager-dcim-netbox
 cd nv-config-manager-dcim-netbox
@@ -88,6 +88,7 @@ To work against a live NetBox without a cluster, see
 ## Documentation
 
 - [Deployment](docs/deployment.md): the installer, manual bring-up, troubleshooting
+- [DSX Air simulations](docs/air-sim.md): running a simulated fabric with NetBox
 - [Event delivery](docs/event-delivery.md): how change events reach NVCM
 - [Supported operations](docs/supported-operations.mdx): the full operation surface
   by area, and how each maps onto NetBox

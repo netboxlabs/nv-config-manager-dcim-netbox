@@ -8,7 +8,8 @@ import base64
 import json
 from pathlib import Path
 
-from nv_config_manager_dcim_netbox.installer.shell import CommandError, run, stream
+from nv_config_manager_dcim_netbox.installer.remote import LocalRunner, Runner
+from nv_config_manager_dcim_netbox.installer.shell import CommandError, stream
 
 # Fixed by deploy/netbox/values.yaml (netbox.fullnameOverride), so these names do
 # not move with the helm release name.
@@ -21,12 +22,21 @@ NETBOX_SERVICE = "netbox"
 NVCM_NATS_SECRET = "nats-nv-config-manager"
 
 
-def kubectl(*args: str, namespace: str | None = None, stdin: str | None = None) -> str:
-    """Run kubectl, scoped to *namespace* when given."""
+def kubectl(
+    *args: str,
+    namespace: str | None = None,
+    stdin: str | None = None,
+    runner: Runner | None = None,
+) -> str:
+    """Run kubectl, scoped to *namespace* when given.
+
+    ``runner`` selects where it runs: locally by default, or on the Air sim's
+    NVCM box when an SshRunner is passed.
+    """
     argv = ["kubectl"]
     if namespace:
         argv += ["-n", namespace]
-    return run([*argv, *args], stdin=stdin)
+    return (runner or LocalRunner()).run([*argv, *args], stdin=stdin)
 
 
 def helm_dependency_build(chart_dir: Path) -> None:
@@ -37,7 +47,7 @@ def helm_dependency_build(chart_dir: Path) -> None:
 
 
 def install_netbox(
-    chart_dir: Path,
+    chart_ref: str,
     *,
     release: str,
     namespace: str,
@@ -46,19 +56,23 @@ def install_netbox(
     image_tag: str,
     nats_password: str | None = None,
     timeout: str = "10m",
+    runner: Runner | None = None,
 ) -> None:
     """helm upgrade --install the NetBox release.
 
-    Called twice by `up`: once before NVCM exists (no NATS password, so the
-    publisher stays on the `log` backend) and once after, which rolls the pods
-    onto the real event bus.
+    Called twice: once before NVCM exists (no NATS password, so the publisher
+    stays on the `log` backend) and once after, which rolls the pods onto the
+    real event bus.
+
+    ``chart_ref`` is a path as the *runner* sees it, so the Air path passes the
+    chart's location on the sim box rather than a local one.
     """
     argv = [
         "helm",
         "upgrade",
         "--install",
         release,
-        str(chart_dir),
+        chart_ref,
         "--namespace",
         namespace,
         "--create-namespace",
@@ -74,25 +88,24 @@ def install_netbox(
     ]
     if nats_password:
         argv += ["--set", f"nvcm.natsPassword={nats_password}"]
-    stream(argv)
+    (runner or LocalRunner()).stream(argv)
 
 
-def wait_for_netbox(namespace: str, timeout: str = "10m") -> None:
+def wait_for_netbox(namespace: str, timeout: str = "10m", runner: Runner | None = None) -> None:
     """Block until the NetBox Deployment has rolled out."""
-    run(
-        [
-            "kubectl",
-            "-n",
-            namespace,
-            "rollout",
-            "status",
-            f"deploy/{NETBOX_DEPLOYMENT}",
-            f"--timeout={timeout}",
-        ]
+    kubectl(
+        "rollout",
+        "status",
+        f"deploy/{NETBOX_DEPLOYMENT}",
+        f"--timeout={timeout}",
+        namespace=namespace,
+        runner=runner,
     )
 
 
-def run_nvcm_init(namespace: str, api_token: str, *, bootstrap: bool = True) -> str:
+def run_nvcm_init(
+    namespace: str, api_token: str, *, bootstrap: bool = True, runner: Runner | None = None
+) -> str:
     """Run the plugin's nvcm_init inside the NetBox pod.
 
     Installs the API token and loads bootstrap data. Idempotent and guarded by a
@@ -112,25 +125,22 @@ def run_nvcm_init(namespace: str, api_token: str, *, bootstrap: bool = True) -> 
         f"export SUPERUSER_API_TOKEN='{api_token}'\n"
         f"exec /opt/netbox/venv/bin/python /opt/netbox/netbox/manage.py nvcm_init {flag}\n"
     )
-    return run(
-        [
-            "kubectl",
-            "-n",
-            namespace,
-            "exec",
-            "-i",
-            f"deploy/{NETBOX_DEPLOYMENT}",
-            "-c",
-            NETBOX_CONTAINER,
-            "--",
-            "sh",
-            "-s",
-        ],
+    return kubectl(
+        "exec",
+        "-i",
+        f"deploy/{NETBOX_DEPLOYMENT}",
+        "-c",
+        NETBOX_CONTAINER,
+        "--",
+        "sh",
+        "-s",
+        namespace=namespace,
         stdin=script,
+        runner=runner,
     )
 
 
-def read_nats_password(namespace: str) -> str | None:
+def read_nats_password(namespace: str, runner: Runner | None = None) -> str | None:
     """Return NVCM's NATS password, or None if NVCM has not been deployed yet."""
     try:
         encoded = kubectl(
@@ -140,6 +150,7 @@ def read_nats_password(namespace: str) -> str | None:
             "-o",
             "jsonpath={.data.password}",
             namespace=namespace,
+            runner=runner,
         )
     except CommandError:
         return None
@@ -148,7 +159,13 @@ def read_nats_password(namespace: str) -> str | None:
     return base64.b64decode(encoded).decode()
 
 
-def publish_test_event(namespace: str, subject: str, nats_password: str, device_id: str) -> str:
+def publish_test_event(
+    namespace: str,
+    subject: str,
+    nats_password: str,
+    device_id: str,
+    runner: Runner | None = None,
+) -> str:
     """Publish a synthetic DCIMChangeEvent.
 
     Proves consumer -> provider -> render dispatch without needing a real NetBox
@@ -166,35 +183,32 @@ def publish_test_event(namespace: str, subject: str, nats_password: str, device_
             "contract_version": "1.0",
         }
     )
-    return run(
-        [
-            "kubectl",
-            "-n",
-            namespace,
-            "run",
-            "nvcm-netbox-verify",
-            "--image=natsio/nats-box:latest",
-            "--restart=Never",
-            "--rm",
-            "--attach",
-            "--quiet",
-            "--command",
-            "--",
-            "nats",
-            "--server",
-            "nats://nv-config-manager-nats:4222",
-            "--user",
-            "nv-config-manager",
-            "--password",
-            nats_password,
-            "pub",
-            subject,
-            envelope,
-        ]
+    return kubectl(
+        "run",
+        "nvcm-netbox-verify",
+        "--image=natsio/nats-box:latest",
+        "--restart=Never",
+        "--rm",
+        "--attach",
+        "--quiet",
+        "--command",
+        "--",
+        "nats",
+        "--server",
+        "nats://nv-config-manager-nats:4222",
+        "--user",
+        "nv-config-manager",
+        "--password",
+        nats_password,
+        "pub",
+        subject,
+        envelope,
+        namespace=namespace,
+        runner=runner,
     )
 
 
-def dcim_consumer_logs(namespace: str, since: str = "60s") -> str:
+def dcim_consumer_logs(namespace: str, since: str = "60s", runner: Runner | None = None) -> str:
     """Return recent DCIM render-consumer logs.
 
     The upstream label is `consumer-nautobot` for legacy reasons; the container it
@@ -209,6 +223,7 @@ def dcim_consumer_logs(namespace: str, since: str = "60s") -> str:
             "consumer",
             f"--since={since}",
             namespace=namespace,
+            runner=runner,
         )
     except CommandError as exc:
         return exc.output

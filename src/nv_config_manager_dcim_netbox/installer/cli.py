@@ -11,6 +11,7 @@ import click
 
 from nv_config_manager_dcim_netbox.installer import cluster
 from nv_config_manager_dcim_netbox.installer import config as cfg
+from nv_config_manager_dcim_netbox.installer.air import cli as air_cli
 from nv_config_manager_dcim_netbox.installer.shell import CommandError, require_tools, stream
 from nv_config_manager_dcim_netbox.installer.tokens import generate_api_token, is_valid_api_token
 
@@ -68,6 +69,11 @@ def _resolve_nvcm_repo(nvcm_repo: Path) -> Path:
 @click.version_option(package_name="nv-config-manager-dcim-netbox")
 def main() -> None:
     """Deploy NVIDIA Config Manager backed by NetBox."""
+
+
+# Registered eagerly, but its NVCM imports happen inside the command, so the kind
+# path works without the `air` extra installed.
+main.add_command(air_cli.air)
 
 
 @main.command("config")
@@ -219,7 +225,7 @@ def up(
     # No NATS password yet: NVCM does not exist, so the publisher comes up on the
     # `log` backend. It is switched to NATS at the end.
     cluster.install_netbox(
-        chart,
+        str(chart),
         release=release,
         namespace=namespace,
         api_token=token,
@@ -290,7 +296,7 @@ def up(
         )
     else:
         cluster.install_netbox(
-            chart,
+            str(chart),
             release=release,
             namespace=namespace,
             api_token=token,
