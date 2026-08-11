@@ -1,0 +1,14 @@
+apiVersion: v2
+name: nvcm-netbox
+description: NetBox configured as the DCIM provider for NVIDIA Config Manager
+type: application
+version: 0.1.0
+# Tracks the NetBox image built by build/netbox.Dockerfile, not an upstream release.
+appVersion: "0.1.0"
+dependencies:
+  # Everything NetBox is upstream's. This chart only supplies the values that
+  # make NetBox act as NVCM's DCIM provider, plus the change-event publisher
+  # config (templates/publisher-config-secret.yaml).
+  - name: netbox
+    version: 8.3.51
+    repository: https://charts.netbox.oss.netboxlabs.com/

@@ -163,8 +163,8 @@ def _context_scoped_to_site(context: dict[str, Any], site: str) -> bool:
 def is_netbox_pk(value: object) -> bool:
     """Return whether *value* is a canonical NetBox integer primary key.
 
-    Canonical means it round-trips through its own text form, mirroring the
-    Nautobot provider's ``str(UUID(value)) == value`` check: ``"7"`` is accepted
+    Canonical means it round-trips through its own text form, the integer analog
+    of the reference provider's ``str(UUID(value)) == value``: ``"7"`` is accepted
     while ``"007"``, ``" 7"``, ``"7.0"`` and ``"abc"`` are not. NetBox PKs are
     positive, so ``0`` and negatives are rejected too.
     """

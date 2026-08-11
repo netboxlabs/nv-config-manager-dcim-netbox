@@ -1,0 +1,81 @@
+# NetBox as NVCM's DCIM provider.
+#
+# Normally driven by `nvcm-netbox up`, which fills in the generated values
+# (API token, NATS password). It is a plain chart, so `helm install` works too --
+# see docs/deployment.md for the manual sequence.
+
+# --- our settings ------------------------------------------------------------
+nvcm:
+  # NVCM's in-cluster NATS. Deploy NetBox into the same namespace as NVCM so this
+  # resolves without cross-namespace DNS; override natsService if the NVCM release
+  # is named something other than `nv-config-manager`.
+  natsService: nv-config-manager-nats
+  natsUser: nv-config-manager
+
+  # NATS password, read from NVCM's `nats-nv-config-manager` secret. Empty until
+  # NVCM has been deployed -- and while it is empty the publisher stays in `log`
+  # mode rather than failing, which is what lets NetBox come up FIRST and hand
+  # NVCM its API token. `nvcm-netbox up` sets this on a second helm pass once
+  # NVCM exists. Set it yourself if you are driving helm directly.
+  natsPassword: ""
+
+  # Must equal NVCM's `[nats] dcim_change_subject`, which the NVCM chart renders
+  # from `dcim.events.subject`. If these disagree, changes publish but nothing
+  # consumes them.
+  eventSubject: netbox.change
+
+# --- upstream netbox chart ---------------------------------------------------
+netbox:
+  # Fixes the Service name to `netbox` rather than `<release>-netbox`, so the
+  # NVCM installer config can hardcode `dcim.server: http://netbox` regardless of
+  # what the release is called.
+  fullnameOverride: netbox
+
+  image:
+    # Built by `make netbox-image`: NetBox at a pinned `feature` commit plus the
+    # NV Config Manager plugin and netbox-bgp. Not a published image -- 4.7 is
+    # unreleased and the plugin needs its GraphQL type extensions.
+    registry: ""
+    repository: nv-config-manager-netbox
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+
+  plugins:
+    - netbox_nv_config_manager
+    # Supplies the BGP session/peering data the fabric render path reads; the
+    # plugin warns at startup if it is installed but not enabled.
+    - netbox_bgp
+
+  # PLUGINS_CONFIG is deliberately NOT set here. It carries the NATS password, so
+  # it is delivered through a Secret via extraConfig below rather than through
+  # values (which land in a ConfigMap).
+  pluginsConfig: {}
+
+  extraConfig:
+    - secret:
+        # templates/publisher-config-secret.yaml
+        secretName: nvcm-netbox-publisher
+        optional: false
+
+  superuser:
+    name: admin
+    email: admin@example.com
+    # A v2 token, `nbt_<12-char key>.<40-char secret>`. NVCM authenticates to
+    # NetBox with this exact value, and the plugin's nvcm_init installs it from
+    # SUPERUSER_API_TOKEN -- so it is generated once and shared, never read back.
+    # Left empty the chart substitutes a uuid4, which is NOT a valid v2 token.
+    apiToken: ""
+    password: ""
+
+  # API_TOKEN_PEPPERS is required for v2 tokens. Left empty the chart generates
+  # one and preserves it across upgrades, which is what we want -- rotating it
+  # invalidates the token NVCM holds.
+  apiTokenPeppers: {}
+
+  # Bundled datastores. Keeps NetBox independent of NVCM's CNPG/Redis so it can
+  # be deployed first, and keeps this chart free of assumptions about NVCM's
+  # secret and service naming.
+  postgresql:
+    enabled: true
+  valkey:
+    enabled: true

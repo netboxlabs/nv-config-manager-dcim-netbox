@@ -12,6 +12,18 @@ dependencies = [
     "nv-config-manager-dcim",
 ]
 
+# Deployment tooling only. Kept out of the base dependencies because this wheel
+# is installed into NVCM's application pods through the offline provider
+# wheelhouse, which should not carry click/PyYAML.
+[project.optional-dependencies]
+installer = [
+    "click>=8.1.7",
+    "pyyaml>=6.0.2",
+]
+
+[project.scripts]
+nvcm-netbox = "nv_config_manager_dcim_netbox.installer.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/netboxlabs/nv-config-manager-dcim-netbox"
 
@@ -68,4 +80,5 @@ markers = [
     "ib: InfiniBand operations",
     "lifecycle: provider factory / lifecycle",
     "events: change-event integration",
+    "installer: deployment orchestration (nvcm-netbox)",
 ]

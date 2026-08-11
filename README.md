@@ -1,256 +1,117 @@
-# NetBox DCIM Provider
+# NetBox DCIM Provider for NVIDIA Config Manager
 
-This package is the **NetBox** implementation of the NVIDIA Config Manager
-(NVCM) DCIM provider API. It translates NetBox's native REST and GraphQL APIs,
-data model, and change events into the provider-neutral contracts defined by the
-standalone `nv-config-manager-dcim` SDK.
+The **NetBox** implementation of the DCIM provider API for
+[NVIDIA Config Manager](https://github.com/nvidia/nv-config-manager) (NVCM) —
+NVIDIA's network configuration platform for AI/HPC fabrics.
 
-It follows the standard NV Config Manager provider layout: depend only on the
-SDK, expose one provider entry point, and keep NetBox-specific transport and
-schemas inside this package. NVCM services never import this package directly —
-they discover it through the `nv_config_manager.dcim` entry-point group and
-interact with it only through the SDK's `DCIMClient` protocol.
+It translates NetBox's REST and GraphQL APIs, data model, and change events into
+the provider-neutral contracts of the `nv-config-manager-dcim` SDK, so NVCM can
+use NetBox as its source of truth. NVCM services never import it directly — they
+discover it through the `nv_config_manager.dcim` entry point and talk to it only
+through the SDK's `DCIMClient` protocol.
 
-## Status
+It works with the companion plugin
+[`netbox-nv-config-manager`](https://github.com/netboxlabs/netbox-nv-config-manager),
+which adds the fabric/overlay models NVCM needs and publishes NetBox object
+changes onto NVCM's event bus.
 
-**Implemented.** All `DCIMClient` operations are implemented against NetBox
-(REST + GraphQL), grouped by functional area (one module per area — see
-[Layout](#layout)). The provider factory, settings validation, discovery, and
-the aiohttp transport are functional. The unit suite passes (368 tests, 93% lines).
+## Deploying
 
-Change-event integration is live: `register_render_event_handlers` and
-`normalize_event` are wired, so automatic render-on-change works via the
-companion NetBox plugin's `EVENTS_PIPELINE` bridge
-([`netbox_nv_config_manager`](https://github.com/netboxlabs/netbox-nv-config-manager)),
-which publishes object changes as the DCIM change envelope this provider consumes.
+`nvcm-netbox` brings up a complete environment — NetBox in-cluster as the DCIM
+provider, NVCM alongside it — and verifies the change-event loop end to end. It
+handles the parts NVCM's own installer cannot: deploying NetBox, generating the
+API token both sides share, writing an installer config containing the
+`dcim.provider_packages` block that installs this provider into NVCM's pods, and
+connecting NetBox to NVCM's NATS bus once that exists.
 
-Per-device lifecycle state (managed flags, intended/backup config metadata) is
-backed by the plugin's first-class models, so the companion plugin is required
-for the full feature set.
+NVCM's Helm chart and images are not published anywhere, so **a checkout of
+[nv-config-manager](https://github.com/nvidia/nv-config-manager) is required**;
+the installer drives NVCM's own CLI against it.
+
+Prerequisites: Docker (≥24 GB for the `small` profile), `kind`, `kubectl`, `helm`,
+`uv`.
+
+```bash
+git clone https://github.com/nvidia/nv-config-manager
+git clone https://github.com/netboxlabs/netbox-nv-config-manager
+git clone https://github.com/netboxlabs/nv-config-manager-dcim-netbox
+cd nv-config-manager-dcim-netbox
+
+uv pip install -e ".[installer]"
+make images        # provider wheelhouse + NetBox with the plugin
+nvcm-netbox up --nvcm-repo ../nv-config-manager
+```
+
+`up` deploys NetBox, initialises it, generates the NVCM installer config, runs
+NVCM's installer, wires NetBox to the event bus, then checks that a change event
+reaches the render consumer. Re-running it is safe.
+
+```bash
+nvcm-netbox verify                     # re-run the event-loop check
+nvcm-netbox up --size medium           # larger NVCM resource profile
+nvcm-netbox up --skip-nvcm             # NetBox only
+kubectl -n nv-config-manager port-forward svc/netbox 8080:80
+```
+
+> **NetBox version.** The plugin needs the plugin-extensible GraphQL API landing
+> in NetBox 4.7, which is unreleased — so `make images` builds NetBox from a
+> pinned `feature` commit. Pins live in
+> [`build/versions.env`](build/versions.env); when the 4.7 beta ships this
+> collapses to a single `FROM` line.
+
+See [docs/deployment.md](docs/deployment.md) for the manual sequence, the
+host-NetBox development mode, and troubleshooting.
+
+## Using NVCM's installer TUI
+
+NVCM has an interactive TUI (`nv-config-manager-installer init`) that authors its
+`nv-config-manager-install.yaml`. You can use it, but **not on its own** for a
+NetBox deployment: it has no field for `dcim.provider_packages`, and without that
+block this provider is never installed into NVCM's pods and discovery fails. It
+also does not deploy NetBox.
+
+So generate the config first, then open it in the TUI to adjust anything else
+(`cluster.size`, SSO, vault, ZTP). `provider_packages` is a real field in their
+schema, just without a widget, so it survives the round-trip:
+
+```bash
+nvcm-netbox config -o my.yaml
+uv run --project ../nv-config-manager/installer \
+  nv-config-manager-installer init -c my.yaml     # TUI, pre-populated
+nvcm-netbox up --nvcm-repo ../nv-config-manager --config-out my.yaml
+```
+
+`nvcm-netbox config` is also the way in if you would rather drive NVCM's
+installer yourself — the file it writes is exactly what `up` feeds them.
+
+## Development
+
+```bash
+make setup     # venv + SDK, templates, provider, dev tools
+make check     # ruff + unit tests
+make test      # unit tests only
+```
+
+Per-area suites match the functional modules: `make inventory`, `make ipam`,
+`make ib`, `make render`, and so on (`make help` lists them all).
+
+To work against a live NetBox without a cluster, see
+[docs/deployment.md](docs/deployment.md#host-netbox-development-mode).
 
 ## Documentation
 
+- [Deployment](docs/deployment.md) — the installer, manual bring-up, troubleshooting
+- [Event delivery](docs/event-delivery.md) — the change-event path and handler fan-out
 - [Supported operations & NetBox semantics](docs/supported-operations.mdx) — the
-  full operation surface (73 methods by area) + NetBox-specific mappings.
+  full operation surface by area, and NetBox-specific mappings
 - [NetBox render data mapping](docs/netbox-data-mapping.mdx) — `RenderData` field
-  → NetBox source, and the render-coverage checklist.
-- *Required NetBox permissions* and *Event delivery* — see below.
+  → NetBox source
 
-## Layout
+## Support
 
-```text
-src/nv_config_manager_dcim_netbox/
-├── __init__.py          # exports NetBoxProvider, NetBoxDCIMClient
-├── provider.py          # NetBoxProvider factory + NetBoxDCIMClient composition
-├── client.py            # BaseNetBoxClient: aiohttp transport, settings, close, ui-url
-├── _mappers.py          # NetBox response shapes -> provider-neutral SDK models
-├── fabric_common.py     # shared plugin REST paths + overlay lookup helpers
-├── inventory.py         # Core inventory / DCIM
-├── reference.py         # Reference / selection lists
-├── ipam.py              # IPAM / VRF
-├── hosts.py             # Host / MAC correlation
-├── dhcp.py              # DHCP
-├── ztp.py               # ZTP
-├── firmware.py          # Firmware / OS image
-├── lifecycle_state.py   # NVCM lifecycle state (managed / intended / backup)
-├── secrets.py           # Secrets / passwords
-├── render.py            # Render data assembly
-├── spectrumx.py         # Spectrum-X overlays
-├── infiniband.py        # InfiniBand
-└── events.py            # Change events → render dispatch
-```
-
-`NetBoxDCIMClient` composes the per-area mixins over `BaseNetBoxClient`, so each
-functional area can be implemented in its own module and reviewed independently.
-
-## Install (development)
-
-The SDK is not yet published to an index; install it from a sibling checkout of
-`nv-config-manager` on the `zb/pluggable-dcim` branch:
-
-```bash
-# in a sibling directory
-git clone https://github.com/NVIDIA/nv-config-manager.git
-git -C nv-config-manager checkout zb/pluggable-dcim
-
-# in this repo
-uv pip install ../nv-config-manager/components/dcim   # the SDK
-uv pip install -e .                                   # this provider
-uv pip install pytest pytest-asyncio ruff
-```
-
-## Configure
-
-The provider is selected by name and handed a plain settings mapping (NVCM
-assembles this from its `[dcim]` / `[dcim.netbox]` configuration; keep the token
-in the deployment's secret mechanism):
-
-```toml
-# for template-cli local testing
-[provider]
-name = "netbox"
-
-[provider.settings]
-server = "http://localhost:8000"
-token  = "<netbox-api-token>"
-# public_url = "http://localhost:8000"   # optional; used for UI links
-# verify     = true                        # bool or path to a CA bundle
-# timeout    = 30                          # optional; per-request seconds
-```
-
-## Deployment (external DCIM provider)
-
-In a real Config Manager deployment the provider is selected through NVCM's
-installer configuration (not the `[provider]` TOML above, which is only for
-local `template-cli` testing). A NetBox deployment looks like:
-
-```yaml
-version: "1"
-cluster:
-  hostname: config-manager.example.com
-  environment: production
-  namespace: nv-config-manager
-secrets:
-  method: kubernetes
-  k8s:
-    dcim:
-      values:
-        token: "nbt_<key>.<secret>"        # NetBox v2 API token
-dcim:
-  provider: netbox
-  server: https://netbox.example.com
-  public_url: https://netbox.example.com
-  display_name: NetBox
-  event_stream: netbox
-  event_subject: netbox.change
-  options: {}                              # provider-specific, non-secret (see below)
-  provider_packages:
-    - name: netbox
-      image: registry.example.com/nv-config-manager-dcim-netbox:0.1.0
-services:
-  nautobot: false                          # NetBox is the external DCIM
-sites:
-  - name: dc01
-```
-
-The installer maps `dcim.server` / `dcim.public_url` and the resolved
-`secrets…dcim.values.token` into the provider settings mapping (`server` /
-`public_url` / `token`). The token must be a NetBox **v2** token (`nbt_…`,
-Bearer). For `secrets.method: eso`, enable `secrets.vault.paths.dcim` instead of
-the `kubernetes` block.
-
-**Event alignment (required).** `dcim.event_stream` / `dcim.event_subject` must
-match the companion NetBox plugin's NATS settings: set the plugin's
-`nats_subject` equal to `dcim.event_subject` (and point it at the
-`dcim.event_stream` JetStream stream). The plugin pushes normalized envelopes on
-that subject; the render service consumes them and calls `normalize_event`. If
-the two disagree, changes are published but never delivered.
-
-**`dcim.options`.** Provider-specific, non-secret options. The NetBox provider
-reads only `server` / `token` / `public_url` / `verify` / `timeout` from its settings; any
-other keys (including everything under `options`) are ignored, so extra options
-never break client creation. Tenant is resolved per-operation from request data
-— there is **no** global tenant-scope filter today (a possible future option).
-Never put secrets in `dcim.options`; use `secrets…` references.
-
-**Provider package image.** Until the provider is published to an index, either
-install it from a sibling checkout (see above) or build the `provider_packages`
-image from this repo:
-
-```bash
-make image IMAGE=registry.example.com/nv-config-manager-dcim-netbox:0.1.0
-```
-
-For an airgapped bundle, add that image reference to the file passed to
-`create-airgapped.sh --extra-images-file` (the bundle builder can't infer
-site-specific provider packages).
-
-## Required NetBox permissions
-
-The provider authenticates with a **v2 API token** (`Authorization: Bearer
-nbt_<key>.<secret>`; a non-`nbt_` token falls back to the v1 `Token` scheme). The
-token's user needs:
-
-- **Read** across the objects the render/inventory/reference paths consume:
-  `dcim` (devices, interfaces, sites, locations, regions, device-types,
-  platforms, roles, cables), `ipam` (prefixes, vlans, vrfs, ip-addresses,
-  mac-addresses), `tenancy` (tenants), `extras` (tags, config-contexts), the
-  plugin models under `plugins/nv-config-manager/` (overlays, vxlans,
-  overlay-assignments, device-config-statuses, intended-configs, backup-configs),
-  and `netbox-bgp` sessions.
-- **Write** where the provider mutates NetBox: the plugin lifecycle models
-  (device/intended/backup config — upsert), overlays + vxlans + VRFs (Spectrum-X
-  provisioning), interfaces + mac-addresses (DPU inventory), and devices (serial
-  updates, interface VRF assignment).
-- The provider also issues **OPTIONS** requests to read field choices (statuses).
-
-For a lab, a superuser token is simplest; for production, grant read+write scoped
-to the `dcim` / `ipam` / `tenancy` / `extras` apps, the plugin, and `netbox-bgp`.
-
-## Event delivery
-
-Change events originate in NetBox and are **pushed** to the render service — the
-provider never polls. The companion plugin's `EVENTS_PIPELINE` bridge normalizes
-each NetBox change into the provider-neutral `DCIMChangeEvent` envelope and
-publishes it (to a logger, or to a NATS subject set by the plugin's
-`nats_subject`, which must match the installer's `dcim.event_subject` — see
-[Deployment](#deployment-external-dcim-provider)). The render service consumes
-the envelope, calls `NetBoxProvider.normalize_event` to validate it, and
-dispatches it to the handler registered for its `object_type`.
-
-The provider registers render-event handlers for these native object types
-(`events._HANDLERS`); each returns the device renders a change should trigger:
-
-| `object_type` | Affected-device fan-out |
-| --- | --- |
-| `dcim.device` | the device itself |
-| `dcim.interface` / `dcim.rearport` / `dcim.frontport` | the parent device |
-| `dcim.cable` | both termination devices |
-| `ipam.vrf` | devices with an interface in the VRF |
-| `ipam.prefix` | devices in the prefix's scope (site/location/region) |
-| `ipam.ipaddress` | the interface's device |
-| `extras.configcontext` | devices matching the context's scope (locations/roles/platforms/tenants/tags…) |
-| `netbox_bgp.bgpsession` | the session's device |
-| `ipam.asn` | every device whose BGP session references the ASN (`local_as` / `remote_as`) |
-| `netbox_bgp.bgppeergroup` | every device whose BGP session uses the peer group |
-| `netbox_nv_config_manager.overlayassignment` | the assigned device, or the assigned interface's device |
-| `netbox_nv_config_manager.deviceconfigstatus` | the device |
-
-This mirrors the reference Nautobot provider's coverage, mapped to NetBox.
-Cross-object handlers skip `delete` events (the object can no longer be resolved)
-and are best-effort. Nautobot object types with **no NetBox equivalent** are
-deliberately not registered: `dcim.cablepath` (NetBox `CablePath` is internal),
-`dcim.deviceredundancygroup` (no NetBox model), and BGP `bgproutinginstance` /
-`peerendpoint` (`netbox-bgp` has no routing-instance or peer-endpoint model — a
-session carries its device directly).
-
-## Test the basics without NVCM core
-
-```bash
-# 1. Confirm discovery
-uv run python -c "from nv_config_manager_dcim import discover_dcim_providers; print(discover_dcim_providers())"
-
-# 2. Run the unit tests
-uv run pytest
-
-# 3. Exercise render against a live NetBox via the templates CLI
-#    (install ../nv-config-manager/components/network-templates alongside)
-template-cli cache-query --provider-config netbox-provider.toml --device-id <id> \
-    --output-render-data-file rd.json
-```
-
-## Working on an operation
-
-Each operation lives in its functional-area module (see [Layout](#layout)).
-Reads use `self.graphql_query(...)`; writes use `self.rest_request("PATCH", ...)`.
-Return the SDK Pydantic models — never raw NetBox responses. Map backend failures
-to the SDK error taxonomy (see `client.py`). Where NetBox genuinely cannot satisfy
-an operation, raise the SDK's `DCIMOperationNotSupportedError` directly, with an
-explanation of what NetBox lacks. Shared NetBox response-shape helpers live in
-`_mappers.py` and shared plugin REST paths in `fabric_common.py` — reach for those
-rather than adding a second local copy.
-
-See NVCM's *Contribute a DCIM Provider* guide for the full authoring contract.
+This is a NetBox Labs private commercial plugin. Customers should use
+their existing NetBox Labs support channel. Internal maintainers can
+file issues in this repository.
 
 ## License
 

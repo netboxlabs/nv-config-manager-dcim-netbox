@@ -1,0 +1,6 @@
+dependencies:
+- name: netbox
+  repository: https://charts.netbox.oss.netboxlabs.com/
+  version: 8.3.51
+digest: sha256:f1065ed927afbe1e916c0bd9ebfe204417f5d7bcc9203f6388ed156381779bbd
+generated: "2026-08-11T08:39:49.14689-07:00"

@@ -3,7 +3,11 @@ __pycache__/
 *.egg-info/
 *.egg
 .eggs/
-build/
+# NOT `build/` -- that directory holds the NetBox image build (tracked source).
+# The build backend is hatchling, which publishes to dist/; these two are the
+# setuptools leftovers worth ignoring.
+/build/lib/
+/build/bdist.*
 dist/
 .venv/
 venv/
@@ -13,9 +17,20 @@ venv/
 .coverage
 htmlcov/
 
+# Generated paths only -- build/ and deploy/ otherwise hold tracked source
+# (build/versions.env + the Dockerfiles, deploy/netbox/ + deploy/configs/).
+#
+# Fetched helm dependencies. Chart.lock is deliberately NOT ignored: it pins the
+# resolved netbox chart version so builds are reproducible.
+deploy/netbox/charts/
+# Workspace netbox-image.sh clones netbox-docker and netbox into.
+.build/
+
 # local test artifacts (may contain a token)
 netbox-provider.toml
 rd.json
 out.txt
 API_TOKENS
 TESTING.md
+# generated installer configs carry a NetBox API token
+generated/

@@ -5,6 +5,7 @@
 #   make setup NVCM=/path/to/nv-config-manager   # branch: zb/pluggable-dcim
 
 NVCM       ?= ../nv-config-manager
+PLUGIN     ?= ../netbox-nv-config-manager
 SERVER     ?= http://localhost:8000
 TOKEN      ?= REPLACE_ME
 DEVICE_ID  ?= REPLACE_ME
@@ -12,6 +13,8 @@ ENTRYPOINT ?= REPLACE_ME
 # Tag tracks the version declared in pyproject.toml (the single source of truth).
 VERSION    := $(shell sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
 IMAGE      ?= nv-config-manager-dcim-netbox:$(VERSION)
+NETBOX_IMAGE ?= nv-config-manager-netbox:$(VERSION)
+include build/versions.env
 
 VENV     := .venv
 PY       := $(VENV)/bin/python
@@ -21,6 +24,7 @@ TEMPLATE := $(VENV)/bin/template-cli
 
 .PHONY: help setup lint test test-netbox discovery probe provider-config \
         cache-query render-cli test-sdk test-templates check clean image \
+        netbox-base netbox-image images \
         inventory reference ipam hosts dhcp ztp firmware state secrets render \
         spectrumx ib infiniband spx lifecycle events
 
@@ -36,6 +40,8 @@ help:
 	@echo "test-templates  run the templates library tests"
 	@echo "check           lint + test"
 	@echo "image           build the provider-package OCI image (IMAGE=..., SDK from NVCM=...)"
+	@echo "netbox-image    build NetBox + our plugin (PLUGIN=..., pins in build/versions.env)"
+	@echo "images          build both images (what 'nvcm-netbox up' expects)"
 	@echo "clean           remove venv and caches"
 	@echo ""
 	@echo "per-area (implement one at a time):"
@@ -60,11 +66,26 @@ test test-netbox:
 
 check: lint test
 
-# --- provider-package image ---
+# --- images ---
 # The SDK is not yet published, so it is passed as a named build context.
 # Requires Docker Buildx (bundled with modern Docker). Override IMAGE / NVCM.
 image:
 	docker build --build-context sdk=$(NVCM)/components/dcim -t $(IMAGE) .
+
+# NetBox + our plugin. netbox-base is a TEMPORARY step: it builds NetBox from a
+# pinned `feature` commit because 4.7 (which the plugin's GraphQL extensions
+# need) is unreleased. See build/versions.env.
+netbox-base:
+	build/netbox-image.sh
+
+netbox-image: netbox-base
+	docker build -f build/netbox.Dockerfile \
+	  --build-arg NETBOX_BASE_IMAGE=$(NETBOX_BASE_IMAGE) \
+	  --build-arg NETBOX_BGP_VERSION=$(NETBOX_BGP_VERSION) \
+	  --build-context plugin=$(PLUGIN) \
+	  -t $(NETBOX_IMAGE) .
+
+images: image netbox-image
 
 # --- Tier 1: provider dev loop ---
 discovery:

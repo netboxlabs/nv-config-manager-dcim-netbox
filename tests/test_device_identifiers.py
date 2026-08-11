@@ -25,7 +25,7 @@ def test_is_netbox_pk_accepts_canonical_pks():
 
 def test_is_netbox_pk_rejects_non_canonical_and_invalid():
     # Non-canonical text forms are rejected so one device cannot be addressed
-    # under several spellings, mirroring the Nautobot provider's canonical-UUID
+    # under several spellings, matching the reference provider's canonical-id
     # check. Zero/negative are not NetBox PKs; a UUID is what the old encoding
     # produced and must no longer be accepted.
     for value in (
