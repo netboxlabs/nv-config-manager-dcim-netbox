@@ -337,3 +337,170 @@ async def test_render_ports_role_lag_targets_and_router_id():
     assert by["swp2"].member_interfaces == ()
     inst = rd.device.routing.bgp_instances[0]
     assert inst.router_id_interface == "lo"  # loopback drives BGP router-id
+
+
+async def test_console_server_ports_from_native_dcim():
+    """Console-server ports and whatever each is cabled to."""
+    device = copy.deepcopy(_DEVICE)
+    device["consoleserverports"] = [
+        {
+            "name": "console-1",
+            "connected_endpoints": [
+                {
+                    "name": "console",
+                    "device": {
+                        "name": "leaf-99",
+                        "device_type": {"manufacturer": {"name": "NVIDIA"}},
+                    },
+                }
+            ],
+        },
+        # Uncabled: still rendered, just without a far side.
+        {"name": "console-2", "connected_endpoints": []},
+    ]
+    client = _client_with(device, _REST_MAP)
+    try:
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+    ports = rd.device.network.console_server_ports
+    assert [p.name for p in ports] == ["console-1", "console-2"]
+    assert ports[0].connected_device_name == "leaf-99"
+    assert ports[0].connected_device_manufacturer == "NVIDIA"
+    assert ports[0].connected_port_name == "console"
+    assert ports[1].connected_device_name is None
+
+
+async def test_bgp_peer_ttl_from_peer_group_extra_attributes():
+    """netbox-bgp keeps multihop TTL in extra_attributes, on the session or its group."""
+    rest = copy.deepcopy(_REST_MAP)
+    rest["plugins/bgp/session/"][0]["peer_group"] = {"id": 3, "name": "underlay"}
+    rest["plugins/bgp/peer-group/"] = [
+        {"id": 3, "name": "underlay", "extra_attributes": {"ttl": 4}}
+    ]
+    client = _client_with(_DEVICE, rest)
+    try:
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+    assert rd.device.routing.bgp_instances[0].peers[0].ttl == 4
+
+
+async def test_bgp_peer_ttl_on_the_session_wins():
+    rest = copy.deepcopy(_REST_MAP)
+    rest["plugins/bgp/session/"][0]["peer_group"] = {"id": 3, "name": "underlay"}
+    rest["plugins/bgp/session/"][0]["extra_attributes"] = {"ttl": 1}
+    rest["plugins/bgp/peer-group/"] = [{"id": 3, "extra_attributes": {"ttl": 4}}]
+    client = _client_with(_DEVICE, rest)
+    try:
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+    assert rd.device.routing.bgp_instances[0].peers[0].ttl == 1
+
+
+async def test_bgp_peer_ttl_absent_stays_none():
+    client = _client_with(_DEVICE, _REST_MAP)
+    try:
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+    assert rd.device.routing.bgp_instances[0].peers[0].ttl is None
+
+
+async def test_location_topology_route_servers_and_wan_routers():
+    """Route servers come from the route-server tag, WAN routers from role."""
+    rest = copy.deepcopy(_REST_MAP)
+    seen: list[list[tuple[str, str]]] = []
+
+    client = create_dcim_client("netbox", _SETTINGS)
+
+    async def fake_graphql(query, variables=None):
+        return {"device": _DEVICE}
+
+    async def fake_rest_list(path, params=None):
+        if path == "dcim/devices/":
+            seen.append(list(params or []))
+            tags = [v for k, v in (params or []) if k == "tag"]
+            if tags == ["route-server"]:
+                return [{"id": 5, "name": "rs-1", "config_context": {"bgp": {"asn": "65100"}}}]
+            return [{"id": 6, "name": "wan-1", "config_context": {}}]
+        if path == "ipam/ip-addresses/":
+            return [{"address": "10.9.9.9/32"}]
+        return rest.get(path, [])
+
+    client.graphql_query = fake_graphql
+    client.rest_list = fake_rest_list
+    try:
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+    topology = rd.location.topology
+    assert [d.name for d in topology.route_servers] == ["rs-1"]
+    assert topology.route_servers[0].routing_asn == "65100"
+    assert str(topology.route_servers[0].loopback_addresses[0]) == "10.9.9.9"
+    assert [d.name for d in topology.wan_routers] == ["wan-1"]
+    # Both selections are scoped to the site, never fabric-wide.
+    assert all(("site_id", "2") in params for params in seen)
+
+
+async def test_l2_vni_vrfs_from_device_level_assignments():
+    """Only device-level assignments become l2_vni_vrfs.
+
+    An interface-level assignment is a port joining an overlay, not the device
+    carrying that overlay's VRF.
+    """
+    client = _client_with(_DEVICE, _REST_MAP)
+    try:
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+    vrfs = rd.device.overlays.l2_vni_vrfs
+    assert [v.name for v in vrfs] == ["blue"]
+    assert vrfs[0].vni == 10020
+    assert [t.name for t in vrfs[0].import_targets] == ["65000:10020"]
+
+
+async def test_l2_vni_vrfs_fall_back_to_assignment_targets():
+    """A VXLAN with no route targets defers to the assignment's overrides."""
+    rest = copy.deepcopy(_REST_MAP)
+    for vxlan in rest["plugins/nv-config-manager/vxlans/"]:
+        if vxlan.get("vni_type") == "l2":
+            vxlan["import_targets"] = []
+            vxlan["export_targets"] = []
+    rest["plugins/nv-config-manager/overlay-assignments/"][0]["import_targets"] = [
+        {"name": "65000:999"}
+    ]
+    client = _client_with(_DEVICE, rest)
+    try:
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+    assert [t.name for t in rd.device.overlays.l2_vni_vrfs[0].import_targets] == ["65000:999"]
+
+
+async def test_l2_vni_vrfs_excludes_interface_only_overlays():
+    rest = copy.deepcopy(_REST_MAP)
+    # Drop the device-level assignment, leaving only the interface one.
+    rest["plugins/nv-config-manager/overlay-assignments/"] = [
+        a
+        for a in rest["plugins/nv-config-manager/overlay-assignments/"]
+        if a["assigned_object_type"] != "dcim.device"
+    ]
+    client = _client_with(_DEVICE, rest)
+    try:
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+    # The overlay still reaches the device through its interface...
+    assert rd.device.overlays.l2_vnis
+    # ...but the device does not carry its VRF.
+    assert rd.device.overlays.l2_vni_vrfs == ()

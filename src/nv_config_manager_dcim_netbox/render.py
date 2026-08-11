@@ -13,7 +13,8 @@ Sections populated from NetBox native data:
 * ``device.identity`` — id, name, platform, role, model, full location hierarchy.
 * ``device.interfaces`` — typed interfaces (type, VRF, VLANs, addresses with
   prefix ancestry, MAC, management flag).
-* ``device.network`` — the device's distinct VRFs.
+* ``device.network`` — the device's distinct VRFs, console-server ports and
+  NVLink topology.
 * ``device.routing`` — BGP instances/peers from ``netbox-bgp``, grouped by ASN.
 * ``device.overlays`` — L2/L3 VNIs scoped to the device via the plugin's overlay
   assignments (never the global VXLAN table).
@@ -21,10 +22,12 @@ Sections populated from NetBox native data:
   merged ``config_context`` where the native keys exist.
 * ``location.location`` / ``location.address_space`` — the Site hierarchy plus
   site prefixes (role/tags) and VLANs (with plugin DHCP helper addresses).
+* ``location.topology`` — the site's route servers (by tag) and WAN routers (by
+  role), for inter-site peering.
 
-Sections with no first-class NetBox source (console-server ports, ISIS/EVPN,
-firmware bundles, credential references, WAN topology) are returned as the SDK's
-default empty models; they remain optional until a filter requires them.
+Sections with no first-class NetBox source (ISIS/EVPN, firmware bundles,
+credential references) are returned as the SDK's default empty models; they
+remain optional until a filter requires them.
 """
 
 from __future__ import annotations
@@ -45,6 +48,7 @@ from nv_config_manager_dcim import (
     RenderBGPPeer,
     RenderConnectedDevice,
     RenderConnectedInterface,
+    RenderConsoleServerPort,
     RenderCredentialReference,
     RenderData,
     RenderDeviceIdentity,
@@ -59,10 +63,13 @@ from nv_config_manager_dcim import (
     RenderIPAddress,
     RenderIsisInterface,
     RenderL2Vni,
+    RenderL2VniVrf,
     RenderL3Vni,
     RenderLocation,
     RenderLocationAddressSpace,
+    RenderLocationDevice,
     RenderLocationRoutingData,
+    RenderLocationTopology,
     RenderLocationVlan,
     RenderNamedEndpointSet,
     RenderNetworkData,
@@ -78,6 +85,7 @@ from nv_config_manager_dcim import (
 
 from nv_config_manager_dcim_netbox._mappers import choice_str, fk_id
 from nv_config_manager_dcim_netbox.fabric_common import (
+    BGP_PEER_GROUPS_PATH,
     BGP_SESSIONS_PATH,
     NVLINK_DOMAINS_PATH,
     PREFIXES_PATH,
@@ -87,6 +95,14 @@ from nv_config_manager_dcim_netbox.fabric_common import (
 
 if TYPE_CHECKING:
     from nv_config_manager_dcim import RenderDataRequest
+
+DEVICES_PATH = "dcim/devices/"
+_IP_ADDRESSES_PATH = "ipam/ip-addresses/"
+
+# How the reference provider selects a location's routing-relevant devices.
+_ROUTE_SERVER_TAG = "route-server"
+_WAN_ROLE_SLUGS = ("wan", "tan-bbr")
+_LOOPBACK_PREFIX = "lo"
 
 _RENDER_DEVICE_QUERY = """
 query ($id: ID!) {
@@ -100,6 +116,15 @@ query ($id: ID!) {
     tenant { name }
     tags { name }
     config_context
+    consoleserverports {
+      name
+      connected_endpoints {
+        ... on ConsolePortType {
+          name
+          device { name device_type { manufacturer { name } } }
+        }
+      }
+    }
     site {
       id
       name
@@ -201,6 +226,28 @@ def _is_ip(value: Any) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _console_server_port(port: dict[str, Any]) -> RenderConsoleServerPort | None:
+    """Map one NetBox console-server port and whatever it is cabled to.
+
+    The connected endpoint is the console port on the managed device, so the
+    console-access templates can name the far side.
+    """
+    name = _str_or_none(port.get("name"))
+    if not name:
+        return None
+    endpoint = next(iter(port.get("connected_endpoints") or []), None)
+    if not isinstance(endpoint, dict):
+        return RenderConsoleServerPort(name=name)
+    device = endpoint.get("device") or {}
+    manufacturer = (device.get("device_type") or {}).get("manufacturer") or {}
+    return RenderConsoleServerPort(
+        name=name,
+        connected_device_name=_str_or_none(device.get("name")),
+        connected_device_manufacturer=_str_or_none(manufacturer.get("name")),
+        connected_port_name=_str_or_none(endpoint.get("name")),
+    )
 
 
 def _render_vrf(vrf: dict[str, Any] | None) -> RenderVrf | None:
@@ -425,8 +472,30 @@ def _location_hierarchy(device: dict[str, Any]) -> tuple[RenderLocation, RenderL
     return device_location, site_location
 
 
+def _peer_ttl(session: dict[str, Any], group_attributes: dict[str, dict[str, Any]]) -> int | None:
+    """Return a peer's multihop TTL from its own or its peer group's extra attributes.
+
+    netbox-bgp keeps free-form settings in ``extra_attributes`` on both the
+    session and the peer group; the session wins where both are set.
+    """
+    group = session.get("peer_group") or {}
+    sources = (
+        session.get("extra_attributes"),
+        group_attributes.get(str(group.get("id"))),
+    )
+    for attributes in sources:
+        if isinstance(attributes, dict) and attributes.get("ttl") is not None:
+            try:
+                return int(attributes["ttl"])
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
 def _bgp_instances(
-    sessions: list[dict[str, Any]], router_id_interface: str | None = None
+    sessions: list[dict[str, Any]],
+    router_id_interface: str | None = None,
+    peer_groups: list[dict[str, Any]] | None = None,
 ) -> tuple[RenderBGPInstance, ...]:
     """Group ``netbox-bgp`` sessions for a device into BGP instances keyed by local ASN.
 
@@ -437,6 +506,11 @@ def _bgp_instances(
     ``bgp_routing_instance()`` template filter treats it as required and raises
     without it whenever a session exists.
     """
+    group_attributes = {
+        str(group["id"]): group.get("extra_attributes") or {}
+        for group in peer_groups or []
+        if group.get("id") is not None
+    }
     instances: dict[str, dict[str, Any]] = {}
     for session in sessions:
         local_asn = _str_or_none((session.get("local_as") or {}).get("asn"))
@@ -466,6 +540,7 @@ def _bgp_instances(
                 asn=_str_or_none((session.get("remote_as") or {}).get("asn")) or "",
                 peer_ipv4=peer_ipv4,
                 peer_ipv6=peer_ipv6,
+                ttl=_peer_ttl(session, group_attributes),
             )
         )
     return tuple(
@@ -648,11 +723,12 @@ def _routing_from_context(
     bgp_sessions: list[dict[str, Any]],
     context: dict[str, Any],
     router_id_interface: str | None = None,
+    peer_groups: list[dict[str, Any]] | None = None,
 ) -> RenderRoutingData:
     """Native ``netbox-bgp`` instances plus effective routing policy (ASN/ISIS/EVPN)."""
     bgp = context.get("bgp") if isinstance(context.get("bgp"), dict) else {}
     return RenderRoutingData(
-        bgp_instances=_bgp_instances(bgp_sessions, router_id_interface),
+        bgp_instances=_bgp_instances(bgp_sessions, router_id_interface, peer_groups),
         default_asn=_str_or_none(bgp.get("asn")),
         local_asn=_str_or_none(bgp.get("local-asn")),
         site_asn=_str_or_none(context.get("site_asn")),
@@ -671,8 +747,15 @@ class NetBoxRenderMixin:
         except DCIMNotFoundError:
             return []
 
-    async def _assigned_overlay_ids(self, device_id: str, interface_ids: set[str]) -> set[str]:
-        """Return the ids of overlays assigned to this device or its interfaces.
+    async def _assigned_overlays(
+        self, device_id: str, interface_ids: set[str]
+    ) -> tuple[set[str], dict[str, dict[str, Any]]]:
+        """Return the overlays reaching this device, and its device-level assignments.
+
+        The second value is keyed by overlay id and holds only assignments made to
+        the device itself. Those are the ones that become ``l2_vni_vrfs``; an
+        interface-level assignment is a port joining an overlay, not the device
+        carrying that overlay's VRF.
 
         ``assigned_object_id`` is multi-valued (repeated params OR), so the device
         and all its interfaces are resolved in one query rather than one per
@@ -686,6 +769,7 @@ class NetBoxRenderMixin:
             row["id"]: row for row in rows if row.get("id") is not None
         }
         overlay_ids: set[str] = set()
+        device_assignments: dict[str, dict[str, Any]] = {}
         for assignment in assignments.values():
             ctype = assignment.get("assigned_object_type")
             assigned_id = str(assignment.get("assigned_object_id"))
@@ -695,7 +779,9 @@ class NetBoxRenderMixin:
                 overlay_id = fk_id(assignment.get("overlay"))
                 if overlay_id is not None:
                     overlay_ids.add(str(overlay_id))
-        return overlay_ids
+                    if matches_device:
+                        device_assignments[str(overlay_id)] = assignment
+        return overlay_ids, device_assignments
 
     async def _id_map(self, path: str, ids: set[str]) -> dict[str, dict[str, Any]]:
         """Fetch objects by id into an ``{id: obj}`` map (empty ids → no fetch)."""
@@ -711,7 +797,7 @@ class NetBoxRenderMixin:
         Scoped via overlay *assignments* (which overlays reach this device), never
         the global VXLAN table — a device must not receive every fabric VNI.
         """
-        overlay_ids = await self._assigned_overlay_ids(device_id, interface_ids)
+        overlay_ids, device_assignments = await self._assigned_overlays(device_id, interface_ids)
         if not overlay_ids:
             return RenderOverlayData()
         # Scope both reads to the assigned overlays server-side; fetching the whole
@@ -734,6 +820,7 @@ class NetBoxRenderMixin:
 
         l2: list[RenderL2Vni] = []
         l3: list[RenderL3Vni] = []
+        l2_by_overlay: dict[str, tuple[RenderL2Vni, dict[str, Any]]] = {}
         for vxlan in vxlans:
             overlay_name = _str_or_none(
                 (overlays.get(str(fk_id(vxlan.get("overlay")))) or {}).get("name")
@@ -755,16 +842,90 @@ class NetBoxRenderMixin:
                 vlan = _render_vlan(vlan_map.get(str(fk_id(vxlan.get("vlan")))))
                 if vlan is None:
                     continue
-                l2.append(
-                    RenderL2Vni(
-                        vlan=vlan,
-                        vni=vnid,
-                        overlay_name=overlay_name,
-                        import_targets=_targets(vxlan.get("import_targets")),
-                        export_targets=_targets(vxlan.get("export_targets")),
-                    )
+                l2_vni = RenderL2Vni(
+                    vlan=vlan,
+                    vni=vnid,
+                    overlay_name=overlay_name,
+                    import_targets=_targets(vxlan.get("import_targets")),
+                    export_targets=_targets(vxlan.get("export_targets")),
                 )
-        return RenderOverlayData(l2_vnis=tuple(l2), l3_vnis=tuple(l3))
+                l2.append(l2_vni)
+                l2_by_overlay.setdefault(str(fk_id(vxlan.get("overlay"))), (l2_vni, vxlan))
+
+        # One entry per overlay assigned to the device itself, naming the L2 VNI
+        # whose VRF the device carries. Route targets come from the VXLAN, and
+        # fall back to the per-assignment overrides when it declares none.
+        l2_vni_vrfs: list[RenderL2VniVrf] = []
+        for overlay_id, assignment in device_assignments.items():
+            entry = l2_by_overlay.get(overlay_id)
+            if entry is None:
+                continue
+            l2_vni, _vxlan = entry
+            name = l2_vni.overlay_name or _str_or_none((overlays.get(overlay_id) or {}).get("name"))
+            if name is None:
+                continue
+            import_targets = l2_vni.import_targets
+            export_targets = l2_vni.export_targets
+            if not import_targets and not export_targets:
+                import_targets = _targets(assignment.get("import_targets"))
+                export_targets = _targets(assignment.get("export_targets"))
+            l2_vni_vrfs.append(
+                RenderL2VniVrf(
+                    name=name,
+                    vni=l2_vni.vni,
+                    import_targets=import_targets,
+                    export_targets=export_targets,
+                )
+            )
+        return RenderOverlayData(
+            l2_vnis=tuple(l2), l3_vnis=tuple(l3), l2_vni_vrfs=tuple(l2_vni_vrfs)
+        )
+
+    async def _location_topology(self, site_id: str | None) -> RenderLocationTopology:
+        """Route servers and WAN routers at the site, for inter-site peering.
+
+        Selected the same way the reference provider selects them: route servers
+        by the ``route-server`` tag, WAN routers by role. Both are location-scoped.
+        """
+        if not site_id:
+            return RenderLocationTopology()
+        route_servers, wan_routers = await asyncio.gather(
+            self._safe_list(DEVICES_PATH, [("site_id", site_id), ("tag", _ROUTE_SERVER_TAG)]),
+            self._safe_list(
+                DEVICES_PATH,
+                [("site_id", site_id), *(("role", role) for role in _WAN_ROLE_SLUGS)],
+            ),
+        )
+        mapped = await asyncio.gather(
+            *(self._location_device(d) for d in (*route_servers, *wan_routers))
+        )
+        return RenderLocationTopology(
+            route_servers=tuple(mapped[: len(route_servers)]),
+            wan_routers=tuple(mapped[len(route_servers) :]),
+        )
+
+    async def _location_device(self, device: dict[str, Any]) -> RenderLocationDevice:
+        """One routing-relevant device: its name, BGP ASN and loopback addresses."""
+        context = device.get("config_context") or {}
+        bgp = context.get("bgp") if isinstance(context.get("bgp"), dict) else {}
+        addresses = await self._safe_list(
+            _IP_ADDRESSES_PATH,
+            [("device_id", str(device["id"])), ("interface__name__isw", _LOOPBACK_PREFIX)],
+        )
+        loopbacks: list[str] = []
+        for entry in addresses:
+            address = _str_or_none(entry.get("address"))
+            if address is None:
+                continue
+            try:
+                loopbacks.append(str(ipaddress.ip_interface(address).ip))
+            except ValueError:
+                continue
+        return RenderLocationDevice(
+            name=str(device.get("name") or ""),
+            routing_asn=_str_or_none(bgp.get("asn")),
+            loopback_addresses=tuple(loopbacks),
+        )
 
     async def _location_address_space(
         self, site_id: str | None, prefixes: list[dict[str, Any]] | None = None
@@ -836,10 +997,21 @@ class NetBoxRenderMixin:
 
         # These four reads are independent of one another; run them concurrently
         # rather than serialising four round trips per render.
-        bgp_sessions, overlays, address_space, nvlink_domains = await asyncio.gather(
+        (
+            bgp_sessions,
+            peer_groups,
+            overlays,
+            address_space,
+            topology,
+            nvlink_domains,
+        ) = await asyncio.gather(
             self._safe_list(BGP_SESSIONS_PATH, [("device_id", str(device_id))]),
+            # Sessions nest only a brief peer_group, so the groups carrying the
+            # TTL in extra_attributes are fetched alongside and joined by id.
+            self._safe_list(BGP_PEER_GROUPS_PATH),
             self._overlays(device_id, interface_ids),
             self._location_address_space(site_id, site_prefixes if site_id else None),
+            self._location_topology(site_id),
             # NVLink topology comes from the device's NVLink domain (plugin model).
             # The NVSwitch fabric-manager templates require network.nvlink_topology.
             self._safe_list(NVLINK_DOMAINS_PATH, [("device_id", str(device_id))]),
@@ -867,9 +1039,17 @@ class NetBoxRenderMixin:
                 ),
                 interfaces=render_interfaces,
                 network=RenderNetworkData(
-                    vrfs=_device_vrfs(interfaces), nvlink_topology=nvlink_topology
+                    vrfs=_device_vrfs(interfaces),
+                    nvlink_topology=nvlink_topology,
+                    console_server_ports=tuple(
+                        mapped
+                        for port in device.get("consoleserverports") or []
+                        if (mapped := _console_server_port(port)) is not None
+                    ),
                 ),
-                routing=_routing_from_context(bgp_sessions, context, router_id_interface),
+                routing=_routing_from_context(
+                    bgp_sessions, context, router_id_interface, peer_groups
+                ),
                 overlays=overlays,
                 firmware=_firmware_from_context(context),
                 services=_services_from_context(context),
@@ -879,6 +1059,7 @@ class NetBoxRenderMixin:
                 location=site_location,
                 routing=RenderLocationRoutingData(site_asn=_str_or_none(context.get("site_asn"))),
                 address_space=address_space,
+                topology=topology,
             ),
         )
 

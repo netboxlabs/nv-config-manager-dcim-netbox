@@ -77,19 +77,29 @@ bundled `config_contexts.yaml` seeds). NetBox merges region/site/role/platform/t
 config contexts into `device.config_context`, so a device gets its effective
 policy; where a key is absent the section stays at the SDK default.
 
-### Not yet populated (SDK default — provider TODO)
+### Not yet populated (SDK default)
 
-These filters read `RenderData` sections the provider currently returns as the
-SDK default. They are valid but empty until mapped from NetBox:
+One section is still returned as the SDK default:
 
 | Filter(s) | Section | Note |
 | --- | --- | --- |
-| `router_id`, `peer_group_ttl` | `routing.bgp_instances[].router_id_interface` / `.peers[].ttl` | `netbox-bgp` exposes neither in its base schema |
-| `console_server_ports` | `network.console_server_ports[]` | map device console-server ports + connections |
-| `nvlink_topology` | `network.nvlink_topology` | no native NetBox source yet |
-| `l2vni_vrfs` | `overlays.l2_vni_vrfs[]` | derive from overlay assignments + route targets |
-| `connected_devices`, `device_aggregate` (peer half) | `interfaces[].connected_interface` | populate from cable/connected-endpoint data |
-| `helper_addresses_by_vrf` | device VLAN interfaces + `address_space.vlans` | needs device-side VLAN-interface join |
+| — | `plugin_data` | An SDK extension point for provider-specific data. The reference provider does not populate it either. |
+
+Everything else the filters read is now mapped. The ones that took the most
+work to source:
+
+| Section | NetBox source |
+| --- | --- |
+| `network.console_server_ports[]` | Native `consoleserverports` and their connected console port |
+| `network.nvlink_topology` | The plugin's NVLink domain for the device |
+| `routing.bgp_instances[].router_id_interface` | The device's loopback interface |
+| `routing.bgp_instances[].peers[].ttl` | `netbox-bgp` `extra_attributes.ttl`, on the session or its peer group |
+| `overlays.l2_vni_vrfs[]` | Device-level overlay assignments, with route targets from the VXLAN or the assignment |
+| `location.topology.route_servers[]` | Devices at the site tagged `route-server` |
+| `location.topology.wan_routers[]` | Devices at the site with the `WAN` or `TAN-BBR` role |
+| `interfaces[].connected_interface` | Cable connected-endpoint data |
+| `interfaces[].member_interfaces` | Inverted LAG membership |
+| `address_space.vlans[].helper_addresses` | The `nvcm_helper_addresses` VLAN custom field |
 
 ## Known filter requirements
 

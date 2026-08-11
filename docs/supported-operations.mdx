@@ -78,9 +78,8 @@ NetBox-native concept rather than a 1:1 equivalent:
   implemented. (Nautobot-only optional adapters `create_nautobot_mcp_client` /
   the MCP client are correctly not implemented.)
 - **SDK-default render sections** (returned as empty defaults, not sourced from
-  NetBox): console-server ports, interface `connected_interface`/`member_interfaces`,
-  `l2_vni_vrfs`, location route-servers/WAN topology, and `plugin_data` extensions.
-  See the "not yet populated" markers in [NetBox data mapping](./netbox-data-mapping.mdx).
+  NetBox): `plugin_data` extensions. Every other render section is mapped; see
+  [NetBox data mapping](./netbox-data-mapping.mdx).
 
 ## Required permissions & event delivery
 

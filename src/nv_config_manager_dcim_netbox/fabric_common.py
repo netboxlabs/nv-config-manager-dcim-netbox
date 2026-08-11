@@ -39,6 +39,9 @@ INTERFACES_PATH = "dcim/interfaces/"
 
 # netbox-bgp exposes no GraphQL, so BGP is read over REST.
 BGP_SESSIONS_PATH = "plugins/bgp/session/"
+# Peer groups are fetched separately: a session nests only a brief peer_group
+# (id/name/description/url), without the extra_attributes carrying the TTL.
+BGP_PEER_GROUPS_PATH = "plugins/bgp/peer-group/"
 
 _PKEY_RE = re.compile(r"\A0[xX]([0-9a-fA-F]{1,4})\Z")
 
