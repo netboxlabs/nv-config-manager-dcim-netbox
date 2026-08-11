@@ -102,11 +102,9 @@ class NetBoxInventoryMixin:
     """Device and interface inventory reads."""
 
     async def get_device_metadata(self, device_id: str) -> DeviceMetadata | None:
-        # Read failures propagate. ``None`` means "NetBox has no such device" and
-        # nothing else, so reference validation can report an unknown device
-        # without conflating it with a transient GraphQL or connectivity failure.
-        # NetBox reports the missing singular object as an error, which the
-        # transport classifies as DCIMNotFoundError.
+        # ``None`` means "no such device" and nothing else, so reference validation
+        # can report an unknown device without masking a transient failure. NetBox
+        # reports the miss as an error, which the transport maps to DCIMNotFoundError.
         try:
             data = await self.graphql_query(_DEVICE_METADATA_QUERY, {"id": device_id})
         except DCIMNotFoundError:
@@ -119,10 +117,8 @@ class NetBoxInventoryMixin:
         return device_metadata_from_gql(device, self.get_device_ui_url(device_id))
 
     async def get_managed_device_metadata(self, page_size: int = 100) -> list[DeviceMetadata]:
-        # Fail-closed by design: "managed" is scoped to the ``nvcm_render_enabled``
-        # custom field. If that field is not defined on the NetBox instance,
-        # NetBox rejects the ``cf_nvcm_render_enabled`` filter with HTTP 400
-        # rather than ignoring it, so this never silently returns the whole fleet.
+        # Fail-closed: NetBox 400s on the ``cf_nvcm_render_enabled`` filter when the
+        # field is undefined, so this never silently returns the whole fleet.
         devices = await self.rest_list(
             "dcim/devices/", [("cf_nvcm_render_enabled", "true")], page_size=page_size
         )
@@ -168,10 +164,8 @@ class NetBoxInventoryMixin:
             coerce = status_slug if key == "status" else str
             params.extend((key, coerce(value)) for value in values or ())
         if filters.managed_only:
-            # "Managed" is modeled by the ``nvcm_render_enabled`` device custom
-            # field (the same proxy ``get_managed_device_metadata`` uses). Guarded
-            # on that field: NetBox 400s if it is not defined rather than widening
-            # the result set.
+            # "Managed" proxies to the ``nvcm_render_enabled`` custom field. NetBox
+            # 400s if it is undefined rather than widening the result set.
             params.append(("cf_nvcm_render_enabled", "true"))
         devices = await self.rest_list("dcim/devices/", params)
         selections = []
@@ -288,12 +282,10 @@ class NetBoxInventoryMixin:
             params.extend((key, coerce(value)) for value in values or ())
         for platform in filters.platforms or []:
             params.append(("platform", str(platform.value)))
-        # NVCM status-flag filters map to boolean device custom fields. ``managed``
-        # reuses ``nvcm_render_enabled`` as its proxy (the same field
-        # ``get_managed_device_metadata`` uses), so only fold it in when an
-        # explicit render filter was not already supplied. Each is guarded on the
-        # field being defined: NetBox 400s on an unknown ``cf_*`` filter rather
-        # than widening the result.
+        # Status flags map to boolean device custom fields. ``managed`` proxies to
+        # ``nvcm_render_enabled``, so only apply it when no explicit render filter
+        # was given. NetBox 400s on an unknown ``cf_*`` filter rather than widening
+        # the result, so this fails closed.
         render_enabled = filters.render_enabled
         if filters.managed_only and render_enabled is None:
             render_enabled = True

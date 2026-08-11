@@ -58,12 +58,9 @@ class NetBoxReferenceMixin:
     """Read-only reference data used to populate workflow forms."""
 
     async def list_locations(self, location_types: tuple[str, ...] = ()) -> list[DCIMSelection]:
-        # NOTE: ``location_types`` is inert. NetBox has no first-class
-        # "location type" (that is a reference-provider concept); its
-        # Region/SiteGroup/Site/Location hierarchy carries no per-location type
-        # to filter on, so the argument is accepted only for contract parity.
-        # Logged when supplied so a caller expecting it to filter can see that it
-        # did not, rather than silently receiving every location.
+        # ``location_types`` is inert: NetBox's Region/SiteGroup/Site/Location
+        # hierarchy has no per-location type to filter on, so it is accepted only
+        # for contract parity. Logged so callers can see it did not filter.
         if location_types:
             logger.debug(
                 "NetBox has no location-type concept; ignoring location_types=%r", location_types

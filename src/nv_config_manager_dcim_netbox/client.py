@@ -314,12 +314,9 @@ class BaseNetBoxClient:
             raise DCIMConnectivityError(f"NetBox GraphQL request failed: {exc}") from exc
         payload = payload or {}
         if errors := payload.get("errors"):
-            # A singular NetBox query (``device(id:)``, ``location(id:)``) reports a
-            # missing object as a GraphQL *error* — "Device matching query does not
-            # exist." — with data=null, rather than returning a null field. Only
-            # list queries return empty. Classify that one case separately so
-            # callers can tell "no such object" from a genuine query failure;
-            # everything else stays an invalid-data error.
+            # Singular queries report a missing object as a GraphQL error, not a
+            # null field (list queries return empty). Separate that from a real
+            # failure so callers can tell "no such object" apart.
             if all(_MISSING_OBJECT_RE.search(str(e.get("message", ""))) for e in errors):
                 raise DCIMNotFoundError(f"NetBox: {errors[0].get('message')}")
             raise DCIMInvalidDataError(f"NetBox GraphQL errors: {errors}")

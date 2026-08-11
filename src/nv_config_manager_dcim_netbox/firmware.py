@@ -118,10 +118,9 @@ class NetBoxFirmwareMixin:
         return (contexts[0].get("data") or {}).get("firmware-targets") or {}
 
     async def _merge_local_context(self, device_id: str, data: dict) -> None:
-        # Read-modify-write: NetBox exposes no conditional update for
-        # local_context_data, so two concurrent firmware writes to one device can
-        # lose an update. NVCM drives these per device, so writes do not overlap in
-        # practice; revisit if that changes.
+        # Read-modify-write: NetBox has no conditional update for
+        # local_context_data, so concurrent writes to one device could lose an
+        # update. NVCM drives these per device, so they do not overlap today.
         device = await self.rest_request("GET", f"dcim/devices/{device_id}/")
         local = (device or {}).get("local_context_data") or {}
         # Deep-merge so nested objects (e.g. ``intended-firmware``) keep their

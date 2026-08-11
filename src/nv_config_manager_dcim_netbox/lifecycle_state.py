@@ -138,13 +138,10 @@ class NetBoxLifecycleStateMixin:
         )
 
     async def get_backup_enabled_device_ids(self, is_aggregate_managed: bool) -> set[str]:
-        # Intersect backup-enabled statuses with in-service devices on
-        # backup-capable platforms; the two queries are independent, so run them
-        # concurrently. Include both ``active`` and ``provisioned`` — ZTP writes
-        # ``status=provisioned`` (see ztp.py), so a freshly-provisioned device
-        # would otherwise never be backed up. NetBox's ``status`` filter is OR-able
-        # (repeat the param), mirroring the reference provider's {Provisioned,
-        # Active} set.
+        # Backup-enabled statuses intersected with in-service devices on
+        # backup-capable platforms, in two independent queries. ``provisioned`` is
+        # included as well as ``active``: ZTP writes it, so freshly-provisioned
+        # devices would otherwise never be backed up.
         params = [("status", "active"), ("status", "provisioned")]
         params.extend(("platform", slug) for slug in _BACKUP_PLATFORMS)
         statuses, devices = await asyncio.gather(

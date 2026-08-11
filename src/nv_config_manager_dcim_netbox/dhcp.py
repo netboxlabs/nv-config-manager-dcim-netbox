@@ -67,13 +67,9 @@ class NetBoxDHCPMixin:
             self.rest_list(_IP_ADDRESSES_PATH, [("tag", "dhcp-reserve")]),
         )
 
-        # Parse the family-filtered tagged subnets up front so each pool/reserve IP
-        # can be assigned to its *most-specific* containing subnet only. NetBox's
-        # REST shape returns tagged prefixes and IPs as flat lists with no parent
-        # link, so containment is computed here. With nested ``dhcp-subnet``
-        # prefixes a pure-containment match would place an IP in every enclosing
-        # subnet; longest-prefix-wins keeps it in exactly one (and is a no-op for
-        # the flat, non-overlapping case).
+        # NetBox returns tagged prefixes and IPs as flat lists with no parent link,
+        # so containment is computed here. Longest-prefix-wins assigns each IP to
+        # exactly one subnet, which matters once dhcp-subnet prefixes nest.
         candidates: list[tuple[dict, object]] = []
         for prefix in prefixes:
             if choice_value(prefix.get("family")) != family:
@@ -100,12 +96,9 @@ class NetBoxDHCPMixin:
         for prefix, network in candidates:
             gateway = await self._gateway_address(prefix)
             if not gateway:
-                # _gateway_address derives a gateway for any parseable prefix (and
-                # raises for an out-of-subnet explicit override), so this only guards
-                # the impossible malformed-CIDR case already filtered above — don't
-                # hand kea a None gateway (its config-gen does
-                # ``options["routers"] = str(subnet["gateway"])`` unconditionally,
-                # turning None into the literal 'None' it rejects).
+                # Unreachable in practice (malformed CIDRs are filtered above), but
+                # kea stringifies the gateway unconditionally and would emit the
+                # literal 'None', which it then rejects.
                 continue
             pools = pools_by_subnet.get(prefix["id"], [])
             reserves = reserves_by_subnet.get(prefix["id"], [])
@@ -115,12 +108,10 @@ class NetBoxDHCPMixin:
                 for ip in reserves
                 if (entry := await self._dhcp_entry(ip, is_aggregate_managed, *caches))
             ]
-            # Pool IPs assigned to an interface are also option candidates: the
-            # confgen applies their interface-role subnet_options at the subnet
-            # level (so a pool/DHCP client — e.g. an OOB management leaf's uplink —
-            # still receives its ZTP boot-file, which reservations alone can't
-            # deliver). Mirrors the reference DCIM provider. Unlike a reservation,
-            # a candidate additionally needs an addressable identity (MAC or serial).
+            # Pool IPs on an interface are also option candidates: the confgen
+            # applies their interface-role subnet_options at subnet level, so DHCP
+            # clients still get a ZTP boot-file. Unlike a reservation, a candidate
+            # needs an addressable identity (MAC or serial).
             option_candidates = [
                 entry
                 for ip in pools
@@ -259,11 +250,9 @@ class NetBoxDHCPMixin:
                     f"nvcm_gateway {explicit} is not within subnet {network}"
                 )
             return explicit
-        # No explicit gateway → derive it, matching the reference DCIM provider:
-        # /31 and /127 use the network address, otherwise the first usable address (.1).
-        # This is why a topology with no explicit gateway (e.g. the air-trial
-        # OOB-management subnet) still gets working DHCP — nvcm_gateway is only an
-        # override for the uncommon case.
+        # Derive the gateway when none is set, so a subnet without an explicit one
+        # still gets working DHCP: /31 and /127 use the network address, everything
+        # else the first usable (.1). nvcm_gateway is only an override.
         if network.prefixlen in (31, 127):
             return str(network.network_address)
         return str(network.network_address + 1)
@@ -351,11 +340,9 @@ class NetBoxDHCPMixin:
         }
 
     def _aggregate_matches(self, status: dict, is_aggregate_managed) -> bool:
-        # Unconstrained unless a specific mode is requested *and* the device's
-        # status actually carries the aggregate-managed flag. A missing/empty
-        # status (no DeviceConfigStatus row, or one without the flag) must not
-        # exclude the device — matching the reference DCIM provider's default-unset
-        # semantics. Only enforce the match when the flag is present.
+        # Only enforced when a mode is requested and the device's status carries the
+        # flag. A missing status row, or one without the flag, must not exclude the
+        # device.
         if is_aggregate_managed is None or not status or "is_aggregate_managed" not in status:
             return True
         return bool(status.get("is_aggregate_managed")) == is_aggregate_managed
@@ -382,11 +369,9 @@ class NetBoxDHCPMixin:
         if resolved is None:
             return None
         interface, device, status, address, device_id = resolved
-        # ZTP defaults to enabled: only an *explicit* ztp_enabled=False drops the
-        # entry. A device with no status (empty dict) or an unset flag is still
-        # ZTP-eligible, matching the reference DCIM provider's default-True
-        # semantics. Using ``not status.get("ztp_enabled")`` here wrongly excluded
-        # no-status devices.
+        # ZTP defaults to enabled: only an explicit False drops the entry, so a
+        # device with no status row is still eligible. Note this is deliberately not
+        # ``not status.get("ztp_enabled")``, which would exclude those.
         if status.get("ztp_enabled") is False:
             return None
         if not self._aggregate_matches(status, is_aggregate_managed):

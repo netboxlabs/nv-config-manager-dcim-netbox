@@ -24,12 +24,9 @@ class NetBoxIPAMMixin:
     derived from the device's interfaces."""
 
     async def get_device_vrfs(self, device_id: str) -> list[DeviceVRF]:
-        # NetBox has no native device -> VRF relationship: VRFs attach to
-        # interfaces/prefixes/IPs, never to devices. A device's VRFs are
-        # therefore the union of the VRFs on its interfaces, which is also
-        # exactly how ``assign_vrf_to_device`` writes them back. There is no
-        # device-level VRF set to union in unless a future plugin exposes one;
-        # if it does, merge it into ``vrfs`` below (guarded on its presence).
+        # NetBox attaches VRFs to interfaces, never to devices, so a device's VRFs
+        # are the union across its interfaces. That is also how
+        # ``assign_vrf_to_device`` writes them back.
         interfaces = await self.rest_list(INTERFACES_PATH, [("device_id", str(device_id))])
         vrfs: dict[str, str] = {}
         for interface in interfaces:
@@ -92,14 +89,10 @@ class NetBoxIPAMMixin:
         for vrf in vrfs:
             if namespace_tag not in tag_names(vrf):
                 continue
-            # ``namespace_id`` is passed straight through to
-            # ``provision_spectrum_x_vrf`` and re-applied as a VRF **tag name**
-            # (that is how a namespace is emulated in NetBox), so it must be the
-            # namespace's tag name — NOT the VRF pk, which would make the provision
-            # tag a nonexistent tag named e.g. "1". Derive it as the VRF's first
-            # tag name that is not the zone marker (``namespace_tag`` may match the
-            # marker by its name *or* slug); this matches how ``get_spectrum_x_vrfs``
-            # reads the namespace back.
+            # ``provision_spectrum_x_vrf`` re-applies namespace_id as a VRF tag
+            # name, so it must be the tag name and not the VRF pk. Take the first
+            # tag that is not the zone marker, which is how ``get_spectrum_x_vrfs``
+            # reads it back.
             candidate_names = sorted(
                 t["name"]
                 for t in (vrf.get("tags") or [])

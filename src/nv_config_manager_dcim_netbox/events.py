@@ -103,11 +103,10 @@ async def _overlay_assignment_changed(event: DCIMChangeEvent, client: DCIMClient
 
 
 # -- cross-object fan-out --------------------------------------------------------
-# The changed object is not the device, so the affected device(s) are resolved
-# with a NetBox query. Skipped on delete (the object is gone and can no longer be
-# resolved) and best-effort (a failed resolution logs and drops rather than
-# stalling the dispatcher). The render dispatcher applies the render-enabled gate
-# downstream, so these return candidate devices unfiltered.
+# The changed object is not a device, so the affected devices are resolved with a
+# NetBox query. Skipped on delete, and best-effort: a failed resolution logs and
+# drops rather than stalling the dispatcher. The render-enabled gate is applied
+# downstream, so these return candidates unfiltered.
 
 # ConfigContext scope dimension -> device-list filter. AND across dimensions, OR
 # within one — exactly how NetBox evaluates ConfigContext applicability.
@@ -177,11 +176,9 @@ async def _prefix_devices(event, client):
 
 
 async def _bgp_asn_devices(event, client):
-    # netbox-bgp models an ASN as NetBox core ``ipam.ASN`` (a session's local_as /
-    # remote_as FK to it), so an ASN change arrives as ``ipam.asn``. Editing a
-    # shared ASN must re-render every device whose BGP session references it. The
-    # session endpoint's local_as_id / remote_as_id filters AND when combined, so
-    # query each separately and union the owning devices.
+    # An ASN change arrives as ``ipam.asn`` and must re-render every device whose
+    # BGP session references it. local_as_id and remote_as_id AND when combined, so
+    # query each separately and union the owners.
     asn_id = str(event.object_id)
     local, remote = await asyncio.gather(
         client.rest_list(BGP_SESSIONS_PATH, [("local_as_id", asn_id)]),

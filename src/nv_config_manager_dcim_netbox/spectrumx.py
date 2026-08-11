@@ -177,10 +177,8 @@ class NetBoxSpectrumXMixin:
                 )
                 created.append((self.VXLANS_PATH, vxlan["id"]))
         except Exception:
-            # Roll back in reverse creation order, overlay last (only if created).
-            # A rollback failure must never replace the exception that caused it —
-            # the operator needs the original cause, plus a warning that cleanup
-            # left objects behind.
+            # Reverse creation order, overlay last. A rollback failure must not
+            # replace the original exception; warn that objects were left behind.
             rollback = [*reversed(created)]
             if created_overlay_id is not None:
                 rollback.append((self.OVERLAYS_PATH, created_overlay_id))

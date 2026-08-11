@@ -59,11 +59,9 @@ class NetBoxZTPMixin:
             )
             config_context = device.get("config_context") or {}
             firmware = (config_context.get("intended-firmware") or {}).get("version")
-            # The config-store instance the device's rendered files live under is
-            # recorded on the intended-config by the render pipeline. ZTP's
-            # DeviceData.load_file requires it non-None (and, for external mTLS,
-            # uses it as the endpoint); a None here 404s as "No config store file
-            # found". ui->api-mtls mirrors the reference DCIM provider.
+            # The render pipeline records the config-store instance on the
+            # intended-config. ZTP's load_file requires it non-None, and uses it as
+            # the endpoint for external mTLS.
             config_store_instance = None
             intended = await self.rest_list(_INTENDED_PATH, [("device_id", str(device_id))])
             if intended and intended[0].get("config_store_instance"):
@@ -71,8 +69,7 @@ class NetBoxZTPMixin:
                     "ui", "api-mtls", intended[0]["config_store_instance"]
                 )
             return ZTPDevice(
-                # UUID-encode: this device_id keys the config-store lookup for the
-                # boot-script/config files, and the render pipeline persisted them
+                # Keys the config-store lookup for the boot-script/config files.
                 device_id=str(device["id"]),
                 name=device["name"],
                 addresses=addresses,

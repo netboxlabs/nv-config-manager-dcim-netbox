@@ -201,14 +201,10 @@ class NetBoxInfiniBandMixin:
         return out
 
     async def find_ib_interfaces_by_guids(self, guids: list[str]) -> list[IBInterfaceGuid]:
-        # Match on the plain ``cf_ib_guid`` exact filter. NetBox does NOT support a
-        # ``__ie`` lookup on a custom field — it silently *ignores* the unknown
-        # lookup and returns every interface, which then reads back as a bogus
-        # "GUID matched multiple interfaces" (the same interface appears in every
-        # per-GUID page). The plain exact CF filter is already case-insensitive
-        # (Postgres text collation), so it also covers UFM's mixed-case GUIDs.
-        # Repeated ``cf_*`` params are not reliably OR-ed, so query per GUID — but
-        # concurrently.
+        # Exact filter only: NetBox ignores an unknown ``__ie`` lookup on a custom
+        # field and returns every interface, which reads back as a bogus multi-match.
+        # The exact filter is already case-insensitive. Repeated ``cf_*`` params are
+        # not reliably OR-ed, so query per GUID, concurrently.
         pages = await asyncio.gather(
             *(
                 self.rest_list(INTERFACES_PATH, [("cf_ib_guid", guid)])
@@ -428,12 +424,9 @@ class NetBoxInfiniBandMixin:
         data = await self.graphql_query(_HOST_BY_NAME_QUERY, {"names": [host]})
         devices = data.get("device_list") or []
         if not devices and _IPV4_RE.match(host):
-            # Fall back to matching a device that carries `host` on ANY interface,
-            # not just its primary IPv4 (mirrors the reference provider). Resolve
-            # via the IP address record instead of scanning the whole fleet: the
-            # matching IP -> its interface -> that interface's device. Collect
-            # across every matching IP and dedupe by id so the conflict guard
-            # below fires when more than one distinct device is implicated.
+            # Also match a device carrying `host` on any interface, not just its
+            # primary IPv4. Resolve IP -> interface -> device rather than scanning
+            # the fleet, deduping by id so the conflict guard below still fires.
             interface_ids = sorted(
                 {
                     str(iface_id)
