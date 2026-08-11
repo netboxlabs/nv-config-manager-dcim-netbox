@@ -33,13 +33,16 @@ jobs:
         run: |
           git clone --depth 1 --branch zb/pluggable-dcim \
             https://github.com/NVIDIA/nv-config-manager.git ../nv-config-manager
+      # Into a venv, not `--system`: the interpreter setup-uv provisions is
+      # uv-managed and externally managed, so `uv pip install --system` errors.
       - name: Install
         run: |
-          uv pip install --system ../nv-config-manager/components/dcim
+          uv venv --python 3.13
+          uv pip install ../nv-config-manager/components/dcim
           # The `installer` extra (click + PyYAML) is needed to *collect* the suite:
           # test_installer.py and test_air.py import both at module scope. The `air`
           # extra is not installed; those imports are guarded with importorskip.
-          uv pip install --system -e '.[installer]'
-          uv pip install --system pytest pytest-asyncio
+          uv pip install -e '.[installer]'
+          uv pip install pytest pytest-asyncio
       - name: Tests
-        run: pytest
+        run: .venv/bin/pytest
