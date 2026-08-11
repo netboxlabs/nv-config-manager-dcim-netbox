@@ -42,6 +42,13 @@ query ($ids: [ID!]!) {
 _SPECTRUMX_ISOLATION = "spectrum_x_vrf"
 _L3_VNI = "l3"
 
+# Zone marker on every namespace VRF, seeded by the plugin's nvcm_load_bootstrap and
+# passed back by the workflows as ``namespace_tag``. A provisioned VRF needs it (and
+# ``nvcm_site``) to be visible to the RD allocator.
+_SPECTRUMX_ZONE_TAG = "spectrumx"
+# VRF custom field holding the owning site slug; NetBox VRFs have no native site link.
+_SITE_FIELD = "nvcm_site"
+
 
 class NetBoxSpectrumXMixin:
     """Spectrum-X VRF/overlay provisioning and reconciliation."""
@@ -147,18 +154,24 @@ class NetBoxSpectrumXMixin:
                 vrf = await self.rest_request(
                     "POST",
                     VRFS_PATH,
-                    json={"name": vrf_name, "rd": route_distinguisher, "tenant": tenant_id},
+                    json={
+                        "name": vrf_name,
+                        "rd": route_distinguisher,
+                        "tenant": tenant_id,
+                        # Scopes the VRF to its site for get_namespace_route_distinguishers,
+                        # which filters on cf_nvcm_site.
+                        "custom_fields": {_SITE_FIELD: site},
+                    },
                 )
                 created.append((VRFS_PATH, vrf["id"]))
+                # Emulate the namespace as a VRF tag (NetBox has no IPAM namespace),
+                # alongside the zone tag the RD allocator selects on. Applied as a
+                # follow-up PATCH so the create payload stays minimal. Both tags are
+                # expected to pre-exist.
+                tags = [{"name": _SPECTRUMX_ZONE_TAG}]
                 if namespace:
-                    # Emulate the namespace as a VRF tag (NetBox has no IPAM
-                    # namespace). Applied as a follow-up PATCH so the create
-                    # payload stays minimal. NOTE: the tag is expected to pre-exist.
-                    await self.rest_request(
-                        "PATCH",
-                        f"{VRFS_PATH}{vrf['id']}/",
-                        json={"tags": [{"name": namespace}]},
-                    )
+                    tags.append({"name": namespace})
+                await self.rest_request("PATCH", f"{VRFS_PATH}{vrf['id']}/", json={"tags": tags})
                 assignment = await self._create_overlay_assignment(
                     overlay_id, "ipam.vrf", vrf["id"]
                 )
@@ -266,10 +279,12 @@ class NetBoxSpectrumXMixin:
         for rows in rows_per_interface:
             for row in rows:
                 other_overlay_id = self._fk_id(row.get("overlay"))
-                if (
-                    str(row.get("assigned_object_type")) != "dcim.interface"
-                    or other_overlay_id == overlay_id
-                ):
+                # str() on both sides: the plugin may render the FK as a string PK
+                # while the overlays endpoint returns an int, and `"7" == 7` is False,
+                # so the self-exclusion guard would delete what we just created.
+                if str(row.get("assigned_object_type")) != "dcim.interface" or str(
+                    other_overlay_id
+                ) == str(overlay_id):
                     continue
                 if (
                     await self._overlay_isolation(other_overlay_id, isolation_cache)

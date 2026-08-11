@@ -30,10 +30,13 @@ from nv_config_manager_dcim_netbox._mappers import strip_mask
 from nv_config_manager_dcim_netbox.fabric_common import (
     FABRIC_STATUS,
     INTERFACES_PATH,
+    IP_ADDRESSES_PATH,
     normalize_pkey,
 )
 
 _IB_PKEY_ISOLATION = "ib_pkey"
+# IB overlays anchor at a sub-Site Location, so their scope GFK is always a Location.
+_LOCATION_SCOPE_TYPE = "dcim.location"
 _IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
 
 
@@ -313,12 +316,18 @@ class NetBoxInfiniBandMixin:
 
     # -- assignments ---------------------------------------------------------
 
-    async def _find_ib_assignment(self, overlay_id, interface_id) -> dict | None:
-        rows = await self.rest_list(
-            self.ASSIGNMENTS_PATH,
-            [("overlay_id", str(overlay_id)), ("assigned_object_id", str(interface_id))],
-        )
-        return rows[0] if rows else None
+    async def _ib_assignments_by_interface(self, overlay_id) -> dict[str, dict]:
+        """Return the overlay's interface assignments keyed by interface id.
+
+        One query, so callers walking a device's ports do a dict lookup rather than
+        a round trip each.
+        """
+        rows = await self.rest_list(self.ASSIGNMENTS_PATH, [("overlay_id", str(overlay_id))])
+        return {
+            str(r["assigned_object_id"]): r
+            for r in rows
+            if str(r.get("assigned_object_type")) == "dcim.interface"
+        }
 
     async def _create_ib_assignment(self, overlay_id, interface_id, guid, membership_type):
         return await self._create_overlay_assignment(
@@ -332,10 +341,11 @@ class NetBoxInfiniBandMixin:
     async def ensure_ib_pkey_assignments(
         self, overlay_id: str, assignments: list[tuple[str, str, str]]
     ) -> list[str]:
+        current = await self._ib_assignments_by_interface(overlay_id)
         result: list[str] = []
         for interface_id, guid, membership_type in assignments:
             membership_type = _normalize_membership(membership_type)
-            existing = await self._find_ib_assignment(overlay_id, interface_id)
+            existing = current.get(str(interface_id))
             if existing:
                 if _normalize_membership(existing.get("membership_type")) != membership_type:
                     await self.rest_request(
@@ -357,10 +367,11 @@ class NetBoxInfiniBandMixin:
         # Contract: ``removed`` carries ASSIGNMENT ids (the rows deleted), while
         # ``unassigned`` carries the INTERFACE ids that had no assignment to
         # remove -- matching the reference DCIM provider's return identity.
+        current = await self._ib_assignments_by_interface(overlay_id)
         removed: list[str] = []
         unassigned: list[str] = []
         for interface_id in interface_ids:
-            existing = await self._find_ib_assignment(overlay_id, interface_id)
+            existing = current.get(str(interface_id))
             if existing:
                 await self._safe_delete(f"{self.ASSIGNMENTS_PATH}{existing['id']}/")
                 removed.append(str(existing["id"]))
@@ -384,12 +395,7 @@ class NetBoxInfiniBandMixin:
     async def sync_ib_pkey_assignments(
         self, overlay_id: str, desired_assignments: list[tuple[str, str, str]]
     ) -> tuple[list[str], list[str], list[str]]:
-        rows = await self.rest_list(self.ASSIGNMENTS_PATH, [("overlay_id", str(overlay_id))])
-        current = {
-            str(r["assigned_object_id"]): r
-            for r in rows
-            if str(r.get("assigned_object_type")) == "dcim.interface"
-        }
+        current = await self._ib_assignments_by_interface(overlay_id)
         desired = {
             str(iface): (guid, _normalize_membership(membership))
             for iface, guid, membership in desired_assignments
@@ -430,7 +436,7 @@ class NetBoxInfiniBandMixin:
             interface_ids = sorted(
                 {
                     str(iface_id)
-                    for ip in await self.rest_list("ipam/ip-addresses/", [("address", host)])
+                    for ip in await self.rest_list(IP_ADDRESSES_PATH, [("address", host)])
                     if ip.get("assigned_object_type") == "dcim.interface"
                     and (iface_id := (ip.get("assigned_object") or {}).get("id"))
                 }
@@ -523,22 +529,24 @@ class NetBoxInfiniBandMixin:
         if not device:
             raise DCIMNotFoundError(f"No NetBox device for IB host {host!r}")
         host_site = self._ib_host_site(device)
-        # Match the PKey at the device location OR any ancestor location: scope
-        # the overlay query to every location id in the parent chain (NetBox's
-        # ``location_id`` filter is multi-valued and ORs repeated params).
+        # Match the PKey at the device location OR any ancestor. Scoped on exact
+        # ``scope_id`` (+ scope_type, to disambiguate the GFK), not ``location_id``:
+        # that filter is descendant-inclusive, so the ancestor chain would also match
+        # sibling locations' overlays.
         location_chain = self._ib_location_chain(device.get("location"))
         location_id = self._fk_id(device.get("location") or {})
-        params = [("isolation_type", _IB_PKEY_ISOLATION)]
+        params = [("isolation_type", _IB_PKEY_ISOLATION), ("scope_type", _LOCATION_SCOPE_TYPE)]
         for chain_location in location_chain:
             chain_id = self._fk_id(chain_location)
             if chain_id is not None:
-                params.append(("location_id", str(chain_id)))
+                params.append(("scope_id", str(chain_id)))
         overlays = await self.rest_list(self.OVERLAYS_PATH, params)
         overlays_by_id = {str(overlay["id"]): overlay for overlay in overlays}
         # One pkey query, then match against the location/isolation-scoped
         # overlays, instead of a pkeys query per overlay.
         matches = []
-        for pk in await self.rest_list(self.PKEYS_PATH, [("pkey", pkey_norm)]):
+        pkey_rows = await self.rest_list(self.PKEYS_PATH, [("pkey", pkey_norm)])
+        for pk in pkey_rows:
             try:
                 stored = normalize_pkey(pk.get("pkey", ""))
             except DCIMInvalidDataError:
@@ -553,7 +561,7 @@ class NetBoxInfiniBandMixin:
         if matches:
             overlay, pk = matches[0]
         elif create_overlay_for_orphan:
-            overlay, pk = await self._adopt_orphan_pkey(pkey_norm, device, location_id)
+            overlay, pk = await self._adopt_orphan_pkey(pkey_norm, device, location_id, pkey_rows)
         else:
             raise DCIMNotFoundError(f"No IB PKey {pkey_norm!r} found for host {host!r}")
         return IBPKeyContext(
@@ -564,9 +572,11 @@ class NetBoxInfiniBandMixin:
             pkey=pkey_norm,
         )
 
-    async def _adopt_orphan_pkey(self, pkey_norm, device, location_id):
-        rows = await self.rest_list(self.PKEYS_PATH, [("pkey", pkey_norm)])
-        orphans = [r for r in rows if self._fk_id(r.get("overlay")) is None]
+    async def _adopt_orphan_pkey(self, pkey_norm, device, location_id, pkey_rows):
+        # ``pkey_rows`` is the caller's own query, not a re-fetch: a second read is
+        # not atomic with the first, so a PKey created between them would trip the
+        # "Multiple orphan PKeys" guard on rows the caller never saw.
+        orphans = [r for r in pkey_rows if self._fk_id(r.get("overlay")) is None]
         if not orphans:
             raise DCIMNotFoundError(f"No orphan PKey {pkey_norm!r} to adopt")
         if len(orphans) > 1:
@@ -596,7 +606,7 @@ class NetBoxInfiniBandMixin:
         if not overlay:
             body = {
                 "name": overlay_name,
-                "scope_type": "dcim.location",
+                "scope_type": _LOCATION_SCOPE_TYPE,
                 "scope_id": location_id,
                 "isolation_type": _IB_PKEY_ISOLATION,
                 "status": FABRIC_STATUS,

@@ -91,14 +91,18 @@ def netbox_connection_settings(settings: ProviderSettings) -> dict[str, str | bo
         raise DCIMProviderConfigurationError(
             'DCIM provider "netbox" requires ' + ", ".join(missing)
         )
-    _require_http_url(str(values["server"]).strip(), "server")
+    # Return the stripped values, not the raw ones: validating a stripped copy and
+    # storing the original let whitespace through, and aiohttp then rejects every
+    # assembled URL as invalid.
+    server = str(values["server"]).strip()
+    _require_http_url(server, "server")
     public_url = str(values["public_url"]).strip() if values["public_url"] else ""
     if public_url:
         # Surfaced to operators in device UI links, so hold it to the same bar.
         _require_http_url(public_url, "public_url")
     return {
-        "server": str(values["server"]),
-        "token": str(values["token"]),
+        "server": server,
+        "token": str(values["token"]).strip(),
         "public_url": public_url,
         "verify": _parse_verify(values["verify"]),
         "timeout": _parse_timeout(values["timeout"]),

@@ -8,8 +8,11 @@ so the update upserts the MAC and sets it as the interface's primary.
 
 from __future__ import annotations
 
+import pytest
 from nv_config_manager_dcim import create_dcim_client
 
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = pytest.mark.inventory
 _SETTINGS = {"server": "https://netbox.example", "token": "t"}
 
 _HOST_DEVICE = {

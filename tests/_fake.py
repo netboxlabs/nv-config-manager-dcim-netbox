@@ -37,9 +37,9 @@ def fake_client(
     * ``patch`` — ``{attr: async_callable}`` to override provider helper methods.
     * ``queries`` — a list that receives ``(path, params)`` for every ``rest_list``
       call. Use it to assert the NetBox *filter names* a read depends on: those
-      spellings (``cf_nvcm_render_enabled``, ``cf_ib_guid__ie``, ``has_primary_ip``,
-      …) are this provider's contract with NetBox, and a typo in one is invisible
-      to a fake that only matches on path.
+      spellings (``cf_ib_guid__ie``, ``has_primary_ip``, ``name__isw``, …) are this
+      provider's contract with NetBox, and a typo in one is invisible to a fake that
+      only matches on path.
     """
     client = create_dcim_client("netbox", SETTINGS)
 
@@ -50,9 +50,12 @@ def fake_client(
         if queries is not None:
             queries.append((path, list(params or [])))
         rows = list((rest_list or {}).get(path, []))
-        for key, value in params or []:
-            if key == "assigned_object_id":
-                rows = [r for r in rows if str(r.get("assigned_object_id")) == str(value)]
+        # NetBox ORs a repeated param, so collect the values and match with `in`.
+        # Re-filtering per value ANDed them, so any multi-value query returned
+        # nothing — including the batched shape render._assigned_overlays relies on.
+        wanted = {str(value) for key, value in params or [] if key == "assigned_object_id"}
+        if wanted:
+            rows = [r for r in rows if str(r.get("assigned_object_id")) in wanted]
         return rows
 
     async def _rest_request(method, path, **kwargs):

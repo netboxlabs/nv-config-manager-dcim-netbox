@@ -20,13 +20,17 @@ pytestmark = pytest.mark.air
 
 # Everything below the config patch needs nv-config-manager-installer, which
 # comes from an NVCM checkout rather than an index (see `make setup-air`).
+# exc_type is required: the modules exist, so importing one without the extra raises
+# AirSupportUnavailable, not the ModuleNotFoundError importorskip defaults to.
 air_config = pytest.importorskip(
     "nv_config_manager_dcim_netbox.installer.air.config",
     reason="the `air` extra is not installed",
+    exc_type=ImportError,
 )
 air_callback = pytest.importorskip(
     "nv_config_manager_dcim_netbox.installer.air.callback",
     reason="the `air` extra is not installed",
+    exc_type=ImportError,
 )
 NetBoxSimConfig = air_config.NetBoxSimConfig
 NetBoxAirCallback = air_callback.NetBoxAirCallback

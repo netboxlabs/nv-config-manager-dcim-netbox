@@ -4,7 +4,13 @@
 
 from __future__ import annotations
 
+import pytest
+
+from nv_config_manager_dcim_netbox.fabric_common import STATUS_PATH
 from tests._fake import fake_client
+
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = pytest.mark.dhcp
 
 
 def _client(profiles=None, rest_list=None):
@@ -29,10 +35,28 @@ async def test_get_dhcp_static_data():
 
 
 async def test_get_dhcp_contexts():
-    client = _client(rest_list={"dcim/devices/": [{"id": 1, "config_context": {"x": 1}}]})
+    # ZTP eligibility is DeviceConfigStatus.ztp_enabled on the plugin, so the status
+    # record is what selects device 1.
+    client = _client(
+        rest_list={
+            STATUS_PATH: [{"id": 10, "device": 1, "ztp_enabled": True}],
+            "dcim/devices/": [{"id": 1, "config_context": {"x": 1}}],
+        }
+    )
     # Keyed by the NetBox device id so it matches the device_id the confgen reads
     # from reservations/option-candidates when resolving options.
     assert await client.get_dhcp_contexts() == {"1": {"x": 1}}
+
+
+async def test_get_dhcp_contexts_without_ztp_enabled_devices_is_empty():
+    # Fail closed rather than handing the confgen every device's config context.
+    client = _client(
+        rest_list={
+            STATUS_PATH: [],
+            "dcim/devices/": [{"id": 1, "config_context": {"x": 1}}],
+        }
+    )
+    assert await client.get_dhcp_contexts() == {}
 
 
 async def test_get_dhcp_auto_subnets():

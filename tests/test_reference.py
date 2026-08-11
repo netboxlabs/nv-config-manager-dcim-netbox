@@ -9,6 +9,9 @@ from nv_config_manager_dcim import DCIMInvalidDataError, DCIMNotFoundError
 
 from tests._fake import fake_client as _client
 
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = pytest.mark.reference
+
 
 async def test_list_locations():
     client = _client(gql={"location_list": [{"id": 1, "name": "Row 1"}]})

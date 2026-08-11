@@ -7,8 +7,11 @@ NetBox has no device→VRF link, so a device's VRF is set on its interfaces.
 
 from __future__ import annotations
 
+import pytest
 from nv_config_manager_dcim import create_dcim_client
 
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = pytest.mark.ipam
 _SETTINGS = {"server": "https://netbox.example", "token": "t"}
 
 

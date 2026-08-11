@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from importlib import resources
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,17 @@ import yaml
 # Where the profile lives when running from a source checkout. Packaged copies
 # are found through importlib.resources instead.
 _REPO_PROFILE = Path(__file__).resolve().parents[3] / "deploy" / "configs" / "local-netbox.yaml"
+
+# Image tags track the package version, the same source `make images` builds them
+# from. Hardcoded here, a version bump would leave the installer asking for a tag
+# that was never built.
+try:
+    IMAGE_TAG = version("nv-config-manager-dcim-netbox")
+except PackageNotFoundError:  # pragma: no cover - not installed
+    IMAGE_TAG = "0.0.0"
+
+PROVIDER_IMAGE = f"nv-config-manager-dcim-netbox:{IMAGE_TAG}"
+NETBOX_IMAGE = "nv-config-manager-netbox"
 
 TOKEN_PLACEHOLDER = "REPLACED_BY_INSTALLER"
 
@@ -40,7 +52,7 @@ class ConfigOptions:
     api_token: str
     namespace: str = "nv-config-manager"
     size: str = "small"
-    provider_image: str = "nv-config-manager-dcim-netbox:0.1.0"
+    provider_image: str = PROVIDER_IMAGE
     netbox_server: str = "http://netbox"
     netbox_public_url: str = "http://127.0.0.1:8080"
 

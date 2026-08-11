@@ -8,8 +8,11 @@ context; no secret store is involved.
 
 from __future__ import annotations
 
+import pytest
 from nv_config_manager_dcim import create_dcim_client
 
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = pytest.mark.secrets
 _SETTINGS = {"server": "https://netbox.example", "token": "t"}
 
 
@@ -63,3 +66,12 @@ async def test_password_secret_names_absent_is_empty():
         assert await client.get_device_password_secret_names("1") == {}
     finally:
         await client.close()
+
+
+async def test_password_mapping_shape_guard_is_shared():
+    # Both password reads go through one guard, so they cannot disagree about what
+    # a valid password_mappings block looks like.
+    for bad in ("not-a-dict", None, 5, []):
+        client = _client_with_context({"password_mappings": bad})
+        assert await client.get_device_password_mapping_users("1") == set()
+        assert await client.get_device_password_secret_names("1") == {}

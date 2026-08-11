@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, TypeVar
 
@@ -22,6 +23,7 @@ from nv_config_manager_dcim_netbox._mappers import (
     network_device_from_rest,
     status_slug,
 )
+from nv_config_manager_dcim_netbox.fabric_common import DEVICES_PATH, INTERFACES_PATH, chunked
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -117,11 +119,9 @@ class NetBoxInventoryMixin:
         return device_metadata_from_gql(device, self.get_device_ui_url(device_id))
 
     async def get_managed_device_metadata(self, page_size: int = 100) -> list[DeviceMetadata]:
-        # Fail-closed: NetBox 400s on the ``cf_nvcm_render_enabled`` filter when the
-        # field is undefined, so this never silently returns the whole fleet.
-        devices = await self.rest_list(
-            "dcim/devices/", [("cf_nvcm_render_enabled", "true")], page_size=page_size
-        )
+        # "Managed" is DeviceConfigStatus.render_enabled; see status_flag_device_ids.
+        managed_ids = await self.status_flag_device_ids(render_enabled=True)
+        devices = await self.devices_by_ids(managed_ids or (), page_size=page_size)
         return [device_metadata_from_rest(d, self.get_device_ui_url(str(d["id"]))) for d in devices]
 
     async def get_device_serial(self, device_id: str) -> str:
@@ -164,10 +164,13 @@ class NetBoxInventoryMixin:
             coerce = status_slug if key == "status" else str
             params.extend((key, coerce(value)) for value in values or ())
         if filters.managed_only:
-            # "Managed" proxies to the ``nvcm_render_enabled`` custom field. NetBox
-            # 400s if it is undefined rather than widening the result set.
-            params.append(("cf_nvcm_render_enabled", "true"))
-        devices = await self.rest_list("dcim/devices/", params)
+            # render_enabled ids, ANDed with the rest of the filter.
+            managed_ids = await self.status_flag_device_ids(render_enabled=True)
+            if not managed_ids:
+                return []
+            devices = await self.devices_by_ids(managed_ids, params)
+        else:
+            devices = await self.rest_list(DEVICES_PATH, params)
         selections = []
         for device in devices:
             if not device.get("name"):
@@ -182,17 +185,24 @@ class NetBoxInventoryMixin:
         return selections
 
     async def get_network_device(self, device_id: str) -> NetworkDeviceData:
-        device = await self.rest_request("GET", f"dcim/devices/{device_id}/")
+        device, statuses = await asyncio.gather(
+            self.rest_request("GET", f"{DEVICES_PATH}{device_id}/"),
+            self.device_config_status_map([device_id]),
+        )
         if not device:
             raise DCIMNotFoundError(f"NetBox device {device_id} not found")
-        return network_device_from_rest(device)
+        return network_device_from_rest(device, statuses.get(str(device_id)))
 
     async def get_network_devices(self, filters: DeviceInventoryFilter) -> list[NetworkDeviceData]:
-        params = await self._device_filter_params(filters)
-        if params is None:
+        batches = await self._device_filter_batches(filters)
+        if batches is None:
             return []
-        devices = await self.rest_list("dcim/devices/", params)
-        return self._map_unique_by_name(devices, network_device_from_rest)
+        devices = await self._list_device_batches(batches)
+        # The *_enabled flags come from DeviceConfigStatus, not the device row.
+        statuses = await self.device_config_status_map(str(d["id"]) for d in devices)
+        return self._map_unique_by_name(
+            devices, lambda d: network_device_from_rest(d, statuses.get(str(d["id"])))
+        )
 
     async def get_host_device(self, device_id: str) -> HostDeviceData:
         data = await self.graphql_query(_HOST_DEVICE_QUERY, {"id": device_id})
@@ -202,15 +212,15 @@ class NetBoxInventoryMixin:
         return host_device_from_gql(device)
 
     async def get_host_devices(self, filters: DeviceInventoryFilter) -> list[HostDeviceData]:
-        params = await self._device_filter_params(filters)
-        if params is None:
+        batches = await self._device_filter_batches(filters)
+        if batches is None:
             return []
-        devices = await self.rest_list("dcim/devices/", params)
+        devices = await self._list_device_batches(batches)
         ids = [str(d["id"]) for d in devices]
         return await self._host_devices_by_ids(ids)
 
     async def get_device_interfaces(self, device_id: str) -> list[InterfaceData]:
-        interfaces = await self.rest_list("dcim/interfaces/", [("device_id", str(device_id))])
+        interfaces = await self.rest_list(INTERFACES_PATH, [("device_id", str(device_id))])
         return [interface_from_rest(i) for i in interfaces]
 
     # -- shared helpers ------------------------------------------------------
@@ -253,17 +263,29 @@ class NetBoxInventoryMixin:
         data = await self.graphql_query(_HOST_DEVICES_BY_IDS_QUERY, {"ids": ids})
         return self._map_unique_by_name(data.get("device_list") or [], host_device_from_gql)
 
-    async def _device_filter_params(
-        self, filters: DeviceInventoryFilter
-    ) -> list[tuple[str, str]] | None:
-        """Build ``dcim/devices`` query params, or ``None`` if nothing can match.
+    async def _list_device_batches(self, batches: list[list[tuple[str, str]]]) -> list[dict]:
+        """Run one ``dcim/devices`` listing per param batch and concatenate them.
 
-        Returns ``None`` when a MAC-address filter was requested but matched no
-        interface — callers must treat that as an empty result rather than an
-        unfiltered (whole-fleet) query. Raises ``DCIMInvalidDataError`` when no
-        filter of any kind was supplied, so an empty filter can never degrade
-        into a full-fleet listing (parity with the reference provider's
-        "must apply at least one filter" guard).
+        The batches are disjoint by construction (each carries a distinct slice of
+        the selected device ids), so no de-duplication is needed here.
+        """
+        pages = await asyncio.gather(*(self.rest_list(DEVICES_PATH, b) for b in batches))
+        return [row for page in pages for row in page]
+
+    async def _device_filter_batches(
+        self, filters: DeviceInventoryFilter
+    ) -> list[list[tuple[str, str]]] | None:
+        """Build ``dcim/devices`` query-param batches, or ``None`` if nothing can match.
+
+        Returns ``None`` when an id-valued filter (MAC addresses, NVCM status flags)
+        was requested but selected no device; callers must treat that as an empty
+        result, not an unfiltered query. Raises ``DCIMInvalidDataError`` when no
+        filter of any kind was supplied, so an empty filter can never degrade into a
+        full-fleet listing (parity with the reference provider's guard).
+
+        Id-valued filters are intersected in Python and emitted as one ``id``
+        selection: NetBox ORs a repeated param, so appending each separately yields
+        their union. Chunked because the selection can be fleet-sized (``ID_CHUNK``).
         """
         params: list[tuple[str, str]] = []
         if filters.site:
@@ -274,7 +296,6 @@ class NetBoxInventoryMixin:
             ("role", filters.roles),
             ("status", filters.statuses),
             ("device_type_id", filters.device_type_ids),
-            ("id", filters.device_ids),
         ):
             # ``status`` must be the NetBox slug (lowercase); workflows pass the
             # display label ("Active"). See ``status_slug``.
@@ -282,43 +303,48 @@ class NetBoxInventoryMixin:
             params.extend((key, coerce(value)) for value in values or ())
         for platform in filters.platforms or []:
             params.append(("platform", str(platform.value)))
-        # Status flags map to boolean device custom fields. ``managed`` proxies to
-        # ``nvcm_render_enabled``, so only apply it when no explicit render filter
-        # was given. NetBox 400s on an unknown ``cf_*`` filter rather than widening
-        # the result, so this fails closed.
+
+        # Every filter that narrows to a set of device ids, collected for
+        # intersection. managed_only proxies to render_enabled, so it only applies
+        # when no explicit render filter was given.
+        id_sets: list[set[str]] = []
+        if filters.device_ids:
+            id_sets.append({str(value) for value in filters.device_ids})
         render_enabled = filters.render_enabled
         if filters.managed_only and render_enabled is None:
             render_enabled = True
-        status_flags = {
-            "nvcm_render_enabled": render_enabled,
-            "nvcm_deploy_enabled": filters.deploy_enabled,
-            "nvcm_backup_enabled": filters.backup_enabled,
-            "nvcm_ztp_enabled": filters.ztp_enabled,
-        }
-        for field, value in status_flags.items():
-            if value is not None:
-                params.append((f"cf_{field}", str(value).lower()))
-        # Reject an entirely unfiltered request before it becomes a whole-fleet
-        # query. A MAC-only filter is legitimate: it is resolved below.
-        if not params and not filters.mac_addresses:
-            raise DCIMInvalidDataError("At least one device inventory filter must be supplied")
+        status_ids = await self.status_flag_device_ids(
+            render_enabled=render_enabled,
+            deploy_enabled=filters.deploy_enabled,
+            backup_enabled=filters.backup_enabled,
+            ztp_enabled=filters.ztp_enabled,
+        )
+        if status_ids is not None:
+            id_sets.append(status_ids)
         # MAC filtering on devices is done via the interfaces endpoint in NetBox.
-        # A requested MAC that matches no interface must exclude everything, not
-        # fall through to an unfiltered query.
         if filters.mac_addresses:
-            mac_device_ids = await self._device_ids_for_macs(filters.mac_addresses)
-            if not mac_device_ids:
-                return None
-            for device_id in mac_device_ids:
-                params.append(("id", device_id))
-        return params
+            id_sets.append(set(await self._device_ids_for_macs(filters.mac_addresses)))
+
+        # Reject an entirely unfiltered request before it becomes a whole-fleet
+        # query. An id-valued-only filter (e.g. MAC alone) is legitimate.
+        if not params and not id_sets:
+            raise DCIMInvalidDataError("At least one device inventory filter must be supplied")
+        if not id_sets:
+            return [params]
+        selected = set.intersection(*id_sets)
+        if not selected:
+            return None
+        return [
+            [*params, *(("id", device_id) for device_id in chunk)]
+            for chunk in chunked(sorted(selected))
+        ]
 
     async def _interfaces_for_macs(self, mac_addresses: list[str] | None) -> list[dict]:
         """List interfaces carrying any of ``mac_addresses`` (empty if none given)."""
         if not mac_addresses:
             return []
         params = [("mac_address", mac) for mac in mac_addresses]
-        return await self.rest_list("dcim/interfaces/", params)
+        return await self.rest_list(INTERFACES_PATH, params)
 
     async def _device_ids_for_macs(self, mac_addresses: list[str] | None) -> list[str]:
         interfaces = await self._interfaces_for_macs(mac_addresses)

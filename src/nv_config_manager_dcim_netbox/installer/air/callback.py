@@ -119,6 +119,7 @@ class NetBoxAirCallback:
             api_token=self.api_token,
             image_repository=self.cfg.netbox_image,
             image_tag=self.cfg.netbox_image_tag,
+            extra_set=self.cfg.netbox_helm_set,
             runner=runner,
         )
         cluster.wait_for_netbox(NAMESPACE, runner=runner)
@@ -265,6 +266,7 @@ class NetBoxAirCallback:
             image_repository=self.cfg.netbox_image,
             image_tag=self.cfg.netbox_image_tag,
             nats_password=password,
+            extra_set=self.cfg.netbox_helm_set,
             runner=runner,
         )
         self.on_log("NetBox is publishing change events to NVCM.")

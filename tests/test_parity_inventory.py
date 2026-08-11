@@ -23,7 +23,11 @@ from nv_config_manager_dcim_netbox._mappers import (
     host_metadata_from_gql,
     network_device_from_rest,
 )
+from nv_config_manager_dcim_netbox.fabric_common import STATUS_PATH
 from tests._fake import fake_client as _client
+
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = [pytest.mark.inventory, pytest.mark.reference, pytest.mark.ipam, pytest.mark.hosts]
 
 _SETTINGS = {"server": "https://netbox.example", "token": "t"}
 
@@ -84,6 +88,41 @@ async def test_mac_only_filter_no_match_returns_empty_not_fleet():
     assert result == []
 
 
+async def test_mac_and_device_ids_intersect_rather_than_union():
+    # NetBox ORs a repeated id param, so appending device_ids and the MAC-resolved ids
+    # separately returned their union: device 9 (not requested) plus 1/2 (wrong MAC).
+    client = _capture(
+        rest_rows={"dcim/interfaces/": [{"id": 5, "device": {"id": 9}}]},
+    )
+    result = await client.get_network_devices(
+        DeviceInventoryFilter(device_ids=["1", "2"], mac_addresses=["aa:bb:cc:00:00:01"])
+    )
+    assert result == []
+    # Empty intersection short-circuits: no device query is issued at all.
+    assert not any(path == "dcim/devices/" for path, _ in client._calls)
+
+
+async def test_mac_and_device_ids_intersection_keeps_the_overlap():
+    client = _capture(
+        rest_rows={
+            "dcim/interfaces/": [{"id": 5, "device": {"id": 2}}, {"id": 6, "device": {"id": 9}}],
+            "dcim/devices/": [_rest_device(name="leaf-02", device_id=2)],
+        },
+    )
+    result = await client.get_network_devices(
+        DeviceInventoryFilter(device_ids=["1", "2"], mac_addresses=["aa:bb:cc:00:00:01"])
+    )
+    assert [d.name for d in result] == ["leaf-02"]
+    ids = [
+        value
+        for path, params in client._calls
+        if path == "dcim/devices/"
+        for key, value in params
+        if key == "id"
+    ]
+    assert ids == ["2"]
+
+
 # -- Fix 2: duplicate device names -------------------------------------------
 
 
@@ -117,17 +156,17 @@ async def test_get_host_devices_duplicate_name_raises():
 # -- Fix 3: NVCM status-flag mapping + filtering -----------------------------
 
 
-def test_network_device_status_flags_from_custom_fields():
-    device = _rest_device(custom_fields={"nvcm_render_enabled": True, "nvcm_ztp_enabled": True})
-    nd = network_device_from_rest(device)
+def test_network_device_status_flags_from_the_device_config_status():
+    status = {"render_enabled": True, "ztp_enabled": True}
+    nd = network_device_from_rest(_rest_device(), status)
     assert nd.render_enabled is True
     assert nd.ztp_enabled is True
-    # Fields not present on the device degrade to False.
+    # Flags absent from the status record degrade to False.
     assert nd.deploy_enabled is False
     assert nd.backup_enabled is False
 
 
-def test_network_device_status_flags_default_false_without_custom_fields():
+def test_network_device_status_flags_default_false_without_a_status_record():
     nd = network_device_from_rest(_rest_device())
     assert (nd.render_enabled, nd.deploy_enabled, nd.backup_enabled, nd.ztp_enabled) == (
         False,
@@ -137,13 +176,27 @@ def test_network_device_status_flags_default_false_without_custom_fields():
     )
 
 
-async def test_status_flag_filters_become_cf_query_params():
-    client = _capture(rest_rows={"dcim/devices/": []})
+def test_network_device_status_flags_ignore_device_custom_fields():
+    # A hand-created or imported nvcm_* custom field is not a status record.
+    device = _rest_device(custom_fields={"nvcm_render_enabled": True, "nvcm_ztp_enabled": True})
+    assert network_device_from_rest(device).render_enabled is False
+
+
+async def test_status_flag_filters_query_the_plugin_status_endpoint():
+    client = _capture(rest_rows={STATUS_PATH: [{"id": 1, "device": 8}]})
     await client.get_network_devices(DeviceInventoryFilter(render_enabled=True, ztp_enabled=False))
-    path, params = client._calls[-1]
-    assert path == "dcim/devices/"
-    assert ("cf_nvcm_render_enabled", "true") in params
-    assert ("cf_nvcm_ztp_enabled", "false") in params
+    calls = dict((path, params) for path, params in client._calls)
+    assert ("render_enabled", "true") in calls[STATUS_PATH]
+    assert ("ztp_enabled", "false") in calls[STATUS_PATH]
+    # Applied to the device read as an id selection, with no cf_* filter.
+    assert ("id", "8") in calls["dcim/devices/"]
+    assert not any(key.startswith("cf_nvcm_") for key, _ in calls["dcim/devices/"])
+
+
+async def test_status_flags_matching_no_device_returns_empty_not_the_fleet():
+    client = _capture(rest_rows={STATUS_PATH: []})
+    assert await client.get_network_devices(DeviceInventoryFilter(render_enabled=True)) == []
+    assert not any(path == "dcim/devices/" for path, _ in client._calls)
 
 
 # -- Fix 4: list_statuses null / unknown content type ------------------------
@@ -241,31 +294,48 @@ async def test_set_primary_mac_reuses_across_separators():
 # -- Fix 8: managed-only scoping ---------------------------------------------
 
 
-async def test_list_devices_managed_only_scopes_by_render_cf():
-    client = _capture(rest_rows={"dcim/devices/": []})
+async def test_list_devices_managed_only_scopes_by_render_enabled_status():
+    client = _capture(rest_rows={STATUS_PATH: [{"id": 1, "device": 2}]})
     await client.list_devices(DCIMDeviceSelectionFilter(managed_only=True))
-    path, params = client._calls[-1]
-    assert path == "dcim/devices/"
-    assert ("cf_nvcm_render_enabled", "true") in params
+    calls = dict((path, params) for path, params in client._calls)
+    assert ("render_enabled", "true") in calls[STATUS_PATH]
+    assert ("id", "2") in calls["dcim/devices/"]
+
+
+async def test_list_devices_managed_only_without_status_records_is_empty():
+    client = _capture(rest_rows={STATUS_PATH: []})
+    assert await client.list_devices(DCIMDeviceSelectionFilter(managed_only=True)) == []
+    assert not any(path == "dcim/devices/" for path, _ in client._calls)
 
 
 async def test_list_tenants_managed_only_collects_distinct_device_tenants():
+    # The devices are read over GraphQL asking only for the nested tenant/role,
+    # rather than paginating every field of the whole managed fleet over REST.
     devices = [
-        {"id": 1, "tenant": {"id": 5, "name": "NGC"}},
-        {"id": 2, "tenant": {"id": 5, "name": "NGC"}},
-        {"id": 3, "tenant": {"id": 6, "name": "ACME"}},
-        {"id": 4, "tenant": None},
+        {"tenant": {"id": 5, "name": "NGC"}},
+        {"tenant": {"id": 5, "name": "NGC"}},
+        {"tenant": {"id": 6, "name": "ACME"}},
+        {"tenant": None},
     ]
-    client = _client(rest_list={"dcim/devices/": devices})
+    client = _client(
+        rest_list={STATUS_PATH: [{"id": i, "device": i} for i in (1, 2, 3, 4)]},
+        gql={"device_list": devices},
+    )
     result = await client.list_tenants(managed_only=True)
     assert sorted((s.id, s.name) for s in result) == [("5", "NGC"), ("6", "ACME")]
 
 
 async def test_list_roles_managed_only_collects_distinct_device_roles():
-    devices = [
-        {"id": 1, "role": {"id": 2, "name": "Leaf"}},
-        {"id": 2, "role": {"id": 3, "name": "Spine"}},
-    ]
-    client = _client(rest_list={"dcim/devices/": devices})
+    devices = [{"role": {"id": 2, "name": "Leaf"}}, {"role": {"id": 3, "name": "Spine"}}]
+    client = _client(
+        rest_list={STATUS_PATH: [{"id": 1, "device": 1}, {"id": 2, "device": 2}]},
+        gql={"device_list": devices},
+    )
     result = await client.list_roles(managed_only=True)
     assert sorted((s.id, s.name) for s in result) == [("2", "Leaf"), ("3", "Spine")]
+
+
+async def test_managed_only_selections_without_status_records_query_nothing():
+    client = _capture(rest_rows={STATUS_PATH: []})
+    assert await client.list_roles(managed_only=True) == []
+    assert not any(path == "dcim/devices/" for path, _ in client._calls)

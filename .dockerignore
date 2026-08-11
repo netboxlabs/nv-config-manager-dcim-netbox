@@ -1,0 +1,32 @@
+# Keep the build context to what the wheel build needs (see Dockerfile's
+# `COPY . /build/provider`). Without it the whole working tree is uploaded and
+# baked into a layer, API_TOKENS included.
+
+# Secrets and generated config
+API_TOKENS
+generated/
+*.env
+!build/versions.env
+
+# Local environments and VCS
+.venv/
+venv/
+.git/
+.github/
+*.egg-info/
+__pycache__/
+*.py[cod]
+
+# Tool caches and coverage artifacts
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local scratch output not needed to build the wheel
+out.txt
+rd.json
+tests/
+docs/
+deploy/

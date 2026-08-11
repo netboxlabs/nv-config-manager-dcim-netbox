@@ -9,6 +9,9 @@ from nv_config_manager_dcim import DCIMNotFoundError
 
 from tests._fake import fake_client as _client
 
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = pytest.mark.hosts
+
 _HOST_GQL = {
     "id": "1",
     "name": "dpu-01",

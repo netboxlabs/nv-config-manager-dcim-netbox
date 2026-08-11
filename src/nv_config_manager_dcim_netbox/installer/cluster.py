@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import json
+import shlex
 from pathlib import Path
 
 from nv_config_manager_dcim_netbox.installer.remote import LocalRunner, Runner
@@ -53,8 +54,9 @@ def install_netbox(
     namespace: str,
     api_token: str,
     image_repository: str,
-    image_tag: str,
+    image_tag: str | None = None,
     nats_password: str | None = None,
+    extra_set: list[str] | None = None,
     timeout: str = "10m",
     runner: Runner | None = None,
 ) -> None:
@@ -66,6 +68,14 @@ def install_netbox(
 
     ``chart_ref`` is a path as the *runner* sees it, so the Air path passes the
     chart's location on the sim box rather than a local one.
+
+    An empty ``image_tag`` omits the flag, leaving the chart's own
+    ``netbox.image.tag``. Passing ``--set netbox.image.tag=`` would override it with
+    an empty string, and the subchart then falls back to its appVersion — a tag that
+    was never built.
+
+    ``extra_set`` carries caller-supplied ``key=value`` overrides, appended last so
+    they win over the ones built here.
     """
     argv = [
         "helm",
@@ -80,14 +90,16 @@ def install_netbox(
         f"netbox.superuser.apiToken={api_token}",
         "--set",
         f"netbox.image.repository={image_repository}",
-        "--set",
-        f"netbox.image.tag={image_tag}",
         "--wait",
         "--timeout",
         timeout,
     ]
+    if image_tag:
+        argv += ["--set", f"netbox.image.tag={image_tag}"]
     if nats_password:
         argv += ["--set", f"nvcm.natsPassword={nats_password}"]
+    for override in extra_set or ():
+        argv += ["--set", override]
     (runner or LocalRunner()).stream(argv)
 
 
@@ -170,6 +182,10 @@ def publish_test_event(
 
     Proves consumer -> provider -> render dispatch without needing a real NetBox
     edit, so it works even before any device exists.
+
+    The password reaches the pod on stdin for the same reason ``run_nvcm_init``
+    does it: as a ``kubectl run`` argument it is persisted in the pod spec, where
+    anyone with `kubectl get pod -o yaml` can read it.
     """
     envelope = json.dumps(
         {
@@ -183,6 +199,13 @@ def publish_test_event(
             "contract_version": "1.0",
         }
     )
+    script = (
+        "set -e\n"
+        f"export NATS_PASSWORD={shlex.quote(nats_password)}\n"
+        "exec nats --server nats://nv-config-manager-nats:4222 "
+        f'--user nv-config-manager --password "$NATS_PASSWORD" pub {shlex.quote(subject)} '
+        f"{shlex.quote(envelope)}\n"
+    )
     return kubectl(
         "run",
         "nvcm-netbox-verify",
@@ -191,19 +214,13 @@ def publish_test_event(
         "--rm",
         "--attach",
         "--quiet",
+        "--stdin",
         "--command",
         "--",
-        "nats",
-        "--server",
-        "nats://nv-config-manager-nats:4222",
-        "--user",
-        "nv-config-manager",
-        "--password",
-        nats_password,
-        "pub",
-        subject,
-        envelope,
+        "sh",
+        "-s",
         namespace=namespace,
+        stdin=script,
         runner=runner,
     )
 

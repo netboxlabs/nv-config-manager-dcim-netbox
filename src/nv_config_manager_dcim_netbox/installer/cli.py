@@ -51,6 +51,33 @@ def _nvcm_installer_argv(nvcm_repo: Path, *args: str) -> list[str]:
     ]
 
 
+def _config_options(
+    base: dict,
+    *,
+    api_token: str,
+    namespace: str,
+    size: str,
+    provider_image: str | None = None,
+    public_url: str | None = None,
+) -> cfg.ConfigOptions:
+    """Resolve the installer config options `config` and `up` both write.
+
+    Shared so the two cannot drift: `up` had its own copy and omitted the
+    public_url fallback, resetting a profile's value to the default port-forward.
+    """
+    dcim = base.get("dcim", {})
+    defaults = cfg.ConfigOptions(api_token=api_token)
+    return cfg.ConfigOptions(
+        api_token=api_token,
+        namespace=namespace,
+        size=size,
+        provider_image=provider_image
+        or (dcim.get("provider_packages") or [{}])[0].get("image")
+        or defaults.provider_image,
+        netbox_public_url=public_url or dcim.get("public_url") or defaults.netbox_public_url,
+    )
+
+
 def _resolve_nvcm_repo(nvcm_repo: Path) -> Path:
     resolved = nvcm_repo.expanduser().resolve()
     if not (resolved / "installer" / "pyproject.toml").is_file():
@@ -128,17 +155,13 @@ def config_command(
             "The plugin silently skips installing a malformed token."
         )
 
-    defaults = cfg.ConfigOptions(api_token=token)
-    options = cfg.ConfigOptions(
+    options = _config_options(
+        base,
         api_token=token,
         namespace=namespace,
         size=size,
-        provider_image=provider_image
-        or (base.get("dcim", {}).get("provider_packages") or [{}])[0].get("image")
-        or defaults.provider_image,
-        netbox_public_url=public_url
-        or base.get("dcim", {}).get("public_url")
-        or defaults.netbox_public_url,
+        provider_image=provider_image,
+        public_url=public_url,
     )
     written = cfg.write_config(cfg.apply_options(base, options), output)
     click.echo(f"Wrote {written}")
@@ -230,7 +253,7 @@ def up(
         namespace=namespace,
         api_token=token,
         image_repository=netbox_image,
-        image_tag=netbox_tag or "",
+        image_tag=netbox_tag,
     )
     cluster.wait_for_netbox(namespace)
     _ok("NetBox rolled out")
@@ -243,13 +266,8 @@ def up(
     step += 1
     _step(step, total, "Generating the NVCM installer config")
     base = cfg.load_profile()
-    options = cfg.ConfigOptions(
-        api_token=token,
-        namespace=namespace,
-        size=size,
-        provider_image=provider_image
-        or (base.get("dcim", {}).get("provider_packages") or [{}])[0].get("image")
-        or cfg.ConfigOptions(api_token=token).provider_image,
+    options = _config_options(
+        base, api_token=token, namespace=namespace, size=size, provider_image=provider_image
     )
     config = cfg.apply_options(base, options)
     written = cfg.write_config(config, config_out)
@@ -301,7 +319,7 @@ def up(
             namespace=namespace,
             api_token=token,
             image_repository=netbox_image,
-            image_tag=netbox_tag or "",
+            image_tag=netbox_tag,
             nats_password=nats_password,
         )
         _ok("NetBox publishing to NATS")

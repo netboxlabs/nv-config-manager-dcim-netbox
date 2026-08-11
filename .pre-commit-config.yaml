@@ -2,7 +2,10 @@
 # See https://pre-commit.com/hooks.html for more hooks
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.14.1
+    # Keep in step with the pin in .github/workflows/ci.yml and the `ruff` floor
+    # in pyproject's dev group: three different ruff versions format the same tree
+    # three different ways.
+    rev: v0.15.11
     hooks:
       - id: ruff
         name: "Ruff linter"

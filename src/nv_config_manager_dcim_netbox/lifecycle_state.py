@@ -13,6 +13,7 @@ these records hold the flags and pointers. A device is "managed" when its
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -22,43 +23,28 @@ from nv_config_manager_dcim import (
     RenderTemplateVersion,
 )
 
-from nv_config_manager_dcim_netbox._mappers import fk_id
+from nv_config_manager_dcim_netbox._mappers import device_pk as _device_pk
 from nv_config_manager_dcim_netbox.fabric_common import (
     BACKUP_PATH as _BACKUP_PATH,
 )
+from nv_config_manager_dcim_netbox.fabric_common import DEVICES_PATH
 from nv_config_manager_dcim_netbox.fabric_common import (
     INTENDED_PATH as _INTENDED_PATH,
 )
 from nv_config_manager_dcim_netbox.fabric_common import (
     STATUS_PATH as _STATUS_PATH,
 )
+from nv_config_manager_dcim_netbox.fabric_common import (
+    chunked as _chunked,
+)
 
 if TYPE_CHECKING:
     from nv_config_manager_dcim import ConfigurationBackupIntent, IntendedConfigurationUpdate
 
+logger = logging.getLogger(__name__)
+
 # Platform slugs eligible for backup (matches the managed-fleet platforms).
 _BACKUP_PLATFORMS = ("arista-eos", "cumulus-linux", "nv-os")
-
-# Device ids per ``device_id`` list query. Repeating the param for a whole fleet
-# builds a query string long enough for a proxy to reject with 414, so the reads
-# that filter by many ids walk the fleet in chunks.
-_ID_CHUNK = 100
-
-
-def _device_pk(row: dict) -> str | None:
-    """Return the NetBox device PK from a plugin row's ``device`` field.
-
-    The plugin's serializers may render the FK as a nested brief object or a bare
-    PK depending on the endpoint, so read either shape.
-    """
-    pk = fk_id(row.get("device"))
-    return str(pk) if pk is not None else None
-
-
-def _chunked(values: list[str], size: int = _ID_CHUNK):
-    """Yield ``values`` in fixed-size chunks."""
-    for start in range(0, len(values), size):
-        yield values[start : start + size]
 
 
 class NetBoxLifecycleStateMixin:
@@ -70,12 +56,25 @@ class NetBoxLifecycleStateMixin:
         return rows[0] if rows else None
 
     async def _upsert_for_device(self, path: str, device_id: str, body: dict) -> None:
-        """Create or update the per-device record at ``path``."""
+        """Create or update the per-device record at ``path``.
+
+        Only for callers supplying a *complete* body: the plugin's IntendedConfig and
+        BackupConfig require every config-store pointer field, so the create branch
+        rejects a partial one. Partial updates go through ``_patch_for_device``.
+        """
         existing = await self._one_for_device(path, device_id)
         if existing:
             await self.rest_request("PATCH", f"{path}{existing['id']}/", json=body)
         else:
             await self.rest_request("POST", path, json={"device": int(device_id), **body})
+
+    async def _patch_for_device(self, path: str, device_id: str, body: dict) -> bool:
+        """Patch fields onto an existing per-device record; False if there is none."""
+        existing = await self._one_for_device(path, device_id)
+        if not existing:
+            return False
+        await self.rest_request("PATCH", f"{path}{existing['id']}/", json=body)
+        return True
 
     async def get_render_device_status(self, device_id: str) -> RenderDeviceStatus | None:
         status = await self._one_for_device(_STATUS_PATH, device_id)
@@ -133,9 +132,21 @@ class NetBoxLifecycleStateMixin:
         )
 
     async def update_render_template_version(self, device_id: str, template_version: str) -> None:
-        await self._upsert_for_device(
+        """Record a template-version change on the device's existing intended config.
+
+        Patch-only, matching the reference provider: a template_version alone is not
+        a valid IntendedConfig (the plugin also requires the config-store pointer
+        fields), and a device with no record has never been rendered.
+        """
+        patched = await self._patch_for_device(
             _INTENDED_PATH, device_id, {"template_version": template_version}
         )
+        if not patched:
+            logger.warning(
+                "No intended config for device %s; not recording template version %s",
+                device_id,
+                template_version,
+            )
 
     async def get_backup_enabled_device_ids(self, is_aggregate_managed: bool) -> set[str]:
         # Backup-enabled statuses intersected with in-service devices on
@@ -152,7 +163,7 @@ class NetBoxLifecycleStateMixin:
                     ("is_aggregate_managed", str(is_aggregate_managed).lower()),
                 ],
             ),
-            self.rest_list("dcim/devices/", params),
+            self.rest_list(DEVICES_PATH, params),
         )
         backup_enabled = {pk for s in statuses if (pk := _device_pk(s))}
         eligible = {str(d["id"]) for d in devices}

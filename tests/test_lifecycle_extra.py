@@ -4,8 +4,12 @@
 
 from __future__ import annotations
 
+import pytest
+
 from tests._fake import fake_client as _client
 
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = pytest.mark.state
 _STATUS = "plugins/nv-config-manager/device-config-statuses/"
 _INTENDED = "plugins/nv-config-manager/intended-configs/"
 _BACKUP = "plugins/nv-config-manager/backup-configs/"
@@ -36,14 +40,20 @@ async def test_get_render_template_versions_reads_nested_device_fk():
     assert [(r.device_id, r.template_version) for r in result] == [("5", "v1")]
 
 
-async def test_update_render_template_version_creates_when_absent():
+async def test_update_render_template_version_patches_the_existing_record():
     record = []
-    # no existing intended-config row -> POST create
+    client = _client(rest_list={_INTENDED: [{"id": 12, "device": 5}]}, record=record)
+    await client.update_render_template_version("5", "v2")
+    assert record == [("PATCH", f"{_INTENDED}12/", {"template_version": "v2"})]
+
+
+async def test_update_render_template_version_does_not_create_when_absent():
+    # A template_version alone is not a valid IntendedConfig (the plugin requires the
+    # config-store pointer fields too), so a create here always 400s.
+    record = []
     client = _client(rest_list={_INTENDED: []}, record=record)
     await client.update_render_template_version("5", "v2")
-    posts = [(p, body) for method, p, body in record if method == "POST"]
-    assert posts and posts[0][0] == _INTENDED
-    assert posts[0][1]["device"] == 5 and posts[0][1]["template_version"] == "v2"
+    assert not [p for method, p, _ in record if method == "POST"]
 
 
 async def test_get_backup_enabled_device_ids_intersects_eligible():

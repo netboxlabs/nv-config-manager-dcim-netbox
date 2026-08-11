@@ -108,11 +108,9 @@ class NetBoxFirmwareMixin:
     # -- helpers -------------------------------------------------------------
 
     async def _firmware_targets(self, site: str | None = None) -> dict:
-        # Scope the targets config-context to the device's site when known.
-        if site:
-            contexts = await self.config_contexts_for_profile(_FIRMWARE_TARGETS_PROFILE, site)
-        else:
-            contexts = await self.config_contexts_for_profile(_FIRMWARE_TARGETS_PROFILE)
+        # Scope the targets config-context to the device's site when known; the
+        # callee already treats a falsy site as unscoped.
+        contexts = await self.config_contexts_for_profile(_FIRMWARE_TARGETS_PROFILE, site or None)
         if not contexts:
             return {}
         return (contexts[0].get("data") or {}).get("firmware-targets") or {}

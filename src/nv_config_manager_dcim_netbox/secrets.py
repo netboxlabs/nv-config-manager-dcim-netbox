@@ -27,12 +27,19 @@ class NetBoxSecretsMixin:
         data = await self.graphql_query(_DEVICE_CONFIG_CONTEXT_QUERY, {"id": device_id})
         return (data.get("device") or {}).get("config_context") or {}
 
-    async def get_device_password_mapping_users(self, device_id: str) -> set[str]:
+    async def _device_password_mappings(self, device_id: str) -> dict:
+        """Return the device's ``password_mappings``, or ``{}`` if unusable.
+
+        One shape guard, so the two password reads cannot disagree on what counts as
+        a valid mapping.
+        """
         config_context = await self._device_config_context(device_id)
         password_mappings = config_context.get("password_mappings")
-        if isinstance(password_mappings, dict):
-            return {str(username) for username in password_mappings}
-        return set()
+        return password_mappings if isinstance(password_mappings, dict) else {}
+
+    async def get_device_password_mapping_users(self, device_id: str) -> set[str]:
+        mappings = await self._device_password_mappings(device_id)
+        return {str(username) for username in mappings}
 
     async def get_device_secret_versions(self, device_id: str) -> Mapping[str, str]:
         """Map the device config context to normalized secret-version intent."""
@@ -48,10 +55,7 @@ class NetBoxSecretsMixin:
 
     async def get_device_password_secret_names(self, device_id: str) -> Mapping[str, str]:
         """Map device config-context password mappings to username→secret-name intent."""
-        config_context = await self._device_config_context(device_id)
-        password_mappings = config_context.get("password_mappings")
-        if not isinstance(password_mappings, dict):
-            return {}
+        password_mappings = await self._device_password_mappings(device_id)
         result: dict[str, str] = {}
         for username, user_config in password_mappings.items():
             if not isinstance(username, str) or not isinstance(user_config, dict):

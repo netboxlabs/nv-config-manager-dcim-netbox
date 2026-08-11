@@ -9,12 +9,15 @@ device custom fields.
 
 from __future__ import annotations
 
+import pytest
 from nv_config_manager_dcim import (
     ConfigurationBackupIntent,
     IntendedConfigurationUpdate,
     create_dcim_client,
 )
 
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = pytest.mark.state
 _SETTINGS = {"server": "https://netbox.example", "token": "t"}
 _STATUS = "plugins/nv-config-manager/device-config-statuses/"
 _INTENDED = "plugins/nv-config-manager/intended-configs/"

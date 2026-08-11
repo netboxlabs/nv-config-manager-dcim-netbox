@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 from typing import TYPE_CHECKING, Any
 
 from nv_config_manager_dcim import (
@@ -87,6 +88,9 @@ from nv_config_manager_dcim_netbox._mappers import choice_str, fk_id
 from nv_config_manager_dcim_netbox.fabric_common import (
     BGP_PEER_GROUPS_PATH,
     BGP_SESSIONS_PATH,
+    DEVICES_PATH,
+    INTERFACES_PATH,
+    IP_ADDRESSES_PATH,
     NVLINK_DOMAINS_PATH,
     PREFIXES_PATH,
     VLANS_PATH,
@@ -96,8 +100,7 @@ from nv_config_manager_dcim_netbox.fabric_common import (
 if TYPE_CHECKING:
     from nv_config_manager_dcim import RenderDataRequest
 
-DEVICES_PATH = "dcim/devices/"
-_IP_ADDRESSES_PATH = "ipam/ip-addresses/"
+logger = logging.getLogger(__name__)
 
 # How the reference provider selects a location's routing-relevant devices.
 _ROUTE_SERVER_TAG = "route-server"
@@ -515,6 +518,13 @@ def _bgp_instances(
     for session in sessions:
         local_asn = _str_or_none((session.get("local_as") or {}).get("asn"))
         if local_asn is None:
+            # local_as is nullable in netbox-bgp and the peering cannot be rendered
+            # without it. Logged, because the render otherwise succeeds with the
+            # neighbour simply missing from the config.
+            logger.warning(
+                "Skipping netbox-bgp session %s: no local_as ASN, so it cannot be rendered",
+                session.get("id"),
+            )
             continue
         inst = instances.setdefault(
             local_asn, {"status": choice_str(session.get("status")) or "active", "peers": []}
@@ -747,6 +757,26 @@ class NetBoxRenderMixin:
         except DCIMNotFoundError:
             return []
 
+    async def _optional_list(self, path: str, params: list[tuple[str, str]] | None = None):
+        """List an endpoint whose *filter values* may not exist in this NetBox.
+
+        Like ``_safe_list``, but also degrades on 400: NetBox validates slug-keyed
+        filters (``tag``, ``role``) against what exists, and these selections are
+        optional enrichment, so a rejected slug must not fail the whole render.
+        """
+        try:
+            return await self.rest_list(path, params)
+        except DCIMNotFoundError:
+            return []
+        except DCIMInvalidDataError as exc:
+            logger.warning(
+                "NetBox rejected the optional %s selection %s (%s); treating it as empty",
+                path,
+                params,
+                exc,
+            )
+            return []
+
     async def _assigned_overlays(
         self, device_id: str, interface_ids: set[str]
     ) -> tuple[set[str], dict[str, dict[str, Any]]]:
@@ -881,37 +911,70 @@ class NetBoxRenderMixin:
             l2_vnis=tuple(l2), l3_vnis=tuple(l3), l2_vni_vrfs=tuple(l2_vni_vrfs)
         )
 
+    async def _loopback_addresses(self, device_id: str) -> list[dict[str, Any]]:
+        """Return the IP addresses on the device's loopback interfaces.
+
+        Two queries because the IPAddress filterset has no interface-name filter —
+        only ``interface`` (exact name) and ``interface_id``. Resolve the loopbacks
+        first, where ``name__isw`` is real, then select their addresses by id.
+        ``interface__name__isw`` is not a filter NetBox knows, and it drops unknown
+        params rather than rejecting them, so it matched every address.
+        """
+        interfaces = await self._safe_list(
+            INTERFACES_PATH, [("device_id", device_id), ("name__isw", _LOOPBACK_PREFIX)]
+        )
+        interface_ids = sorted({str(i["id"]) for i in interfaces if i.get("id") is not None})
+        if not interface_ids:
+            return []
+        # Repeated interface_id params OR, so one query covers every loopback.
+        return await self._safe_list(
+            IP_ADDRESSES_PATH, [("interface_id", i) for i in interface_ids]
+        )
+
     async def _location_topology(self, site_id: str | None) -> RenderLocationTopology:
         """Route servers and WAN routers at the site, for inter-site peering.
 
         Selected the same way the reference provider selects them: route servers
         by the ``route-server`` tag, WAN routers by role. Both are location-scoped.
+
+        The slugs are hardcoded and come from the plugin's ``nvcm_load_bootstrap``;
+        ``_optional_list`` keeps a NetBox missing any of them from failing the render.
         """
         if not site_id:
             return RenderLocationTopology()
         route_servers, wan_routers = await asyncio.gather(
-            self._safe_list(DEVICES_PATH, [("site_id", site_id), ("tag", _ROUTE_SERVER_TAG)]),
-            self._safe_list(
+            self._optional_list(DEVICES_PATH, [("site_id", site_id), ("tag", _ROUTE_SERVER_TAG)]),
+            self._optional_list(
                 DEVICES_PATH,
                 [("site_id", site_id), *(("role", role) for role in _WAN_ROLE_SLUGS)],
             ),
         )
-        mapped = await asyncio.gather(
-            *(self._location_device(d) for d in (*route_servers, *wan_routers))
+        # Mapped once per distinct device, then indexed back into both tuples: a
+        # border leaf can be both route-server-tagged and WAN-roled, and each
+        # _location_device costs its own loopback lookup.
+        by_id = {str(d["id"]): d for d in (*route_servers, *wan_routers) if d.get("id") is not None}
+        order = sorted(by_id)
+        mapped = dict(
+            zip(
+                order,
+                await asyncio.gather(*(self._location_device(by_id[i]) for i in order)),
+                strict=True,
+            )
         )
+
+        def selected(devices: list[dict[str, Any]]) -> tuple[RenderLocationDevice, ...]:
+            return tuple(mapped[str(d["id"])] for d in devices if str(d.get("id")) in mapped)
+
         return RenderLocationTopology(
-            route_servers=tuple(mapped[: len(route_servers)]),
-            wan_routers=tuple(mapped[len(route_servers) :]),
+            route_servers=selected(route_servers),
+            wan_routers=selected(wan_routers),
         )
 
     async def _location_device(self, device: dict[str, Any]) -> RenderLocationDevice:
         """One routing-relevant device: its name, BGP ASN and loopback addresses."""
         context = device.get("config_context") or {}
         bgp = context.get("bgp") if isinstance(context.get("bgp"), dict) else {}
-        addresses = await self._safe_list(
-            _IP_ADDRESSES_PATH,
-            [("device_id", str(device["id"])), ("interface__name__isw", _LOOPBACK_PREFIX)],
-        )
+        addresses = await self._loopback_addresses(str(device["id"]))
         loopbacks: list[str] = []
         for entry in addresses:
             address = _str_or_none(entry.get("address"))
@@ -995,20 +1058,16 @@ class NetBoxRenderMixin:
             if p.get("prefix")
         ]
 
-        # These four reads are independent of one another; run them concurrently
-        # rather than serialising four round trips per render.
+        # These reads are independent of one another; run them concurrently rather
+        # than serialising a round trip each per render.
         (
             bgp_sessions,
-            peer_groups,
             overlays,
             address_space,
             topology,
             nvlink_domains,
         ) = await asyncio.gather(
             self._safe_list(BGP_SESSIONS_PATH, [("device_id", str(device_id))]),
-            # Sessions nest only a brief peer_group, so the groups carrying the
-            # TTL in extra_attributes are fetched alongside and joined by id.
-            self._safe_list(BGP_PEER_GROUPS_PATH),
             self._overlays(device_id, interface_ids),
             self._location_address_space(site_id, site_prefixes if site_id else None),
             self._location_topology(site_id),
@@ -1018,6 +1077,23 @@ class NetBoxRenderMixin:
         )
         nvlink_topology = (
             _str_or_none(nvlink_domains[0].get("topology")) if nvlink_domains else None
+        )
+
+        # Sessions nest only a brief peer_group, so the groups carrying the TTL in
+        # extra_attributes are fetched separately and joined by id — after the
+        # sessions, scoped to the ids they reference, so this does not paginate the
+        # whole fabric's peer-group table per render.
+        peer_groups = list(
+            (
+                await self._id_map(
+                    BGP_PEER_GROUPS_PATH,
+                    {
+                        str(pk)
+                        for s in bgp_sessions
+                        if (pk := fk_id(s.get("peer_group"))) is not None
+                    },
+                )
+            ).values()
         )
 
         lag_members = _lag_member_map(interfaces)

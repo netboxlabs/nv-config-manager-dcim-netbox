@@ -4,12 +4,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 
 from nv_config_manager_dcim import DCIMInvalidDataError, DCIMNotFoundError, ZTPDevice
 
-from nv_config_manager_dcim_netbox._mappers import strip_mask
+from nv_config_manager_dcim_netbox._mappers import require_device_name, strip_mask
 from nv_config_manager_dcim_netbox.fabric_common import INTENDED_PATH as _INTENDED_PATH
+
+logger = logging.getLogger(__name__)
 
 # ``_INTENDED_PATH`` holds the per-device intended-config records written by the
 # render pipeline; each carries the config_store_instance the device's rendered
@@ -24,6 +27,25 @@ from nv_config_manager_dcim_netbox.fabric_common import INTENDED_PATH as _INTEND
 # target NetBox to register that choice (see the plugin's field_choices.py); a
 # NetBox without it will reject the status write with a 400.
 ZTP_PROVISIONED_STATUS = "provisioned"
+
+# The config store's mTLS API is the same host as its UI with the leading `ui`
+# label swapped for `api-mtls`. Anchored on that label: an unanchored replace also
+# rewrites `ui` inside later labels, producing a host that does not resolve.
+_UI_LABEL_RE = re.compile(r"(?<=//)ui(?=\.)")
+_MTLS_LABEL = "api-mtls"
+
+
+def _mtls_endpoint(config_store_instance: str) -> str:
+    """Return the mTLS API endpoint for a config-store UI URL."""
+    endpoint, replaced = _UI_LABEL_RE.subn(_MTLS_LABEL, config_store_instance, count=1)
+    if not replaced:
+        logger.warning(
+            "config_store_instance %r has no leading 'ui' host label; ZTP will use it "
+            "unchanged, which may be the browser UI rather than the mTLS API",
+            config_store_instance,
+        )
+    return endpoint
+
 
 _ZTP_DEVICE_QUERY = """
 query ($id: ID!) {
@@ -65,13 +87,14 @@ class NetBoxZTPMixin:
             config_store_instance = None
             intended = await self.rest_list(_INTENDED_PATH, [("device_id", str(device_id))])
             if intended and intended[0].get("config_store_instance"):
-                config_store_instance = re.sub(
-                    "ui", "api-mtls", intended[0]["config_store_instance"]
-                )
+                config_store_instance = _mtls_endpoint(intended[0]["config_store_instance"])
             return ZTPDevice(
                 # Keys the config-store lookup for the boot-script/config files.
                 device_id=str(device["id"]),
-                name=device["name"],
+                # ZTPDevice.name is a required str and Device.name is nullable in
+                # NetBox; the pydantic error for None is a ValueError, which the
+                # handler below does not catch.
+                name=require_device_name(device),
                 addresses=addresses,
                 platform_name=(device.get("platform") or {}).get("name") or "",
                 firmware_version=firmware,

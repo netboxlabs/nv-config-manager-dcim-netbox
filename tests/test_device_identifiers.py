@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from nv_config_manager_dcim import RenderDataRequest
 
 from nv_config_manager_dcim_netbox.client import is_netbox_pk
 from tests._fake import fake_client as _client
 
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = [pytest.mark.inventory, pytest.mark.lifecycle]
 _STATUS = "plugins/nv-config-manager/device-config-statuses/"
 
 

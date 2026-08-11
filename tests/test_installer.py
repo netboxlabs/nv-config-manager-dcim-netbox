@@ -16,6 +16,7 @@ import pytest
 import yaml
 from click.testing import CliRunner
 
+from nv_config_manager_dcim_netbox.installer import cli, cluster
 from nv_config_manager_dcim_netbox.installer import config as cfg
 from nv_config_manager_dcim_netbox.installer.cli import _nvcm_installer_argv, main
 from nv_config_manager_dcim_netbox.installer.shell import require_tools
@@ -178,6 +179,52 @@ def test_require_tools_names_everything_missing():
     assert "also-not-real-xyz" in message
 
 
+# -- helm invocation ----------------------------------------------------------
+
+
+class _RecordingRunner:
+    """Captures the argv `cluster` builds instead of running it."""
+
+    def __init__(self) -> None:
+        self.argv: list[str] = []
+
+    def run(self, argv, *, stdin=None):
+        self.argv = list(argv)
+        return ""
+
+    def stream(self, argv):
+        self.argv = list(argv)
+
+    def upload(self, local, remote):
+        raise NotImplementedError
+
+
+def _install_argv(**kwargs):
+    runner = _RecordingRunner()
+    cluster.install_netbox(
+        "chart",
+        release="nb",
+        namespace="ns",
+        api_token="nbt_x.y",
+        image_repository="nv-config-manager-netbox",
+        runner=runner,
+        **kwargs,
+    )
+    return runner.argv
+
+
+def test_install_netbox_omits_the_image_tag_when_none_was_requested():
+    # `--set netbox.image.tag=` overrides the chart's tag with an empty string; the
+    # subchart then falls back to its appVersion, an image that was never built.
+    argv = _install_argv()
+    assert not any(arg.startswith("netbox.image.tag") for arg in argv)
+    assert "netbox.image.repository=nv-config-manager-netbox" in argv
+
+
+def test_install_netbox_sets_an_explicit_image_tag():
+    assert "netbox.image.tag=1.2.3" in _install_argv(image_tag="1.2.3")
+
+
 # -- chart --------------------------------------------------------------------
 
 
@@ -215,6 +262,33 @@ def test_chart_renders_and_wires_the_publisher():
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
 @pytest.mark.skipif(not (_CHART / "charts").is_dir(), reason="chart deps not fetched")
+def test_chart_image_tag_must_not_be_overridden_with_an_empty_string():
+    # Why install_netbox omits the flag: the subchart's image helper treats a falsy
+    # tag as unset and falls back to its appVersion.
+    def rendered_netbox_image(*extra):
+        out = subprocess.run(
+            ["helm", "template", "nb", str(_CHART), *extra],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        return {
+            line.split("image:", 1)[1].strip().strip('"')
+            for line in out.splitlines()
+            if "image:" in line and "nv-config-manager-netbox" in line
+        }
+
+    chart_values = yaml.safe_load((_CHART / "values.yaml").read_text())
+    chart_tag = chart_values["netbox"]["image"]["tag"]
+    assert rendered_netbox_image() == {f"nv-config-manager-netbox:{chart_tag}"}
+    # An empty override does not keep the chart's tag -- it replaces it.
+    assert rendered_netbox_image("--set", "netbox.image.tag=") != {
+        f"nv-config-manager-netbox:{chart_tag}"
+    }
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
+@pytest.mark.skipif(not (_CHART / "charts").is_dir(), reason="chart deps not fetched")
 def test_chart_falls_back_to_log_publisher_without_a_nats_password():
     # NetBox must come up before NVCM exists (it owns the API token), so a missing
     # NATS password has to degrade rather than fail.
@@ -226,3 +300,39 @@ def test_chart_falls_back_to_log_publisher_without_a_nats_password():
     ).stdout
     assert "event_publisher: log" in rendered
     assert "event_publisher: nats" not in rendered
+
+
+def test_publish_test_event_keeps_the_password_out_of_argv():
+    # As a `kubectl run` argument it is persisted in the pod spec; use stdin.
+    runner = _RecordingRunner()
+    cluster.publish_test_event("ns", "subject", "s3cr3t-nats-pw", "7", runner=runner)
+    assert "s3cr3t-nats-pw" not in " ".join(runner.argv)
+    assert runner.argv[-2:] == ["sh", "-s"]
+
+
+def test_install_netbox_appends_extra_set_overrides_last():
+    # netbox_helm_set was a documented field nothing read, so it was dropped.
+    argv = _install_argv(image_tag="1.2.3", extra_set=["netbox.replicaCount=3"])
+    assert "netbox.replicaCount=3" in argv
+    assert argv.index("netbox.replicaCount=3") > argv.index("netbox.image.tag=1.2.3")
+
+
+def test_config_options_shared_by_config_and_up_honour_the_profile_public_url():
+    # `up` had its own copy and omitted the public_url fallback.
+    base = {
+        "dcim": {"public_url": "https://netbox.corp", "provider_packages": [{"image": "img:1"}]}
+    }
+    options = cli._config_options(base, api_token="nbt_x.y", namespace="ns", size="small")
+    assert options.netbox_public_url == "https://netbox.corp"
+    assert options.provider_image == "img:1"
+    # An explicit flag still wins over the profile.
+    explicit = cli._config_options(
+        base, api_token="nbt_x.y", namespace="ns", size="small", public_url="http://other"
+    )
+    assert explicit.netbox_public_url == "http://other"
+
+
+def test_provider_image_tag_tracks_the_package_version():
+    # Hardcoded, a version bump left the installer asking for an unbuilt tag.
+    assert cfg.PROVIDER_IMAGE.endswith(f":{cfg.IMAGE_TAG}")
+    assert cfg.ConfigOptions(api_token="nbt_x.y").provider_image == cfg.PROVIDER_IMAGE

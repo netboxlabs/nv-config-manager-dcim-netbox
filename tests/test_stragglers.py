@@ -4,9 +4,13 @@
 
 from __future__ import annotations
 
+import pytest
 from nv_config_manager_dcim import DeviceVRF
 
 from tests._fake import fake_client
+
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = [pytest.mark.ipam, pytest.mark.secrets]
 
 
 async def test_get_device_vrfs_dedupes_by_id():

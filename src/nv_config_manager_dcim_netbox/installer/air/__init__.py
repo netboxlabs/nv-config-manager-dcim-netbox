@@ -12,8 +12,12 @@ Needs the `air` extra (see `make setup-air`).
 from __future__ import annotations
 
 
-class AirSupportUnavailable(RuntimeError):
-    """Raised when the `air` extra is not installed."""
+class AirSupportUnavailable(ImportError, RuntimeError):
+    """Raised when the `air` extra is not installed.
+
+    Also an ``ImportError``: this is an import failure, and it lets the air tests
+    skip themselves with ``pytest.importorskip`` on an install without the extra.
+    """
 
     def __init__(self, cause: Exception | None = None) -> None:
         super().__init__(

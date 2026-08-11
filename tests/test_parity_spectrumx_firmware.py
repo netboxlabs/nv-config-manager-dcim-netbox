@@ -19,6 +19,9 @@ from nv_config_manager_dcim import (
 
 from tests._fake import fake_client
 
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = [pytest.mark.spectrumx, pytest.mark.firmware]
+
 _VXLANS = "plugins/nv-config-manager/vxlans/"
 _OVERLAYS = "plugins/nv-config-manager/overlays/"
 _ASSIGN = "plugins/nv-config-manager/overlay-assignments/"
@@ -99,10 +102,54 @@ async def test_provision_fans_out_per_namespace_and_tags_vrf():
     assign_posts = [b for m, p, b in record if m == "POST" and p == _ASSIGN]
     # One VRF + assignment + VXLAN per namespace.
     assert len(vrf_posts) == len(vxlan_posts) == len(assign_posts) == 2
-    # Namespace is applied as a VRF tag via a follow-up PATCH (not in the POST body).
+    # Namespace is applied as a VRF tag via a follow-up PATCH (not in the POST body),
+    # alongside the `spectrumx` zone tag the RD allocator selects on.
     assert "tags" not in vrf_posts[0]
     tag_patches = [b for m, p, b in record if m == "PATCH" and p.startswith(_VRFS)]
-    assert {t["name"] for b in tag_patches for t in b["tags"]} == {"ns1", "ns2"}
+    assert {t["name"] for b in tag_patches for t in b["tags"]} == {"ns1", "ns2", "spectrumx"}
+    assert all({t["name"] for t in b["tags"]} >= {"spectrumx"} for b in tag_patches)
+    # And scoped to the site, the other half of that read's filter.
+    assert all(b["custom_fields"] == {"nvcm_site": "rack-1"} for b in vrf_posts)
+
+
+async def test_provisioned_vrf_is_visible_to_the_rd_allocator():
+    """The VRF provision writes must satisfy get_namespace_route_distinguishers.
+
+    That read filters on cf_nvcm_site and requires the zone tag, so a VRF missing
+    either is invisible and its RD gets reallocated.
+    """
+    record = []
+    client = _spx_client(overlay=None, tenant=7, record=record)
+    await client.provision_spectrum_x_vrf(
+        namespaces=["ns1"],
+        route_distinguisher="65001:3",
+        vnid=1700,
+        overlay_name="SpX",
+        site="dm-akron",
+        tenant="tenant-a",
+    )
+    vrf_post = next(b for m, p, b in record if m == "POST" and p == _VRFS)
+    vrf_tags = next(b for m, p, b in record if m == "PATCH" and p.startswith(_VRFS))["tags"]
+
+    # Replay the written VRF through the reader that allocates the next RD.
+    written = {
+        "id": 99,
+        "name": vrf_post["name"],
+        "rd": vrf_post["rd"],
+        "tags": [{"name": t["name"], "slug": t["name"]} for t in vrf_tags],
+        "custom_fields": vrf_post["custom_fields"],
+    }
+    seen_params: list[tuple[str, str]] = []
+
+    async def rest_list(path, params=None, **kwargs):
+        seen_params.extend(params or [])
+        site = dict(params or []).get("cf_nvcm_site")
+        return [written] if site == written["custom_fields"]["nvcm_site"] else []
+
+    client.rest_list = rest_list
+    result = await client.get_namespace_route_distinguishers("dm-akron", "spectrumx")
+    assert ("cf_nvcm_site", "dm-akron") in seen_params
+    assert {r.namespace_id: r.route_distinguishers for r in result} == {"ns1": ("65001:3",)}
 
 
 async def test_provision_rolls_back_created_objects_on_failure():

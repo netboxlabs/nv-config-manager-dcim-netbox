@@ -6,24 +6,32 @@ affected-device fan-out for each native event type the provider registers.
 
 from __future__ import annotations
 
+import pytest
 from nv_config_manager_dcim import DCIMChangeEvent
 
 from nv_config_manager_dcim_netbox.events import (
+    _HANDLERS,
     _bgp_session_changed,
-    _cable_changed,
-    _config_context_changed,
     _device_changed,
     _interface_changed,
-    _ip_address_changed,
     _overlay_assignment_changed,
     _parent_device_changed,
-    _prefix_changed,
-    _vrf_changed,
     register_render_event_handlers,
 )
 from nv_config_manager_dcim_netbox.provider import NetBoxProvider
 
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = pytest.mark.events
 _OVERLAY_TYPE = "netbox_nv_config_manager.overlayassignment"
+
+
+async def _dispatch(event, client):
+    """Route an event through the registration, not a directly-imported handler.
+
+    The cross-object handlers are built by binding a resolver in _HANDLERS, so
+    going through the table is what pins each object_type to the right resolver.
+    """
+    return await _HANDLERS[event.object_type](event, client)
 
 
 class _FanoutClient:
@@ -193,7 +201,7 @@ async def test_vrf_change_fans_out_to_interface_devices():
             ]
         }
     )
-    requests = await _vrf_changed(_event("ipam.vrf", "9"), client)
+    requests = await _dispatch(_event("ipam.vrf", "9"), client)
     assert sorted(r.device_id for r in requests) == ["3", "5"]  # deduplicated
 
 
@@ -206,7 +214,7 @@ async def test_ip_address_change_fans_out_to_assigned_device():
             }
         }
     )
-    requests = await _ip_address_changed(_event("ipam.ipaddress", "4"), client)
+    requests = await _dispatch(_event("ipam.ipaddress", "4"), client)
     assert [r.device_id for r in requests] == ["6"]
 
 
@@ -214,7 +222,7 @@ async def test_ip_address_not_on_interface_is_noop():
     client = _FanoutClient(
         rest_get={"ipam/ip-addresses/4/": {"assigned_object_type": "virtualization.vminterface"}}
     )
-    assert await _ip_address_changed(_event("ipam.ipaddress", "4"), client) == ()
+    assert await _dispatch(_event("ipam.ipaddress", "4"), client) == ()
 
 
 async def test_cable_change_fans_out_to_both_terminations():
@@ -226,7 +234,7 @@ async def test_cable_change_fans_out_to_both_terminations():
             }
         }
     )
-    requests = await _cable_changed(_event("dcim.cable", "2"), client)
+    requests = await _dispatch(_event("dcim.cable", "2"), client)
     assert sorted(r.device_id for r in requests) == ["1", "2"]
 
 
@@ -235,13 +243,13 @@ async def test_prefix_change_fans_out_by_scope():
         rest_get={"ipam/prefixes/8/": {"scope_type": "dcim.site", "scope_id": 3}},
         rest_list={"dcim/devices/": [{"id": 10}, {"id": 11}]},
     )
-    requests = await _prefix_changed(_event("ipam.prefix", "8"), client)
+    requests = await _dispatch(_event("ipam.prefix", "8"), client)
     assert sorted(r.device_id for r in requests) == ["10", "11"]
 
 
 async def test_prefix_without_scope_is_noop():
     client = _FanoutClient(rest_get={"ipam/prefixes/8/": {"scope_type": None, "scope_id": None}})
-    assert await _prefix_changed(_event("ipam.prefix", "8"), client) == ()
+    assert await _dispatch(_event("ipam.prefix", "8"), client) == ()
 
 
 async def test_config_context_change_fans_out_to_matching_devices():
@@ -251,13 +259,13 @@ async def test_config_context_change_fans_out_to_matching_devices():
         },
         rest_list={"dcim/devices/": [{"id": 20}]},
     )
-    requests = await _config_context_changed(_event("extras.configcontext", "5"), client)
+    requests = await _dispatch(_event("extras.configcontext", "5"), client)
     assert [r.device_id for r in requests] == ["20"]
 
 
 async def test_cross_object_delete_is_noop():
     # The object is gone on delete, so it can no longer be resolved.
-    assert await _vrf_changed(_event("ipam.vrf", "9", operation="delete"), None) == ()
+    assert await _dispatch(_event("ipam.vrf", "9", operation="delete"), None) == ()
 
 
 async def test_cross_object_resolution_error_is_noop():
@@ -268,7 +276,7 @@ async def test_cross_object_resolution_error_is_noop():
         async def rest_request(self, *args, **kwargs):
             raise RuntimeError("boom")
 
-    assert await _vrf_changed(_event("ipam.vrf", "9"), _Boom()) == ()
+    assert await _dispatch(_event("ipam.vrf", "9"), _Boom()) == ()
 
 
 async def test_a_malformed_device_id_drops_the_fanout_instead_of_raising():
@@ -295,4 +303,4 @@ async def test_multi_device_fanout_dedupes_and_preserves_order():
 
     requests = _requests_multi(_event("dcim.cable", "3"), [9, 4, 9, None, 4])
     assert [r.device_id for r in requests] == ["9", "4"]
-    assert await _cable_changed(_event("dcim.cable", "3"), client) == ()
+    assert await _dispatch(_event("dcim.cable", "3"), client) == ()

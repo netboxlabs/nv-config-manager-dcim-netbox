@@ -13,8 +13,12 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
+      # Both halves of `make lint`, so formatting drift cannot land on main and
+      # then surface as an unrelated diff in someone else's PR.
       - name: Ruff
         run: uvx ruff@0.15.11 check src/ tests/
+      - name: Ruff format
+        run: uvx ruff@0.15.11 format --check src/ tests/
 
   test:
     runs-on: ubuntu-latest
@@ -32,7 +36,10 @@ jobs:
       - name: Install
         run: |
           uv pip install --system ../nv-config-manager/components/dcim
-          uv pip install --system -e .
+          # The `installer` extra (click + PyYAML) is needed to *collect* the suite:
+          # test_installer.py and test_air.py import both at module scope. The `air`
+          # extra is not installed; those imports are guarded with importorskip.
+          uv pip install --system -e '.[installer]'
           uv pip install --system pytest pytest-asyncio
       - name: Tests
         run: pytest

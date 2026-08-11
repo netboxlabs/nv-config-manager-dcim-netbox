@@ -22,9 +22,26 @@ from nv_config_manager_dcim import (
 
 from tests._fake import fake_client as _client
 
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = pytest.mark.ib
+
 _PKEYS = "plugins/nv-config-manager/ib-pkeys/"
 _OVERLAYS = "plugins/nv-config-manager/overlays/"
 _ASSIGN = "plugins/nv-config-manager/overlay-assignments/"
+
+
+def _iface_assignment(assignment_id, interface_id, **extra):
+    """An OverlayAssignment row as NetBox returns it.
+
+    ``assigned_object_type`` matters: ``assigned_object_id`` is a GFK id, so a
+    device and an interface can share a pk and the provider filters on the type.
+    """
+    return {
+        "id": assignment_id,
+        "assigned_object_type": "dcim.interface",
+        "assigned_object_id": interface_id,
+        **extra,
+    }
 
 
 # -- topology + GUIDs -----------------------------------------------------------
@@ -195,7 +212,7 @@ async def test_ensure_ib_pkey_assignments_creates_new():
 
 async def test_remove_ib_pkey_assignments():
     record = []
-    client = _client(rest_list={_ASSIGN: [{"id": 30, "assigned_object_id": 11}]}, record=record)
+    client = _client(rest_list={_ASSIGN: [_iface_assignment(30, 11)]}, record=record)
     removed, unassigned = await client.remove_ib_pkey_assignments("10", ["11", "12"])
     # Contract: removed carries ASSIGNMENT ids (row 30); unassigned carries the
     # interface id (12) that had no assignment.

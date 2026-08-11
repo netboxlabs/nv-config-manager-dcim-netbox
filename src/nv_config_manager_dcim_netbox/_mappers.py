@@ -28,17 +28,10 @@ from nv_config_manager_dcim.workflow_models import (
     Platform,
 )
 
-# NVCM status custom fields on the NetBox device. ``nvcm_render_enabled`` and
-# ``nvcm_ztp_enabled`` are already used elsewhere in this provider (inventory /
-# DHCP); ``nvcm_deploy_enabled`` and ``nvcm_backup_enabled`` are the parity
-# additions. When a field is not defined on the device its value reads back as
-# ``None`` and the flag degrades to ``False`` (see ``_cf_flag``).
-_STATUS_FLAG_FIELDS = {
-    "render_enabled": "nvcm_render_enabled",
-    "deploy_enabled": "nvcm_deploy_enabled",
-    "backup_enabled": "nvcm_backup_enabled",
-    "ztp_enabled": "nvcm_ztp_enabled",
-}
+# NVCM per-device management flags: fields on the plugin's DeviceConfigStatus model,
+# not device custom fields (no nvcm_*_enabled custom field exists). The names are
+# both the model's fields and its filter names.
+_STATUS_FLAGS = ("render_enabled", "deploy_enabled", "backup_enabled", "ztp_enabled")
 
 # NetBox custom field carrying a host's operator-facing alias (parity with the
 # reference provider's ``cf_alias``). Absent field -> ``None``.
@@ -87,6 +80,16 @@ def fk_id(value: Any) -> Any:
     return value.get("id") if isinstance(value, dict) else value
 
 
+def device_pk(row: dict[str, Any]) -> str | None:
+    """Return the NetBox device PK from a plugin row's ``device`` field.
+
+    The plugin's serializers may render the FK as a nested brief object or a bare
+    PK depending on the endpoint, so read either shape.
+    """
+    pk = fk_id(row.get("device"))
+    return str(pk) if pk is not None else None
+
+
 def choice_value(value: Any) -> Any:
     """Return a NetBox choice's raw value (``{"value": …}``) or the value itself.
 
@@ -113,11 +116,6 @@ def tag_names(obj: dict[str, Any] | None) -> set[str]:
                 if isinstance(value, str) and value:
                     names.add(value)
     return names
-
-
-def _cf_flag(device: dict[str, Any], field: str) -> bool:
-    """Read a boolean NVCM status custom field, defaulting absent/None to False."""
-    return bool((device.get("custom_fields") or {}).get(field))
 
 
 def slug_of(obj: Any) -> str:
@@ -198,13 +196,13 @@ def device_metadata_from_gql(device: dict[str, Any], device_url: str) -> DeviceM
 device_metadata_from_rest = device_metadata_from_gql
 
 
-def network_device_from_rest(device: dict[str, Any]) -> NetworkDeviceData:
+def network_device_from_rest(
+    device: dict[str, Any], status: dict[str, Any] | None = None
+) -> NetworkDeviceData:
     """Map a REST device object to ``NetworkDeviceData``.
 
-    The ``*_enabled`` flags are backed by NVCM status custom fields on the device
-    (``nvcm_render_enabled`` etc.). A field that is not defined on the device
-    reads back as ``None`` and degrades to ``False``, so this is safe to apply
-    before every flag exists in a given NetBox instance.
+    ``status`` is the device's ``DeviceConfigStatus`` record, where the ``*_enabled``
+    flags live (see ``_STATUS_FLAGS``). No status record means nothing is enabled.
     """
     name = require_device_name(device)
     return NetworkDeviceData(
@@ -219,7 +217,7 @@ def network_device_from_rest(device: dict[str, Any]) -> NetworkDeviceData:
         primary_ip4=strip_mask((device.get("primary_ip4") or {}).get("address")),
         primary_ip6=strip_mask((device.get("primary_ip6") or {}).get("address")),
         intent=device.get("config_context"),
-        **{flag: _cf_flag(device, field) for flag, field in _STATUS_FLAG_FIELDS.items()},
+        **{flag: bool((status or {}).get(flag)) for flag in _STATUS_FLAGS},
     )
 
 

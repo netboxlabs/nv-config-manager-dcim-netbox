@@ -17,6 +17,9 @@ from nv_config_manager_dcim.workflow_models import DeviceInventoryFilter
 from nv_config_manager_dcim_netbox._mappers import fk_id, require_device_name
 from tests._fake import fake_client
 
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = pytest.mark.inventory
+
 _DEVICES = "dcim/devices/"
 _FILTER = DeviceInventoryFilter(site="dc1")
 

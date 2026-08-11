@@ -14,6 +14,9 @@ from __future__ import annotations
 import pytest
 from nv_config_manager_dcim import DCIMInvalidDataError, create_dcim_client
 
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = pytest.mark.spectrumx
+
 _SETTINGS = {"server": "https://netbox.example", "token": "t"}
 
 

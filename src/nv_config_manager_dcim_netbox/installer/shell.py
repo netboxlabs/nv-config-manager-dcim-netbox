@@ -31,11 +31,13 @@ def require_tools(*names: str) -> None:
         raise RuntimeError(f"Required executable(s) not found on PATH: {', '.join(missing)}")
 
 
-def run(argv: Sequence[str], *, stdin: str | None = None, quiet: bool = False) -> str:
+def run(argv: Sequence[str], *, stdin: str | None = None) -> str:
     """Run *argv*, returning stdout. Raises CommandError on failure.
 
-    ``stdin`` is for values that must not appear in the process table — the
-    NetBox API token is piped to a shell rather than passed as an argument.
+    ``stdin`` is for values that must not appear in the process table — the NetBox
+    API token and the NATS password are piped to a shell rather than passed as
+    arguments. Stderr is folded into the error on failure and otherwise dropped
+    (helm and kubectl write progress there even when they succeed).
     """
     result = subprocess.run(  # noqa: S603 - argv is built from validated inputs
         list(argv),
@@ -46,9 +48,6 @@ def run(argv: Sequence[str], *, stdin: str | None = None, quiet: bool = False) -
     )
     if result.returncode != 0:
         raise CommandError(argv, result.returncode, (result.stdout + result.stderr).strip())
-    if not quiet and result.stderr.strip():
-        # helm and kubectl put progress on stderr even when they succeed.
-        pass
     return result.stdout
 
 

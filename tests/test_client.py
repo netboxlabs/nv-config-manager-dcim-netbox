@@ -26,6 +26,9 @@ from nv_config_manager_dcim import (
 from nv_config_manager_dcim_netbox.client import BaseNetBoxClient, netbox_connection_settings
 from nv_config_manager_dcim_netbox.provider import NetBoxProvider
 
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = pytest.mark.lifecycle
+
 _OK = {"server": "https://netbox.example", "token": "t"}
 
 
@@ -117,6 +120,19 @@ def test_validate_settings_rejects_malformed_url():
         provider.validate_settings({"server": "netbox.example", "token": "t"})  # no scheme
     with pytest.raises(DCIMProviderConfigurationError):
         provider.validate_settings({"server": "ftp://netbox.example", "token": "t"})
+
+
+def test_connection_settings_strip_surrounding_whitespace():
+    # Validation ran on a stripped copy but stored the raw value, so a stray space
+    # passed validate_settings and then made aiohttp reject every URL.
+    settings = netbox_connection_settings(
+        {"server": "  https://netbox.example  ", "token": " t \n", "public_url": " http://ui  "}
+    )
+    assert settings["server"] == "https://netbox.example"
+    assert settings["token"] == "t"
+    assert settings["public_url"] == "http://ui"
+    client = create_dcim_client("netbox", {"server": " https://netbox.example ", "token": "t"})
+    assert client._url("/graphql/") == "https://netbox.example/graphql/"
 
 
 class _FakeCM:

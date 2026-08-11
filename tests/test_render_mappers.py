@@ -35,6 +35,9 @@ from nv_config_manager_dcim_netbox.render import (
     _services_from_context,
 )
 
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = pytest.mark.render
+
 _NETWORKS = [ipaddress.ip_network("10.0.0.0/24"), ipaddress.ip_network("10.0.0.4/31")]
 
 

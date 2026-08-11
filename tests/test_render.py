@@ -20,6 +20,9 @@ from nv_config_manager_dcim import (
     create_dcim_client,
 )
 
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = pytest.mark.render
+
 _SETTINGS = {"server": "https://netbox.example", "token": "t"}
 
 _DEVICE = {
@@ -422,6 +425,11 @@ async def test_location_topology_route_servers_and_wan_routers():
     async def fake_graphql(query, variables=None):
         return {"device": _DEVICE}
 
+    # Device 5 has a loopback (id 50) and a transit port (id 51); only the loopback's
+    # address may surface. NetBox has no interface-name filter on ip-addresses, so the
+    # loopbacks are resolved on dcim/interfaces and selected by interface_id.
+    ip_queries: list[list[tuple[str, str]]] = []
+
     async def fake_rest_list(path, params=None):
         if path == "dcim/devices/":
             seen.append(list(params or []))
@@ -429,8 +437,19 @@ async def test_location_topology_route_servers_and_wan_routers():
             if tags == ["route-server"]:
                 return [{"id": 5, "name": "rs-1", "config_context": {"bgp": {"asn": "65100"}}}]
             return [{"id": 6, "name": "wan-1", "config_context": {}}]
+        if path == "dcim/interfaces/":
+            starts_with = [v for k, v in (params or []) if k == "name__isw"]
+            if not starts_with:
+                return rest.get(path, [])
+            device_ids = [v for k, v in (params or []) if k == "device_id"]
+            if device_ids == ["5"]:
+                return [{"id": 50, "name": "lo"}]
+            return []
         if path == "ipam/ip-addresses/":
-            return [{"address": "10.9.9.9/32"}]
+            ip_queries.append(list(params or []))
+            selected = {v for k, v in (params or []) if k == "interface_id"}
+            addresses = {"50": "10.9.9.9/32", "51": "10.1.1.0/31"}
+            return [{"address": addresses[i]} for i in sorted(selected) if i in addresses]
         return rest.get(path, [])
 
     client.graphql_query = fake_graphql
@@ -443,10 +462,59 @@ async def test_location_topology_route_servers_and_wan_routers():
     topology = rd.location.topology
     assert [d.name for d in topology.route_servers] == ["rs-1"]
     assert topology.route_servers[0].routing_asn == "65100"
-    assert str(topology.route_servers[0].loopback_addresses[0]) == "10.9.9.9"
+    # Only the loopback address, not the transit /31 on interface 51.
+    assert [str(a) for a in topology.route_servers[0].loopback_addresses] == ["10.9.9.9"]
     assert [d.name for d in topology.wan_routers] == ["wan-1"]
     # Both selections are scoped to the site, never fabric-wide.
     assert all(("site_id", "2") in params for params in seen)
+    # interface__name__isw is not a NetBox filter, and unknown params are dropped
+    # rather than rejected, so it returned every address on the device.
+    assert any(("interface_id", "50") in params for params in ip_queries)
+    assert not any(key.startswith("interface__name") for p in ip_queries for key, _ in p)
+
+
+async def test_location_device_with_no_loopback_interface_has_no_loopbacks():
+    # No loopback interface means no loopback addresses, not every device address.
+    client = create_dcim_client("netbox", _SETTINGS)
+
+    async def fake_rest_list(path, params=None):
+        if path == "dcim/interfaces/":
+            return []
+        if path == "ipam/ip-addresses/":
+            raise AssertionError("must not query addresses without a loopback interface")
+        return []
+
+    client.rest_list = fake_rest_list
+    try:
+        device = await client._location_device({"id": 5, "name": "rs-1"})
+    finally:
+        await client.close()
+    assert device.loopback_addresses == ()
+
+
+async def test_location_topology_degrades_when_netbox_rejects_the_tag_or_role_slug():
+    # tag/role are slug-keyed and validated, so an instance missing route-server or
+    # the wan/tan-bbr roles answers 400, not 200-with-no-rows.
+    rest = copy.deepcopy(_REST_MAP)
+    client = create_dcim_client("netbox", _SETTINGS)
+
+    async def fake_graphql(query, variables=None):
+        return {"device": _DEVICE}
+
+    async def fake_rest_list(path, params=None):
+        if path == "dcim/devices/" and any(k in ("tag", "role") for k, _ in params or []):
+            raise DCIMInvalidDataError("NetBox rejected the request (400)")
+        return rest.get(path, [])
+
+    client.graphql_query = fake_graphql
+    client.rest_list = fake_rest_list
+    try:
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+    assert rd.location.topology.route_servers == ()
+    assert rd.location.topology.wan_routers == ()
 
 
 async def test_l2_vni_vrfs_from_device_level_assignments():
@@ -504,3 +572,86 @@ async def test_l2_vni_vrfs_excludes_interface_only_overlays():
     assert rd.device.overlays.l2_vnis
     # ...but the device does not carry its VRF.
     assert rd.device.overlays.l2_vni_vrfs == ()
+
+
+async def test_peer_groups_are_scoped_to_the_ids_the_sessions_reference():
+    # Unfiltered, this paginated the whole fabric's peer-group table per render.
+    rest = copy.deepcopy(_REST_MAP)
+    rest["plugins/bgp/session/"][0]["peer_group"] = {"id": 3, "name": "underlay"}
+    rest["plugins/bgp/peer-group/"] = [{"id": 3, "extra_attributes": {"ttl": 4}}]
+    seen: list[list[tuple[str, str]]] = []
+
+    client = create_dcim_client("netbox", _SETTINGS)
+
+    async def fake_graphql(query, variables=None):
+        return {"device": _DEVICE}
+
+    async def fake_rest_list(path, params=None):
+        if path == "plugins/bgp/peer-group/":
+            seen.append(list(params or []))
+        return rest.get(path, [])
+
+    client.graphql_query = fake_graphql
+    client.rest_list = fake_rest_list
+    try:
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+    assert rd.device.routing.bgp_instances[0].peers[0].ttl == 4
+    assert seen and all(("id", "3") in params for params in seen)
+
+
+async def test_no_peer_group_read_when_no_session_references_one():
+    rest = copy.deepcopy(_REST_MAP)
+    rest["plugins/bgp/session/"][0].pop("peer_group", None)
+    client = create_dcim_client("netbox", _SETTINGS)
+
+    async def fake_rest_list(path, params=None):
+        if path == "plugins/bgp/peer-group/":
+            raise AssertionError("must not read peer groups when none are referenced")
+        return rest.get(path, [])
+
+    async def fake_graphql(query, variables=None):
+        return {"device": _DEVICE}
+
+    client.graphql_query = fake_graphql
+    client.rest_list = fake_rest_list
+    try:
+        await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+
+async def test_topology_device_in_both_lists_is_fetched_once_and_appears_in_both():
+    # A border leaf can be route-server-tagged AND WAN-roled; map it once.
+    rest = copy.deepcopy(_REST_MAP)
+    both = {"id": 5, "name": "border-1", "config_context": {"bgp": {"asn": "65100"}}}
+    loopback_calls: list[str] = []
+
+    client = create_dcim_client("netbox", _SETTINGS)
+
+    async def fake_graphql(query, variables=None):
+        return {"device": _DEVICE}
+
+    async def fake_rest_list(path, params=None):
+        if path == "dcim/devices/" and any(k in ("tag", "role") for k, _ in params or []):
+            return [both]
+        if path == "dcim/interfaces/" and any(k == "name__isw" for k, _ in params or []):
+            loopback_calls.append(dict(params or [])["device_id"])
+            return [{"id": 50, "name": "lo"}]
+        if path == "ipam/ip-addresses/":
+            return [{"address": "10.9.9.9/32"}]
+        return rest.get(path, [])
+
+    client.graphql_query = fake_graphql
+    client.rest_list = fake_rest_list
+    try:
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+    topology = rd.location.topology
+    assert [d.name for d in topology.route_servers] == ["border-1"]
+    assert [d.name for d in topology.wan_routers] == ["border-1"]
+    assert loopback_calls == ["5"], "the shared device must be resolved once"

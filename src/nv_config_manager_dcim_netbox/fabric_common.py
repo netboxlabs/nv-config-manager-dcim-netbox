@@ -12,7 +12,9 @@ redeclaring the same string.
 
 from __future__ import annotations
 
+import asyncio
 import re
+from collections.abc import Iterable, Iterator
 
 from nv_config_manager_dcim import (
     DCIMConflictError,
@@ -20,7 +22,7 @@ from nv_config_manager_dcim import (
     DCIMNotFoundError,
 )
 
-from nv_config_manager_dcim_netbox._mappers import fk_id
+from nv_config_manager_dcim_netbox._mappers import device_pk, fk_id
 
 # Default fabric status value (plugin uses a choice field, not a status object).
 FABRIC_STATUS = "active"
@@ -32,10 +34,12 @@ BACKUP_PATH = "plugins/nv-config-manager/backup-configs/"
 NVLINK_DOMAINS_PATH = "plugins/nv-config-manager/nvlink-domains/"
 
 # Core NetBox paths shared across more than one mixin.
+DEVICES_PATH = "dcim/devices/"
 VRFS_PATH = "ipam/vrfs/"
 VLANS_PATH = "ipam/vlans/"
 PREFIXES_PATH = "ipam/prefixes/"
 INTERFACES_PATH = "dcim/interfaces/"
+IP_ADDRESSES_PATH = "ipam/ip-addresses/"
 
 # netbox-bgp exposes no GraphQL, so BGP is read over REST.
 BGP_SESSIONS_PATH = "plugins/bgp/session/"
@@ -44,6 +48,17 @@ BGP_SESSIONS_PATH = "plugins/bgp/session/"
 BGP_PEER_GROUPS_PATH = "plugins/bgp/peer-group/"
 
 _PKEY_RE = re.compile(r"\A0[xX]([0-9a-fA-F]{1,4})\Z")
+
+# Device ids per repeated-``id`` (or ``device_id``) query. Repeating the param for
+# a whole fleet builds a query string long enough for a proxy to reject with 414,
+# so the reads that filter by many ids walk the fleet in chunks.
+ID_CHUNK = 100
+
+
+def chunked(values: list[str], size: int = ID_CHUNK) -> Iterator[list[str]]:
+    """Yield ``values`` in fixed-size chunks."""
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
 
 
 def normalize_pkey(value: str) -> str:
@@ -66,14 +81,81 @@ class FabricCommonMixin:
     ASSIGNMENTS_PATH = "plugins/nv-config-manager/overlay-assignments/"
     PKEYS_PATH = "plugins/nv-config-manager/ib-pkeys/"
 
+    # -- NVCM per-device management flags ------------------------------------
+    #
+    # The flags live on the plugin's DeviceConfigStatus model, not on device custom
+    # fields. Never query them as cf_nvcm_* filters on dcim/devices: no such field
+    # exists, and NetBox drops unknown params rather than rejecting them, so the
+    # filter widens the read to the whole fleet instead of failing closed.
+
+    async def status_flag_device_ids(self, **flags: bool | None) -> set[str] | None:
+        """Return the device PKs whose ``DeviceConfigStatus`` matches every flag.
+
+        ``flags`` are ``DeviceConfigStatus`` field names; a ``None`` value is
+        dropped. Returns ``None`` when nothing was constrained (so callers can tell
+        "no filter" from "no match"), else the matching ids.
+        """
+        params = [
+            (field, str(value).lower()) for field, value in flags.items() if value is not None
+        ]
+        if not params:
+            return None
+        rows = await self.rest_list(STATUS_PATH, params)
+        return {pk for row in rows if (pk := device_pk(row))}
+
+    async def device_config_status_map(self, device_ids: Iterable[str]) -> dict[str, dict]:
+        """Return ``{device_pk: DeviceConfigStatus row}``; devices with none are absent.
+
+        Populates the ``*_enabled`` flags on the device workflow models.
+        """
+        ids = sorted({str(i) for i in device_ids})
+        if not ids:
+            return {}
+        pages = await asyncio.gather(
+            *(
+                self.rest_list(STATUS_PATH, [("device_id", i) for i in chunk])
+                for chunk in chunked(ids)
+            )
+        )
+        return {pk: row for page in pages for row in page if (pk := device_pk(row))}
+
+    async def devices_by_ids(
+        self,
+        device_ids: Iterable[str],
+        extra_params: list[tuple[str, str]] | None = None,
+        *,
+        page_size: int = 250,
+    ) -> list[dict]:
+        """Fetch ``dcim/devices`` rows for ``device_ids``, ANDed with ``extra_params``.
+
+        Empty ``device_ids`` returns nothing, never an unfiltered listing. Chunked
+        because the id set can be fleet-sized (see ``ID_CHUNK``).
+        """
+        ids = sorted({str(i) for i in device_ids})
+        if not ids:
+            return []
+        base = list(extra_params or [])
+        pages = await asyncio.gather(
+            *(
+                self.rest_list(DEVICES_PATH, base + [("id", i) for i in chunk], page_size=page_size)
+                for chunk in chunked(ids)
+            )
+        )
+        return [row for page in pages for row in page]
+
     async def _find_overlay(self, name: str, scope: str | None = None) -> dict | None:
         params = [("name", name)]
         if scope is not None:
-            _scope_type, scope_id = await self._resolve_scope(scope)
+            scope_type, scope_id = await self._resolve_scope(scope)
             if scope_id is None:
                 # No NetBox Site/Location by that name -> no overlay can match it.
                 return None
+            # scope_type as well as scope_id: the overlay scope is a generic FK, and
+            # Site and Location pks are independent sequences, so scope_id=5 alone
+            # matches a Location-scoped overlay when the caller resolved Site 5.
             params.append(("scope_id", str(scope_id)))
+            if scope_type:
+                params.append(("scope_type", scope_type))
         rows = await self.rest_list(self.OVERLAYS_PATH, params)
         if len(rows) > 1:
             raise DCIMConflictError(f"Multiple overlays named {name!r}")

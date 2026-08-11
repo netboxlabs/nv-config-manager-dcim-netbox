@@ -22,11 +22,13 @@ import pytest
 from nv_config_manager_dcim import DCIMChangeEvent, DCIMInvalidDataError
 
 from nv_config_manager_dcim_netbox.events import (
-    _bgp_asn_changed,
-    _bgp_peer_group_changed,
+    _HANDLERS,
     register_render_event_handlers,
 )
 from tests._fake import fake_client
+
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = [pytest.mark.dhcp, pytest.mark.events]
 
 # --- DHCP: ZTP defaulting (Fix 1) -----------------------------------------------
 
@@ -251,7 +253,7 @@ async def test_asn_change_fans_out_to_local_and_remote_sessions():
             ("remote_as_id", "7"): [{"device": {"id": 2}}, {"device": {"id": 1}}],
         }
     )
-    requests = await _bgp_asn_changed(_event("ipam.asn", "7"), client)
+    requests = await _HANDLERS["ipam.asn"](_event("ipam.asn", "7"), client)
     assert sorted(r.device_id for r in requests) == ["1", "2"]
     queried = {key for _, params in client.calls for key, _ in params}
     assert queried == {"local_as_id", "remote_as_id"}
@@ -261,7 +263,9 @@ async def test_peer_group_change_fans_out_to_referencing_devices():
     client = _BGPSessionClient(
         {("peer_group", "5"): [{"device": {"id": 3}}, {"device": {"id": 3}}]}
     )
-    requests = await _bgp_peer_group_changed(_event("netbox_bgp.bgppeergroup", "5"), client)
+    requests = await _HANDLERS["netbox_bgp.bgppeergroup"](
+        _event("netbox_bgp.bgppeergroup", "5"), client
+    )
     # Deduplicated to a single render request for device 3.
     assert [r.device_id for r in requests] == ["3"]
 
@@ -269,7 +273,7 @@ async def test_peer_group_change_fans_out_to_referencing_devices():
 async def test_shared_bgp_fanout_delete_is_noop():
     # On delete the shared object is gone and can no longer be resolved.
     client = _BGPSessionClient({("local_as_id", "7"): [{"device": {"id": 1}}]})
-    assert await _bgp_asn_changed(_event("ipam.asn", "7", operation="delete"), client) == ()
+    assert await _HANDLERS["ipam.asn"](_event("ipam.asn", "7", operation="delete"), client) == ()
 
 
 async def test_shared_bgp_fanout_resolution_error_is_noop():
@@ -280,7 +284,7 @@ async def test_shared_bgp_fanout_resolution_error_is_noop():
         async def rest_request(self, *args, **kwargs):
             raise RuntimeError("boom")
 
-    assert await _bgp_asn_changed(_event("ipam.asn", "7"), _Boom()) == ()
+    assert await _HANDLERS["ipam.asn"](_event("ipam.asn", "7"), _Boom()) == ()
 
 
 async def test_registration_includes_shared_bgp_handlers():

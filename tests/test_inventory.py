@@ -13,7 +13,11 @@ from nv_config_manager_dcim import (
     DeviceInventoryFilter,
 )
 
+from nv_config_manager_dcim_netbox.fabric_common import STATUS_PATH
 from tests._fake import fake_client as _client
+
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = pytest.mark.inventory
 
 _GQL_DEVICE = {
     "id": "1",
@@ -104,9 +108,23 @@ async def test_list_devices():
 
 
 async def test_get_managed_device_metadata():
-    client = _client(rest_list={"dcim/devices/": [_REST_DEVICE]})
+    # "Managed" comes from the plugin's DeviceConfigStatus, so the status record is
+    # what puts device 1 in the result.
+    client = _client(
+        rest_list={
+            STATUS_PATH: [{"id": 10, "device": 1, "render_enabled": True}],
+            "dcim/devices/": [_REST_DEVICE],
+        }
+    )
     result = await client.get_managed_device_metadata()
     assert [m.name for m in result] == ["leaf-01"]
+
+
+async def test_get_managed_device_metadata_without_status_records_returns_nothing():
+    # Fail closed: no render-enabled DeviceConfigStatus must never fall through to
+    # an unfiltered whole-fleet listing.
+    client = _client(rest_list={STATUS_PATH: [], "dcim/devices/": [_REST_DEVICE]})
+    assert await client.get_managed_device_metadata() == []
 
 
 async def test_get_network_device():

@@ -12,6 +12,9 @@ from nv_config_manager_dcim import (
     discover_dcim_providers,
 )
 
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = pytest.mark.lifecycle
+
 
 def test_provider_is_discovered_via_entry_point():
     providers = discover_dcim_providers()

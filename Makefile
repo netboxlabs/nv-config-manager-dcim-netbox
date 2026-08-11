@@ -22,7 +22,7 @@ PYTEST   := $(VENV)/bin/pytest
 RUFF     := $(VENV)/bin/ruff
 TEMPLATE := $(VENV)/bin/template-cli
 
-.PHONY: help setup lint test test-netbox discovery probe provider-config \
+.PHONY: help setup lint version-check test test-netbox discovery probe provider-config \
         cache-query render-cli test-sdk test-templates check clean image \
         netbox-base netbox-image images \
         inventory reference ipam hosts dhcp ztp firmware state secrets render \
@@ -67,10 +67,19 @@ lint:
 	$(RUFF) check src/ tests/
 	$(RUFF) format --check src/ tests/
 
+# The chart ships its own netbox.image.tag and `nvcm-netbox up` leaves it alone,
+# so it has to match the version `make netbox-image` builds.
+version-check:
+	@chart_tag=$$(sed -n 's/^ *tag: "\(.*\)"/\1/p' deploy/netbox/values.yaml | head -1); \
+	if [ "$$chart_tag" != "$(VERSION)" ]; then \
+	  echo "deploy/netbox/values.yaml tag ($$chart_tag) != pyproject version ($(VERSION))"; \
+	  exit 1; \
+	fi
+
 test test-netbox:
 	$(PYTEST) -q
 
-check: lint test
+check: lint version-check test
 
 # --- images ---
 # The SDK is not yet published, so it is passed as a named build context.

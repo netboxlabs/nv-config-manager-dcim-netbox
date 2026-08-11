@@ -20,17 +20,19 @@ from nv_config_manager_dcim_netbox._mappers import choice_value, fk_id, strip_ma
 
 # Per-device NVCM lifecycle flags (ztp_enabled / is_aggregate_managed) live on the
 # plugin's DeviceConfigStatus model, the same source the render/backup paths read.
-from nv_config_manager_dcim_netbox.fabric_common import PREFIXES_PATH, STATUS_PATH
+from nv_config_manager_dcim_netbox.fabric_common import (
+    DEVICES_PATH,
+    INTERFACES_PATH,
+    IP_ADDRESSES_PATH,
+    PREFIXES_PATH,
+    STATUS_PATH,
+)
 
 logger = logging.getLogger(__name__)
 
 # Config-context profile names NV Config Manager stores DHCP data under.
 _SITE_OPTIONS_PROFILE = "nv-config-manager-site-dhcp-option-def"
 _STATIC_DATA_PROFILE = "nv-config-manager-kea-static-data"
-
-_IP_ADDRESSES_PATH = "ipam/ip-addresses/"
-_INTERFACES_PATH = "dcim/interfaces/"
-_DEVICES_PATH = "dcim/devices/"
 
 
 class NetBoxDHCPMixin:
@@ -47,10 +49,12 @@ class NetBoxDHCPMixin:
     async def get_dhcp_contexts(
         self, is_aggregate_managed: bool | None = None
     ) -> dict[str, dict[str, object]]:
-        params = [("cf_nvcm_ztp_enabled", "true")]
-        if is_aggregate_managed is not None:
-            params.append(("cf_nvcm_is_aggregate_managed", str(is_aggregate_managed).lower()))
-        devices = await self.rest_list(_DEVICES_PATH, params)
+        # ZTP eligibility is a DeviceConfigStatus field, not a device custom field:
+        # resolve it to ids, then fetch those devices for their config_context.
+        ztp_device_ids = await self.status_flag_device_ids(
+            ztp_enabled=True, is_aggregate_managed=is_aggregate_managed
+        )
+        devices = await self.devices_by_ids(ztp_device_ids or ())
         # Keyed by the NetBox device id, matching the device_id the confgen reads
         # back from reservations / option-candidates.
         return {str(d["id"]): (d.get("config_context") or {}) for d in devices}
@@ -63,8 +67,8 @@ class NetBoxDHCPMixin:
             # Filter by family server-side; the client-side check below still
             # guards a NetBox that ignores the parameter.
             self.rest_list(PREFIXES_PATH, [("tag", "dhcp-subnet"), ("family", str(family))]),
-            self.rest_list(_IP_ADDRESSES_PATH, [("tag", "dhcp-pool")]),
-            self.rest_list(_IP_ADDRESSES_PATH, [("tag", "dhcp-reserve")]),
+            self.rest_list(IP_ADDRESSES_PATH, [("tag", "dhcp-pool")]),
+            self.rest_list(IP_ADDRESSES_PATH, [("tag", "dhcp-reserve")]),
         )
 
         # NetBox returns tagged prefixes and IPs as flat lists with no parent link,
@@ -181,7 +185,7 @@ class NetBoxDHCPMixin:
             return device_cache, interface_cache, status_cache
 
         for row in await self.rest_list(
-            _INTERFACES_PATH, [("id", i) for i in sorted(interface_ids)]
+            INTERFACES_PATH, [("id", i) for i in sorted(interface_ids)]
         ):
             if row.get("id") is not None:
                 interface_cache[str(row["id"])] = row
@@ -195,7 +199,7 @@ class NetBoxDHCPMixin:
             return device_cache, interface_cache, status_cache
 
         devices, statuses = await asyncio.gather(
-            self.rest_list(_DEVICES_PATH, [("id", i) for i in sorted(device_ids)]),
+            self.rest_list(DEVICES_PATH, [("id", i) for i in sorted(device_ids)]),
             self.rest_list(STATUS_PATH, [("device_id", i) for i in sorted(device_ids)]),
         )
         for row in devices:
@@ -239,7 +243,7 @@ class NetBoxDHCPMixin:
         if isinstance(gateway, dict):
             explicit = strip_mask(gateway.get("address"))
         elif gateway:
-            ip = await self.rest_request("GET", f"{_IP_ADDRESSES_PATH}{gateway}/")
+            ip = await self.rest_request("GET", f"{IP_ADDRESSES_PATH}{gateway}/")
             explicit = strip_mask((ip or {}).get("address"))
         if explicit:
             # Validate the override actually lies within the subnet, matching the
@@ -279,7 +283,7 @@ class NetBoxDHCPMixin:
         interface = interface_cache.get(str(iface_id))
         if interface is None:
             try:
-                interface = await self.rest_request("GET", f"{_INTERFACES_PATH}{iface_id}/")
+                interface = await self.rest_request("GET", f"{INTERFACES_PATH}{iface_id}/")
             except DCIMNotFoundError:
                 # Stale assignment pointing at a deleted interface: skip it
                 # rather than failing the whole subnet fetch.
@@ -293,7 +297,7 @@ class NetBoxDHCPMixin:
         device = device_cache.get(str(device_id))
         if device is None:
             try:
-                device = await self.rest_request("GET", f"{_DEVICES_PATH}{device_id}/")
+                device = await self.rest_request("GET", f"{DEVICES_PATH}{device_id}/")
             except DCIMNotFoundError:
                 # Stale interface pointing at a deleted device: skip it rather
                 # than failing the whole subnet fetch (same policy as the

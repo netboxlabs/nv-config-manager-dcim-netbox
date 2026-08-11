@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pin the NetBox query-filter names the provider's reads depend on.
 
-These spellings are the provider's real contract with NetBox: a custom-field
-filter is guarded on the field existing (NetBox 400s on an unknown ``cf_*``
-rather than widening the result), and several reads are only correctly scoped
-because of one exact parameter name. A typo in any of them silently changes what
-NetBox returns — and is invisible to a fake transport that routes on path alone,
-so assert them directly.
+These spellings are the provider's real contract with NetBox: several reads are
+only correctly scoped because of one exact parameter name. A typo in any of them
+silently changes what NetBox returns — and is invisible to a fake transport that
+routes on path alone, so assert them directly.
+
+The NVCM management flags are ``DeviceConfigStatus`` fields, never ``cf_nvcm_*``
+filters on ``dcim/devices``: NetBox drops unknown params, so such a filter returns
+the whole fleet.
 """
 
 from __future__ import annotations
@@ -31,17 +33,28 @@ def _client(**kwargs):
 
 
 @pytest.mark.inventory
-async def test_managed_metadata_is_guarded_on_the_render_enabled_custom_field():
-    # "Managed" must stay scoped to the custom field: without it this read returns
-    # the whole fleet instead of failing closed.
-    client, queries = _client()
+async def test_managed_metadata_resolves_render_enabled_from_the_status_endpoint():
+    # cf_nvcm_render_enabled names no real custom field, so NetBox would drop it and
+    # return the whole fleet.
+    client, queries = _client(rest_list={STATUS_PATH: [{"id": 1, "device": 4}]})
     await client.get_managed_device_metadata()
-    assert ("cf_nvcm_render_enabled", "true") in params_for(queries, _DEVICES)
+    assert ("render_enabled", "true") in params_for(queries, STATUS_PATH)
+    device_params = params_for(queries, _DEVICES)
+    assert ("id", "4") in device_params
+    assert not any(key.startswith("cf_nvcm_") for key, _ in device_params)
+
+
+@pytest.mark.inventory
+async def test_managed_metadata_without_status_records_never_queries_the_fleet():
+    client, queries = _client(rest_list={STATUS_PATH: []})
+    assert await client.get_managed_device_metadata() == []
+    # No device read at all; an unfiltered listing here is the whole-fleet failure.
+    assert params_for(queries, _DEVICES) == []
 
 
 @pytest.mark.inventory
 async def test_list_devices_requires_primary_ip_and_maps_every_filter():
-    client, queries = _client()
+    client, queries = _client(rest_list={STATUS_PATH: [{"id": 1, "device": 9}]})
     await client.list_devices(
         DCIMDeviceSelectionFilter(
             sites=("dc1",),
@@ -64,25 +77,32 @@ async def test_list_devices_requires_primary_ip_and_maps_every_filter():
         ("device_type_id", "7"),
         ("manufacturer", "nvidia"),
         ("platform", "nv-os"),
-        ("cf_nvcm_render_enabled", "true"),
+        # managed_only narrows to the render-enabled device ids, ANDed with the rest.
+        ("id", "9"),
     ):
         assert expected in params, expected
+    assert ("render_enabled", "true") in params_for(queries, STATUS_PATH)
     # Every value reaches aiohttp as a string.
     assert all(isinstance(value, str) for _, value in params)
 
 
 @pytest.mark.inventory
-async def test_inventory_status_flags_map_to_custom_fields():
-    client, queries = _client()
+async def test_inventory_status_flags_are_queried_on_the_status_endpoint():
+    client, queries = _client(rest_list={STATUS_PATH: [{"id": 1, "device": 3}]})
     await client.get_network_devices(
         DeviceInventoryFilter(
             site="dc1", render_enabled=True, deploy_enabled=False, backup_enabled=True
         )
     )
-    params = params_for(queries, _DEVICES)
-    assert ("cf_nvcm_render_enabled", "true") in params
-    assert ("cf_nvcm_deploy_enabled", "false") in params
-    assert ("cf_nvcm_backup_enabled", "true") in params
+    # One query, so the flags AND rather than selecting devices matching any of them.
+    status_params = params_for(queries, STATUS_PATH)
+    assert ("render_enabled", "true") in status_params
+    assert ("deploy_enabled", "false") in status_params
+    assert ("backup_enabled", "true") in status_params
+    device_params = params_for(queries, _DEVICES)
+    assert ("site", "dc1") in device_params
+    assert ("id", "3") in device_params
+    assert not any(key.startswith("cf_nvcm_") for key, _ in device_params)
 
 
 @pytest.mark.ib
@@ -108,12 +128,15 @@ async def test_dhcp_reads_are_scoped_by_tag_and_family():
 
 
 @pytest.mark.dhcp
-async def test_dhcp_contexts_are_guarded_on_the_ztp_custom_field():
-    client, queries = _client()
+async def test_dhcp_contexts_resolve_ztp_eligibility_from_the_status_endpoint():
+    client, queries = _client(rest_list={STATUS_PATH: [{"id": 1, "device": 6}]})
     await client.get_dhcp_contexts(is_aggregate_managed=True)
-    params = params_for(queries, _DEVICES)
-    assert ("cf_nvcm_ztp_enabled", "true") in params
-    assert ("cf_nvcm_is_aggregate_managed", "true") in params
+    status_params = params_for(queries, STATUS_PATH)
+    assert ("ztp_enabled", "true") in status_params
+    assert ("is_aggregate_managed", "true") in status_params
+    device_params = params_for(queries, _DEVICES)
+    assert ("id", "6") in device_params
+    assert not any(key.startswith("cf_nvcm_") for key, _ in device_params)
 
 
 @pytest.mark.state

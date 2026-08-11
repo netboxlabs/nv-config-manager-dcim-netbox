@@ -13,13 +13,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from functools import partial
 from typing import TYPE_CHECKING
 
 from nv_config_manager_dcim import RenderEventRequest
 
 from nv_config_manager_dcim_netbox._mappers import fk_id as _fk_id
 from nv_config_manager_dcim_netbox.client import is_netbox_pk
-from nv_config_manager_dcim_netbox.fabric_common import BGP_SESSIONS_PATH
+from nv_config_manager_dcim_netbox.fabric_common import (
+    BGP_SESSIONS_PATH,
+    DEVICES_PATH,
+    INTERFACES_PATH,
+)
 
 if TYPE_CHECKING:
     from nv_config_manager_dcim import DCIMChangeEvent, DCIMClient, DCIMRenderEventRegistry
@@ -145,7 +150,7 @@ async def _cross(event: DCIMChangeEvent, client: DCIMClient, resolver):
 
 
 async def _vrf_devices(event, client):
-    interfaces = await client.rest_list("dcim/interfaces/", [("vrf_id", str(event.object_id))])
+    interfaces = await client.rest_list(INTERFACES_PATH, [("vrf_id", str(event.object_id))])
     return {_fk_id(i.get("device")) for i in interfaces}
 
 
@@ -171,7 +176,7 @@ async def _prefix_devices(event, client):
     scope_id = (prefix or {}).get("scope_id")
     if not param or not scope_id:
         return ()
-    devices = await client.rest_list("dcim/devices/", [(param, str(scope_id))])
+    devices = await client.rest_list(DEVICES_PATH, [(param, str(scope_id))])
     return {device.get("id") for device in devices}
 
 
@@ -211,36 +216,17 @@ async def _config_context_devices(event, client):
             "Config context %s has no scope assignments; fanning out to every device",
             event.object_id,
         )
-    devices = await client.rest_list("dcim/devices/", filters)
+    devices = await client.rest_list(DEVICES_PATH, filters)
     return {device.get("id") for device in devices}
 
 
-async def _cable_changed(event, client):
-    return await _cross(event, client, _cable_devices)
+def _cross_handler(resolver):
+    """Bind a cross-object resolver into a handler.
 
-
-async def _vrf_changed(event, client):
-    return await _cross(event, client, _vrf_devices)
-
-
-async def _prefix_changed(event, client):
-    return await _cross(event, client, _prefix_devices)
-
-
-async def _ip_address_changed(event, client):
-    return await _cross(event, client, _ip_address_devices)
-
-
-async def _config_context_changed(event, client):
-    return await _cross(event, client, _config_context_devices)
-
-
-async def _bgp_asn_changed(event, client):
-    return await _cross(event, client, _bgp_asn_devices)
-
-
-async def _bgp_peer_group_changed(event, client):
-    return await _cross(event, client, _bgp_peer_group_devices)
+    One _HANDLERS entry per object type instead of an entry plus a wrapper, so a
+    wrapper naming the wrong resolver cannot silently fan out to the wrong devices.
+    """
+    return partial(_cross, resolver=resolver)
 
 
 # object_type -> handler. Mirrors the reference DCIM provider's coverage,
@@ -251,11 +237,11 @@ _HANDLERS = {
     "dcim.interface": _parent_device_changed,
     "dcim.rearport": _parent_device_changed,
     "dcim.frontport": _parent_device_changed,
-    "dcim.cable": _cable_changed,
-    "extras.configcontext": _config_context_changed,
-    "ipam.vrf": _vrf_changed,
-    "ipam.prefix": _prefix_changed,
-    "ipam.ipaddress": _ip_address_changed,
+    "dcim.cable": _cross_handler(_cable_devices),
+    "extras.configcontext": _cross_handler(_config_context_devices),
+    "ipam.vrf": _cross_handler(_vrf_devices),
+    "ipam.prefix": _cross_handler(_prefix_devices),
+    "ipam.ipaddress": _cross_handler(_ip_address_devices),
     # A netbox-bgp session carries only a single ``device`` FK (the local peer);
     # it has no FK to the remote peer's device — unlike the reference provider's
     # two-ended peering — so editing a session re-renders the local device only.
@@ -264,8 +250,8 @@ _HANDLERS = {
     # ipam.asn (referenced by session local_as/remote_as); a peer group is
     # netbox_bgp.bgppeergroup. Mirrors the reference provider's ASN / peer-group
     # fan-out.
-    "ipam.asn": _bgp_asn_changed,
-    "netbox_bgp.bgppeergroup": _bgp_peer_group_changed,
+    "ipam.asn": _cross_handler(_bgp_asn_devices),
+    "netbox_bgp.bgppeergroup": _cross_handler(_bgp_peer_group_devices),
     "netbox_nv_config_manager.overlayassignment": _overlay_assignment_changed,
     "netbox_nv_config_manager.deviceconfigstatus": _parent_device_changed,
 }

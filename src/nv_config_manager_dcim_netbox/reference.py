@@ -4,18 +4,29 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from nv_config_manager_dcim import DCIMInvalidDataError, DCIMNotFoundError, DCIMSelection
 
-from nv_config_manager_dcim_netbox.fabric_common import VRFS_PATH
+from nv_config_manager_dcim_netbox.fabric_common import VRFS_PATH, chunked
 
 logger = logging.getLogger(__name__)
 
 _LOCATIONS_QUERY = "query { location_list { id name } }"
 _LOCATION_BY_ID_QUERY = "query ($id: ID!) { location(id: $id) { id name } }"
 _TENANTS_QUERY = "query { tenant_list { id name } }"
+
+# Only the two nested objects the managed-only dropdowns need, for the given ids.
+_MANAGED_DEVICE_SELECTIONS_QUERY = """
+query ($ids: [ID!]!) {
+  device_list(filters: {id: {in_list: $ids}}) {
+    tenant { id name }
+    role { id name }
+  }
+}
+"""
 _DEVICE_ROLES_QUERY = "query { device_role_list { id name } }"
 
 # NetBox has no first-class Status object: statuses are per-model choice fields,
@@ -89,17 +100,27 @@ class NetBoxReferenceMixin:
     async def _managed_device_selections(self, field: str) -> list[DCIMSelection]:
         """Return distinct ``tenant``/``role`` choices across managed devices.
 
-        "Managed" is scoped by the ``nvcm_render_enabled`` device custom field —
-        the same proxy ``get_managed_device_metadata`` uses. Guarded on that
-        field: NetBox 400s if it is undefined rather than scanning the fleet.
+        "Managed" is ``DeviceConfigStatus.render_enabled`` — the same source
+        ``get_managed_device_metadata`` uses — resolved to device ids first. Read over
+        GraphQL asking only for the two nested objects, rather than paginating every
+        field of the whole managed fleet to collect a few dozen names.
         """
-        devices = await self.rest_list("dcim/devices/", [("cf_nvcm_render_enabled", "true")])
+        managed_ids = sorted(await self.status_flag_device_ids(render_enabled=True) or ())
+        if not managed_ids:
+            return []
+        pages = await asyncio.gather(
+            *(
+                self.graphql_query(_MANAGED_DEVICE_SELECTIONS_QUERY, {"ids": chunk})
+                for chunk in chunked(managed_ids)
+            )
+        )
         selections: dict[str, DCIMSelection] = {}
-        for device in devices:
-            obj = device.get(field)
-            if isinstance(obj, dict) and obj.get("id") is not None and obj.get("name"):
-                key = str(obj["id"])
-                selections[key] = DCIMSelection(id=key, name=str(obj["name"]))
+        for page in pages:
+            for device in page.get("device_list") or []:
+                obj = device.get(field)
+                if isinstance(obj, dict) and obj.get("id") is not None and obj.get("name"):
+                    key = str(obj["id"])
+                    selections[key] = DCIMSelection(id=key, name=str(obj["name"]))
         return list(selections.values())
 
     async def list_tenants(self, managed_only: bool = False) -> list[DCIMSelection]:

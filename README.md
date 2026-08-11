@@ -95,12 +95,6 @@ To work against a live NetBox without a cluster, see
 - [Render data mapping](docs/netbox-data-mapping.mdx): where each `RenderData`
   field comes from
 
-## Support
-
-This is a NetBox Labs private commercial plugin. Customers should use
-their existing NetBox Labs support channel. Internal maintainers can
-file issues in this repository.
-
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).

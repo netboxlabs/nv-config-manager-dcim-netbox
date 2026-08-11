@@ -32,10 +32,11 @@ class NetBoxSimConfig(SimConfig):
     dcim_provider: str = base_config.PROVIDER_NAME
 
     # Built by `make images`; neither image exists in a registry, so both are
-    # shipped into the sim's kind cluster over SSH.
-    dcim_provider_package_image: str = "nv-config-manager-dcim-netbox:0.1.0"
-    netbox_image: str = "nv-config-manager-netbox"
-    netbox_image_tag: str = "0.1.0"
+    # shipped into the sim's kind cluster over SSH. Tags track the package version,
+    # the same source `make images` builds them from.
+    dcim_provider_package_image: str = base_config.PROVIDER_IMAGE
+    netbox_image: str = base_config.NETBOX_IMAGE
+    netbox_image_tag: str = base_config.IMAGE_TAG
 
     # Generated when empty, then installed into NetBox and handed to NVCM, so
     # neither side has to read it back from the other.

@@ -4,8 +4,12 @@
 
 from __future__ import annotations
 
+import pytest
+
 from tests._fake import fake_client
 
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = pytest.mark.firmware
 _DEVICE_PATH = "dcim/devices/1/"
 
 
@@ -20,7 +24,7 @@ async def test_get_os_image_versions():
         },
     }
 
-    async def targets(name):
+    async def targets(name, site=None):
         return [{"data": {"firmware-targets": {"leaf": {"cumulus-linux": "5.2.0"}}}}]
 
     client = fake_client(

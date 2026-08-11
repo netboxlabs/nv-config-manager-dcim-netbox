@@ -9,6 +9,9 @@ from nv_config_manager_dcim import DCIMInvalidDataError
 
 from tests._fake import fake_client
 
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = pytest.mark.render
+
 
 def _client(device):
     return fake_client(gql={"device": device})

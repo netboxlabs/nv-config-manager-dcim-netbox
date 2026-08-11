@@ -13,6 +13,9 @@ from nv_config_manager_dcim import DCIMConflictError, DCIMInvalidDataError
 
 from tests._fake import fake_client
 
+# Area marker for `make <area>` / `pytest -m <area>`.
+pytestmark = pytest.mark.spectrumx
+
 _VXLANS = "plugins/nv-config-manager/vxlans/"
 _OVERLAYS = "plugins/nv-config-manager/overlays/"
 _ASSIGN = "plugins/nv-config-manager/overlay-assignments/"
@@ -86,7 +89,12 @@ async def test_provision_spectrum_x_vrf_creates_overlay_vrf_assignment_vxlan():
     assert posts[_OVERLAYS]["name"] == "SpX"
     assert posts[_OVERLAYS]["scope_type"] == "dcim.site" and posts[_OVERLAYS]["scope_id"] == 3
     assert posts[_OVERLAYS]["tenant"] == 7
-    assert posts["ipam/vrfs/"] == {"name": "SpXTenant1500", "rd": "65001:1500", "tenant": 7}
+    assert posts["ipam/vrfs/"] == {
+        "name": "SpXTenant1500",
+        "rd": "65001:1500",
+        "tenant": 7,
+        "custom_fields": {"nvcm_site": "rack-1"},
+    }
     assert posts[_ASSIGN]["assigned_object_type"] == "ipam.vrf"
     assert posts[_VXLANS]["vnid"] == 1500 and posts[_VXLANS]["name"] == "SpXTenant1500"
 
@@ -199,3 +207,39 @@ async def test_delete_spectrum_x_vrf_matches_a_string_vrf_fk():
         assert (f"{_VXLANS}5/") in [path for method, path, _ in record if method == "DELETE"], (
             f"VXLAN not deleted for vrf={vrf_field!r}"
         )
+
+
+async def test_find_overlay_scopes_by_type_as_well_as_id():
+    # Overlay scope is a generic FK and Site/Location pks are independent, so
+    # scope_id=5 alone matched a Location-scoped overlay for a caller wanting Site 5.
+    seen: list[list[tuple[str, str]]] = []
+    client = fake_client()
+
+    async def rest_list(path, params=None, **kwargs):
+        if path.endswith("overlays/"):
+            seen.append(list(params or []))
+        return []
+
+    async def resolve_scope(value):
+        return "dcim.site", 5
+
+    client.rest_list = rest_list
+    client._resolve_scope = resolve_scope
+    assert await client._find_overlay("nvcm-spx", "site-a") is None
+    assert ("scope_id", "5") in seen[0]
+    assert ("scope_type", "dcim.site") in seen[0]
+
+
+async def test_stale_assignment_cleanup_compares_overlay_ids_as_strings():
+    # `"7" == 7` is False, so the self-exclusion guard deleted fresh assignments.
+    own = {
+        "id": 60,
+        "overlay": "7",
+        "assigned_object_type": "dcim.interface",
+        "assigned_object_id": 11,
+    }
+    record: list[tuple[str, str, object]] = []
+    client = fake_client(rest_list={_ASSIGN: [own]}, record=record)
+    removed = await client._remove_stale_spx_interface_assignments(7, ["11"])
+    assert removed == 0
+    assert not [p for m, p, _ in record if m == "DELETE"]
