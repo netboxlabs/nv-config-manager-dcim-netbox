@@ -1,7 +1,7 @@
 # Event delivery
 
-Change events originate in NetBox and are **pushed** to NVCM's render service —
-this provider never polls.
+Change events originate in NetBox and are **pushed** to NVCM's render service.
+This provider never polls.
 
 The companion plugin's `EVENTS_PIPELINE` bridge normalizes each NetBox change into
 the provider-neutral `DCIMChangeEvent` envelope and publishes it: to a logger, or
@@ -13,9 +13,9 @@ Three values must agree or events are published and silently never delivered:
 
 | Setting | Where |
 | --- | --- |
-| `nats_subject` | plugin `PLUGINS_CONFIG` — `nvcm.eventSubject` in `deploy/netbox/values.yaml` |
-| `dcim.event_subject` | NVCM installer config — becomes `[nats] dcim_change_subject` |
-| `dcim.event_stream` | NVCM installer config — the JetStream stream NVCM provisions |
+| `nats_subject` | plugin `PLUGINS_CONFIG`, set from `nvcm.eventSubject` in `deploy/netbox/values.yaml` |
+| `dcim.event_subject` | NVCM installer config; becomes `[nats] dcim_change_subject` |
+| `dcim.event_stream` | NVCM installer config; the JetStream stream NVCM provisions |
 
 The default pairing is stream `netbox`, subject `netbox.change`. `nvcm-netbox
 verify` exercises the whole path.
@@ -50,5 +50,5 @@ and are best-effort.
 Object types with **no NetBox equivalent** are deliberately not registered:
 `dcim.cablepath` (NetBox's `CablePath` is internal),
 `dcim.deviceredundancygroup` (no NetBox model), and BGP `bgproutinginstance` /
-`peerendpoint` (`netbox-bgp` has no routing-instance or peer-endpoint model — a
+`peerendpoint` (`netbox-bgp` has no routing-instance or peer-endpoint model, as a
 session carries its device directly).
