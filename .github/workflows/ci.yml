@@ -35,9 +35,11 @@ jobs:
             https://github.com/NVIDIA/nv-config-manager.git ../nv-config-manager
       # Into a venv, not `--system`: the interpreter setup-uv provisions is
       # uv-managed and externally managed, so `uv pip install --system` errors.
+      # `--clear` because setup-uv already creates (and exports) a .venv itself;
+      # without it `uv venv` aborts on the existing directory.
       - name: Install
         run: |
-          uv venv --python 3.13
+          uv venv --clear --python 3.13
           uv pip install ../nv-config-manager/components/dcim
           # The `installer` extra (click + PyYAML) is needed to *collect* the suite:
           # test_installer.py and test_air.py import both at module scope. The `air`
