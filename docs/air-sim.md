@@ -28,7 +28,8 @@ NetBox, and points NVCM at it.
 - The `air` extra, which needs an NVCM checkout:
 
   ```bash
-  make setup-air NVCM=../nv-config-manager
+  export NVCM_REPO=/path/to/nv-config-manager
+  make setup-air
   ```
 
 The NVCM checkout must be on **`zb/pluggable-dcim`**. `main` has none of the

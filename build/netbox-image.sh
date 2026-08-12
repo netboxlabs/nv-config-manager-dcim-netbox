@@ -24,7 +24,11 @@ mkdir -p "${workdir}"
 workdir="$(cd "${workdir}" && pwd)"
 
 docker_dir="${workdir}/netbox-docker"
-netbox_dir="${workdir}/netbox"
+# Inside the netbox-docker clone, not beside it: its Dockerfile does
+# `COPY ${NETBOX_PATH} /opt/netbox`, and COPY cannot reach outside the build
+# context (which is that clone). `.netbox` is netbox-docker's own default.
+netbox_rel=".netbox"
+netbox_dir="${docker_dir}/${netbox_rel}"
 
 echo "==> netbox-docker ${NETBOX_DOCKER_REF}"
 if [ ! -d "${docker_dir}/.git" ]; then
@@ -46,13 +50,56 @@ fi
 git -C "${netbox_dir}" fetch -q --depth 1 origin "${NETBOX_REF}"
 git -C "${netbox_dir}" checkout -q FETCH_HEAD
 
-echo "==> building ${NETBOX_BASE_IMAGE}"
+# netbox-docker's preflight (build-functions/check-commands.sh) requires skopeo
+# unconditionally, but every skopeo call sits behind `if [ -n "$GH_ACTION" ]` --
+# the registry checks that decide whether a push is needed. An interactive build
+# sets SHOULD_BUILD=true and never calls it. Rather than make skopeo a
+# prerequisite for a code path we do not take, satisfy the preflight with a stub
+# that fails loudly if it is ever actually invoked.
+stub_dir=""
+if ! command -v skopeo >/dev/null 2>&1; then
+  stub_dir="$(mktemp -d)"
+  trap 'rm -rf "${stub_dir}"' EXIT
+  cat > "${stub_dir}/skopeo" <<'STUB'
+#!/bin/sh
+echo "skopeo was actually invoked by netbox-docker, which this build does not expect." >&2
+echo "It is only used for registry checks under GH_ACTION. Install skopeo" >&2
+echo "(brew install skopeo) and re-run." >&2
+exit 1
+STUB
+  chmod +x "${stub_dir}/skopeo"
+  echo "==> skopeo not installed; stubbing it for netbox-docker's preflight"
+fi
+
+# netbox-docker defaults to linux/amd64. kind's nodes match the host, so on an
+# arm64 machine that image would only run under emulation. Build for the host
+# unless BUILDX_PLATFORM says otherwise.
+case "$(uname -m)" in
+  arm64 | aarch64) host_platform="linux/arm64" ;;
+  *) host_platform="linux/amd64" ;;
+esac
+BUILDX_PLATFORM="${BUILDX_PLATFORM:-${host_platform}}"
+export BUILDX_PLATFORM
+
+case "${NETBOX_BASE_IMAGE}" in
+  *:*) base_name="${NETBOX_BASE_IMAGE%:*}"; base_tag="${NETBOX_BASE_IMAGE##*:}" ;;
+  *)   base_name="${NETBOX_BASE_IMAGE}";    base_tag="latest" ;;
+esac
+
+echo "==> building ${base_name}:${base_tag} for ${BUILDX_PLATFORM}"
 (
   cd "${docker_dir}"
+  [ -n "${stub_dir}" ] && PATH="${stub_dir}:${PATH}" && export PATH
+  # build.sh composes ${IMAGE_NAMES}:${DOCKER_TAG}, so the two halves are passed
+  # separately; handing it a full "name:tag" as DOCKER_TAG yields an image
+  # reference with two colons, which docker rejects. It also always emits a
+  # second, version-suffixed tag (…:feature-5.0.2) that we simply ignore.
+  #
   # SKIP_GIT: use the tree we pinned above. The branch argument is only used to
-  # derive a tag, which we override immediately after.
-  SKIP_GIT=1 NETBOX_PATH="${netbox_dir}" \
-    DOCKER_TAG="${NETBOX_BASE_IMAGE}" \
+  # derive a default tag, which DOCKER_TAG overrides.
+  SKIP_GIT=1 NETBOX_PATH="${netbox_rel}" \
+    IMAGE_NAMES="${base_name}" \
+    DOCKER_TAG="${base_tag}" \
     ./build.sh feature
 )
 

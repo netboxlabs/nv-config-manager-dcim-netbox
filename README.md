@@ -27,17 +27,25 @@ git clone https://github.com/netboxlabs/netbox-nv-config-manager
 git clone https://github.com/netboxlabs/nv-config-manager-dcim-netbox
 cd nv-config-manager-dcim-netbox
 
-uv pip install -e ".[installer]"
+# Where your NVCM checkout is. Both `make` and `nvcm-netbox` read it, so set it
+# once; without it they assume ../nv-config-manager.
+export NVCM_REPO=../nv-config-manager
+
+make setup         # venv, the SDK from your NVCM checkout, and the CLI
 make images        # provider wheelhouse + NetBox with the plugin
-nvcm-netbox up --nvcm-repo ../nv-config-manager
+.venv/bin/nvcm-netbox up
 ```
+
+`make setup` rather than `pip install -e .` because the
+`nv-config-manager-dcim` SDK is not published; it is installed from
+`$NVCM_REPO/components/dcim`.
 
 Running `up` again is safe.
 
 ```bash
-nvcm-netbox verify                     # re-run the event-loop check
-nvcm-netbox up --size medium           # larger NVCM resource profile
-nvcm-netbox up --skip-nvcm             # NetBox only
+.venv/bin/nvcm-netbox verify           # re-run the event-loop check
+.venv/bin/nvcm-netbox up --size medium # larger NVCM resource profile
+.venv/bin/nvcm-netbox up --skip-nvcm   # NetBox only
 kubectl -n nv-config-manager port-forward svc/netbox 8080:80
 ```
 
@@ -62,10 +70,10 @@ need, such as `cluster.size`, SSO, vault or ZTP. `provider_packages` is a real
 field in NVCM's schema and just lacks a widget, so the TUI preserves it:
 
 ```bash
-nvcm-netbox config -o my.yaml
-uv run --project ../nv-config-manager/installer \
+.venv/bin/nvcm-netbox config -o my.yaml
+uv run --project "$NVCM_REPO/installer" \
   nv-config-manager-installer init -c my.yaml     # TUI, pre-populated
-nvcm-netbox up --nvcm-repo ../nv-config-manager --config-out my.yaml
+.venv/bin/nvcm-netbox up --config-out my.yaml
 ```
 
 Use `nvcm-netbox config` on its own if you'd rather run NVCM's installer

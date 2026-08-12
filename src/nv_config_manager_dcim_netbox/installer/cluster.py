@@ -47,6 +47,17 @@ def helm_dependency_build(chart_dir: Path) -> None:
     stream(["helm", "dependency", "build", str(chart_dir)])
 
 
+def load_images_into_kind(images: list[str], cluster: str) -> None:
+    """Make locally-built images visible to a kind node.
+
+    A kind node has its own image store, and both the NetBox chart and NVCM's
+    provider init container pull IfNotPresent. Neither image is in a registry, so
+    without this they resolve to a registry pull and fail.
+    """
+    for image in images:
+        stream(["kind", "load", "docker-image", image, "--name", cluster])
+
+
 def install_netbox(
     chart_ref: str,
     *,

@@ -32,7 +32,9 @@ FROM ${NETBOX_BASE_IMAGE} AS main
 ARG NETBOX_BGP_VERSION
 
 COPY --from=plugin-build /wheels/ /tmp/wheels/
-RUN /opt/netbox/venv/bin/pip install --no-cache-dir \
+# uv, not pip: netbox-docker builds /opt/netbox/venv with `uv venv`, which does
+# not put pip inside it. uv ships in the image at /usr/local/bin/uv.
+RUN uv pip install --python /opt/netbox/venv/bin/python --no-cache \
       "netbox-bgp==${NETBOX_BGP_VERSION}" \
       /tmp/wheels/netbox_nv_config_manager-*.whl \
  && rm -rf /tmp/wheels

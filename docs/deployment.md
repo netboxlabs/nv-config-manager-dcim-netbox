@@ -33,10 +33,15 @@ Re-running it is safe.
 ## Quick start
 
 ```bash
-uv pip install -e ".[installer]"
+export NVCM_REPO=/path/to/nv-config-manager
+make setup
 make images
-nvcm-netbox up --nvcm-repo ../nv-config-manager
+.venv/bin/nvcm-netbox up
 ```
+
+`NVCM_REPO` is read by both `make` and `nvcm-netbox`; `--nvcm-repo` overrides it
+for a single run. Without either, both assume `../nv-config-manager`, which only
+holds if the repos were cloned side by side.
 
 | Flag | Effect |
 | --- | --- |
@@ -85,7 +90,7 @@ EOF
 
 # 3. NVCM.
 nvcm-netbox config -o my.yaml --token "$TOKEN"
-uv run --project ../nv-config-manager/installer \
+uv run --project "$NVCM_REPO/installer" \
   nv-config-manager-installer deploy my.yaml --image-source local \
   --build-images --load-kind --kind-cluster nv-config-manager \
   --install-envoy-gateway --install-cnpg-operator --install-cert-manager

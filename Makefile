@@ -4,7 +4,10 @@
 #   make render SERVER=https://netbox.example TOKEN=abc DEVICE_ID=<id> ENTRYPOINT=<name>
 #   make setup NVCM=/path/to/nv-config-manager   # branch: zb/pluggable-dcim
 
-NVCM       ?= ../nv-config-manager
+# Path to the nv-config-manager checkout. Only a sibling clone by default, so
+# export NVCM_REPO once rather than passing NVCM= to every target. The
+# `nvcm-netbox` CLI reads the same variable.
+NVCM       ?= $(if $(NVCM_REPO),$(NVCM_REPO),../nv-config-manager)
 PLUGIN     ?= ../netbox-nv-config-manager
 SERVER     ?= http://localhost:8000
 TOKEN      ?= REPLACE_ME

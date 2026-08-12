@@ -12,6 +12,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import click
 import pytest
 import yaml
 from click.testing import CliRunner
@@ -336,3 +337,60 @@ def test_provider_image_tag_tracks_the_package_version():
     # Hardcoded, a version bump left the installer asking for an unbuilt tag.
     assert cfg.PROVIDER_IMAGE.endswith(f":{cfg.IMAGE_TAG}")
     assert cfg.ConfigOptions(api_token="nbt_x.y").provider_image == cfg.PROVIDER_IMAGE
+
+
+# -- locating the NVCM checkout ------------------------------------------------
+
+
+def test_nvcm_repo_precedence_flag_then_env_then_default(tmp_path, monkeypatch):
+    from nv_config_manager_dcim_netbox.installer.cli import _nvcm_repo_candidate
+
+    monkeypatch.setenv("NVCM_REPO", str(tmp_path / "from-env"))
+    assert _nvcm_repo_candidate(None)[0] == tmp_path / "from-env"
+    # An explicit flag wins over the environment.
+    assert _nvcm_repo_candidate(tmp_path / "from-flag")[0] == tmp_path / "from-flag"
+
+    monkeypatch.delenv("NVCM_REPO")
+    path, source = _nvcm_repo_candidate(None)
+    assert path.name == "nv-config-manager" and source == "the default"
+
+
+def _fake_checkout(root):
+    """A directory shaped enough like an NVCM checkout to satisfy validation."""
+    (root / "installer").mkdir(parents=True)
+    (root / "installer" / "pyproject.toml").write_text("")
+    (root / "deploy" / "helm").mkdir(parents=True)
+    (root / "deploy" / "helm" / "Chart.yaml").write_text("")
+    return root
+
+
+def test_nvcm_repo_resolves_from_the_environment(tmp_path, monkeypatch):
+    from nv_config_manager_dcim_netbox.installer.cli import _resolve_nvcm_repo
+
+    repo = _fake_checkout(tmp_path / "nvcm")
+    monkeypatch.setenv("NVCM_REPO", str(repo))
+    assert _resolve_nvcm_repo(None) == repo.resolve()
+
+
+def test_missing_checkout_names_the_path_and_its_source(tmp_path, monkeypatch):
+    # The whole point: a relative default resolved against the wrong working
+    # directory is invisible unless the error prints the absolute path it tried.
+    from nv_config_manager_dcim_netbox.installer.cli import _resolve_nvcm_repo
+
+    monkeypatch.setenv("NVCM_REPO", str(tmp_path / "nope"))
+    with pytest.raises(click.ClickException) as excinfo:
+        _resolve_nvcm_repo(None)
+    message = str(excinfo.value)
+    assert str(tmp_path / "nope") in message
+    assert "$NVCM_REPO" in message
+
+
+def test_wrong_directory_is_reported_as_not_a_checkout(tmp_path, monkeypatch):
+    from nv_config_manager_dcim_netbox.installer.cli import _resolve_nvcm_repo
+
+    monkeypatch.delenv("NVCM_REPO", raising=False)
+    with pytest.raises(click.ClickException) as excinfo:
+        _resolve_nvcm_repo(tmp_path)
+    message = str(excinfo.value)
+    assert "not an nv-config-manager checkout" in message
+    assert "--nvcm-repo" in message

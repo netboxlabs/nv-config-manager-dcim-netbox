@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -19,6 +20,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CHART = _REPO_ROOT / "deploy" / "netbox"
 DEFAULT_NAMESPACE = "nv-config-manager"
 DEFAULT_NETBOX_RELEASE = "netbox"
+# Matches netbox.image.tag in deploy/netbox/values.yaml.
+DEFAULT_NETBOX_TAG = "0.1.0"
+
+# Where to find the NVCM checkout. The sibling default only holds if the repos
+# were cloned side by side; set NVCM_REPO once instead of passing --nvcm-repo
+# on every invocation.
+NVCM_REPO_ENV = "NVCM_REPO"
+DEFAULT_NVCM_REPO = Path("../nv-config-manager")
 
 
 def _step(number: int, total: int, message: str) -> None:
@@ -78,17 +87,44 @@ def _config_options(
     )
 
 
-def _resolve_nvcm_repo(nvcm_repo: Path) -> Path:
-    resolved = nvcm_repo.expanduser().resolve()
+def _nvcm_repo_candidate(nvcm_repo: Path | None) -> tuple[Path, str]:
+    """Return the NVCM checkout path to try, and where that choice came from.
+
+    Precedence: --nvcm-repo, then $NVCM_REPO, then the sibling default. The
+    source is carried so errors can say which one produced the path.
+    """
+    if nvcm_repo is not None:
+        return nvcm_repo.expanduser().resolve(), "--nvcm-repo"
+    if os.environ.get(NVCM_REPO_ENV):
+        return Path(os.environ[NVCM_REPO_ENV]).expanduser().resolve(), f"${NVCM_REPO_ENV}"
+    return DEFAULT_NVCM_REPO.expanduser().resolve(), "the default"
+
+
+def _resolve_nvcm_repo(nvcm_repo: Path | None) -> Path:
+    """Locate and validate the NVCM checkout.
+
+    Errors name the absolute path that was tried and where it came from; a
+    relative default resolved against the wrong working directory is otherwise
+    invisible.
+    """
+    resolved, source = _nvcm_repo_candidate(nvcm_repo)
+    hint = (
+        f"Pass --nvcm-repo, or set {NVCM_REPO_ENV} to the checkout's path.\n"
+        "NVCM's Helm chart and images are not published anywhere, so a checkout "
+        "is required."
+    )
+    if not resolved.exists():
+        raise click.ClickException(f"No such directory: {resolved}\n(from {source})\n{hint}")
     if not (resolved / "installer" / "pyproject.toml").is_file():
         raise click.ClickException(
-            f"{resolved} does not look like an nv-config-manager checkout "
-            "(no installer/pyproject.toml).\n"
-            "NVCM's Helm chart and images are not published anywhere, so a checkout "
-            "is required. Pass --nvcm-repo."
+            f"{resolved} is not an nv-config-manager checkout: no installer/pyproject.toml.\n"
+            f"(from {source})\n{hint}"
         )
     if not (resolved / "deploy" / "helm" / "Chart.yaml").is_file():
-        raise click.ClickException(f"{resolved} has no deploy/helm chart.")
+        raise click.ClickException(
+            f"{resolved} has no deploy/helm/Chart.yaml, so the NetBox deploy cannot "
+            f"reference the NVCM chart.\n(from {source})"
+        )
     return resolved
 
 
@@ -173,9 +209,9 @@ def config_command(
 @click.option(
     "--nvcm-repo",
     type=click.Path(path_type=Path),
-    default=Path("../nv-config-manager"),
-    show_default=True,
-    help="Path to an nv-config-manager checkout.",
+    default=None,
+    help=f"Path to an nv-config-manager checkout. Defaults to ${NVCM_REPO_ENV}, "
+    f"then {DEFAULT_NVCM_REPO}.",
 )
 @click.option("--namespace", default=DEFAULT_NAMESPACE, show_default=True)
 @click.option(
@@ -206,8 +242,14 @@ def config_command(
 @click.option("--skip-nvcm", is_flag=True, help="Deploy NetBox only; skip the NVCM installer.")
 @click.option("--skip-verify", is_flag=True, help="Do not run the event-loop check at the end.")
 @click.option("--kind-cluster", default="nv-config-manager", show_default=True)
+@click.option(
+    "--kind-load/--no-kind-load",
+    default=True,
+    show_default=True,
+    help="Load the locally-built images into the kind node. Disable for a real cluster.",
+)
 def up(
-    nvcm_repo: Path,
+    nvcm_repo: Path | None,
     namespace: str,
     release: str,
     chart: Path,
@@ -220,6 +262,7 @@ def up(
     skip_nvcm: bool,
     skip_verify: bool,
     kind_cluster: str,
+    kind_load: bool,
 ) -> None:
     """Bring up NetBox + NVCM on the current cluster.
 
@@ -228,7 +271,7 @@ def up(
     NATS password NVCM's deployer created.
     """
     require_tools("kubectl", "helm")
-    total = 5 if skip_nvcm else 8
+    total = 6 if skip_nvcm else 9
     step = 0
 
     repo = None if skip_nvcm else _resolve_nvcm_repo(nvcm_repo)
@@ -239,9 +282,26 @@ def up(
     if not is_valid_api_token(token):
         raise click.ClickException("--token must be a NetBox v2 token: nbt_<12>.<40>.")
 
+    # Both refs resolved up front: the same values are loaded into the node and
+    # written into NVCM's config, so they cannot disagree.
+    profile = cfg.load_profile()
+    provider_ref = _config_options(
+        profile, api_token=token, namespace=namespace, size=size, provider_image=provider_image
+    ).provider_image
+    netbox_ref = f"{netbox_image}:{netbox_tag or DEFAULT_NETBOX_TAG}"
+
     step += 1
     _step(step, total, "Fetching chart dependencies")
     cluster.helm_dependency_build(chart)
+
+    step += 1
+    if kind_load:
+        _step(step, total, f"Loading images into kind cluster {kind_cluster}")
+        require_tools("kind")
+        cluster.load_images_into_kind([netbox_ref, provider_ref], kind_cluster)
+        _ok("images available to the node")
+    else:
+        _step(step, total, "Skipping kind image load (--no-kind-load)")
 
     step += 1
     _step(step, total, f"Deploying NetBox to namespace {namespace}")
@@ -253,7 +313,7 @@ def up(
         namespace=namespace,
         api_token=token,
         image_repository=netbox_image,
-        image_tag=netbox_tag,
+        image_tag=netbox_tag or DEFAULT_NETBOX_TAG,
     )
     cluster.wait_for_netbox(namespace)
     _ok("NetBox rolled out")
@@ -265,18 +325,19 @@ def up(
 
     step += 1
     _step(step, total, "Generating the NVCM installer config")
-    base = cfg.load_profile()
     options = _config_options(
-        base, api_token=token, namespace=namespace, size=size, provider_image=provider_image
+        profile, api_token=token, namespace=namespace, size=size, provider_image=provider_ref
     )
-    config = cfg.apply_options(base, options)
+    config = cfg.apply_options(profile, options)
     written = cfg.write_config(config, config_out)
     _ok(f"{written}")
 
     if skip_nvcm:
         step += 1
         _step(step, total, "Skipping NVCM (--skip-nvcm)")
-        manual = " ".join(_nvcm_installer_argv(Path(nvcm_repo), "deploy", str(written)))
+        manual = " ".join(
+            _nvcm_installer_argv(_nvcm_repo_candidate(nvcm_repo)[0], "deploy", str(written))
+        )
         click.echo(f"\nDeploy NVCM yourself with:\n  {manual}")
         return
 
@@ -319,7 +380,7 @@ def up(
             namespace=namespace,
             api_token=token,
             image_repository=netbox_image,
-            image_tag=netbox_tag,
+            image_tag=netbox_tag or DEFAULT_NETBOX_TAG,
             nats_password=nats_password,
         )
         _ok("NetBox publishing to NATS")
