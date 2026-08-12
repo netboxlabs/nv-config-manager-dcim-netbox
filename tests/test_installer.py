@@ -394,3 +394,53 @@ def test_wrong_directory_is_reported_as_not_a_checkout(tmp_path, monkeypatch):
     message = str(excinfo.value)
     assert "not an nv-config-manager checkout" in message
     assert "--nvcm-repo" in message
+
+
+# -- failure reporting ---------------------------------------------------------
+
+
+def test_a_failed_tool_call_is_an_error_not_a_traceback(monkeypatch):
+    # helm and kubectl failures are ordinary outcomes; a stack trace buries the
+    # tool's own message, which is the part that says what went wrong.
+    from nv_config_manager_dcim_netbox.installer.shell import CommandError
+
+    @cli.main.command("boom")
+    def _boom():
+        raise CommandError(["helm", "upgrade"], 1)
+
+    result = CliRunner().invoke(cli.main, ["boom"])
+    assert result.exit_code != 0
+    assert "Error: `helm upgrade` exited 1" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_pending_release_is_reported_with_the_command_that_clears_it(monkeypatch):
+    # An interrupted `helm upgrade --install` leaves the release pending, and
+    # every later run then fails with helm's opaque "another operation in
+    # progress". Name the fix instead.
+    monkeypatch.setattr(cluster, "kind_cluster_exists", lambda name: True)
+    monkeypatch.setattr(cluster, "helm_dependency_build", lambda chart: None)
+    monkeypatch.setattr(
+        cluster, "pending_release_status", lambda r, ns, runner=None: "pending-install"
+    )
+
+    result = CliRunner().invoke(
+        cli.main,
+        ["up", "--nvcm-repo", str(_nvcm_stub()), "--no-kind-load", "--skip-nvcm"],
+    )
+    assert result.exit_code != 0
+    assert "pending-install" in result.output
+    assert "helm uninstall netbox -n nv-config-manager" in result.output
+
+
+def _nvcm_stub():
+    """A directory shaped like an NVCM checkout, for tests that must get past
+    repo validation."""
+    import tempfile
+
+    root = Path(tempfile.mkdtemp())
+    (root / "installer").mkdir()
+    (root / "installer" / "pyproject.toml").write_text("")
+    (root / "deploy" / "helm").mkdir(parents=True)
+    (root / "deploy" / "helm" / "Chart.yaml").write_text("")
+    return root

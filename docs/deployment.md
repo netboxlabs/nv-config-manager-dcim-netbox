@@ -7,16 +7,21 @@ NetBox as its DCIM provider.
 
 `nvcm-netbox up`:
 
-1. Deploys NetBox into the cluster from `deploy/netbox`, with this provider's
+1. Creates the kind cluster if it is missing, from NVCM's `deploy/kind-config.yaml`.
+   That config maps the Gateway NodePorts (30443/30080) onto host 443/80; a plain
+   `kind create cluster` leaves the Gateway unreachable.
+2. Loads the two locally-built images into the kind node. Neither is in a
+   registry and both are pulled `IfNotPresent`, so the node needs them up front.
+3. Deploys NetBox into the cluster from `deploy/netbox`, with this provider's
    plugin and `netbox_bgp` enabled and its own PostgreSQL and Valkey.
-2. Initialises NetBox by running the plugin's `nvcm_init` (migrations, superuser,
+4. Initialises NetBox by running the plugin's `nvcm_init` (migrations, superuser,
    API token, custom fields, bootstrap data).
-3. Writes NVCM's installer config from `deploy/configs/local-netbox.yaml`, filling
+5. Writes NVCM's installer config from `deploy/configs/local-netbox.yaml`, filling
    in the API token, image refs and cluster size.
-4. Runs NVCM's installer against your checkout.
-5. Rolls NetBox again so it picks up the NATS password NVCM created, which
+6. Runs NVCM's installer against your checkout.
+7. Rolls NetBox again so it picks up the NATS password NVCM created, which
    switches the change-event publisher on.
-6. Publishes a test event and checks NVCM's render consumer handles it.
+8. Publishes a test event and checks NVCM's render consumer handles it.
 
 Re-running it is safe.
 

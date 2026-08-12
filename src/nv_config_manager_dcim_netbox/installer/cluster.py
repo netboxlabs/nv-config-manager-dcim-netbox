@@ -10,7 +10,7 @@ import shlex
 from pathlib import Path
 
 from nv_config_manager_dcim_netbox.installer.remote import LocalRunner, Runner
-from nv_config_manager_dcim_netbox.installer.shell import CommandError, stream
+from nv_config_manager_dcim_netbox.installer.shell import CommandError, run, stream
 
 # Fixed by deploy/netbox/values.yaml (netbox.fullnameOverride), so these names do
 # not move with the helm release name.
@@ -47,6 +47,26 @@ def helm_dependency_build(chart_dir: Path) -> None:
     stream(["helm", "dependency", "build", str(chart_dir)])
 
 
+def kind_cluster_exists(name: str) -> bool:
+    """Return whether a kind cluster of this name is already running."""
+    try:
+        return name in run(["kind", "get", "clusters"]).split()
+    except CommandError:
+        return False
+
+
+def create_kind_cluster(name: str, config: Path, timeout: str = "5m") -> None:
+    """Create the kind cluster NVCM expects.
+
+    Uses NVCM's own `deploy/kind-config.yaml`, which maps the Gateway NodePorts
+    (30443/30080) onto host 443/80. A default `kind create cluster` omits those,
+    and the deployed Gateway is then unreachable from the host.
+    """
+    stream(
+        ["kind", "create", "cluster", "--name", name, "--config", str(config), "--wait", timeout]
+    )
+
+
 def load_images_into_kind(images: list[str], cluster: str) -> None:
     """Make locally-built images visible to a kind node.
 
@@ -56,6 +76,50 @@ def load_images_into_kind(images: list[str], cluster: str) -> None:
     """
     for image in images:
         stream(["kind", "load", "docker-image", image, "--name", cluster])
+
+
+def pending_release_status(
+    release: str, namespace: str, runner: Runner | None = None
+) -> str | None:
+    """Return the release's status if helm has it stuck mid-operation.
+
+    A run interrupted during `helm upgrade --install` leaves the release in
+    `pending-install` / `pending-upgrade`, and every later attempt fails with
+    "another operation (install/upgrade/rollback) is in progress". Detecting it
+    lets the caller say which command clears it.
+    """
+    argv = ["helm", "status", release, "--namespace", namespace, "-o", "json"]
+    try:
+        payload = json.loads((runner or LocalRunner()).run(argv))
+    except (CommandError, ValueError):
+        return None
+    status = str((payload.get("info") or {}).get("status") or "")
+    return status if status.startswith("pending-") else None
+
+
+def orphaned_data_volumes(
+    release: str, namespace: str, runner: Runner | None = None
+) -> list[str]:
+    """Return datastore PVCs left behind by a previous release of this name.
+
+    `helm uninstall` deletes the generated Secrets but not the StatefulSets'
+    PVCs. Reinstalling then mints new datastore passwords that cannot match the
+    databases already initialised on those volumes. The chart pins the passwords
+    so this cannot happen on its own, but a volume from before that pin (or from
+    a chart with different credentials) still has to be found and named.
+    """
+    try:
+        names = kubectl(
+            "get",
+            "pvc",
+            "-o",
+            "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+            namespace=namespace,
+            runner=runner,
+        ).split()
+    except CommandError:
+        return []
+    return [n for n in names if n.startswith((f"data-{release}-", f"valkey-data-{release}-"))]
 
 
 def install_netbox(

@@ -128,7 +128,17 @@ def _resolve_nvcm_repo(nvcm_repo: Path | None) -> Path:
     return resolved
 
 
-@click.group()
+class _CleanErrors(click.Group):
+    """Report a failed helm/kubectl call as an error, not a Python traceback."""
+
+    def invoke(self, ctx: click.Context):
+        try:
+            return super().invoke(ctx)
+        except CommandError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+
+@click.group(cls=_CleanErrors)
 @click.version_option(package_name="nv-config-manager-dcim-netbox")
 def main() -> None:
     """Deploy NVIDIA Config Manager backed by NetBox."""
@@ -243,6 +253,12 @@ def config_command(
 @click.option("--skip-verify", is_flag=True, help="Do not run the event-loop check at the end.")
 @click.option("--kind-cluster", default="nv-config-manager", show_default=True)
 @click.option(
+    "--create-cluster/--no-create-cluster",
+    default=True,
+    show_default=True,
+    help="Create the kind cluster if it does not exist, using NVCM's kind-config.yaml.",
+)
+@click.option(
     "--kind-load/--no-kind-load",
     default=True,
     show_default=True,
@@ -262,6 +278,7 @@ def up(
     skip_nvcm: bool,
     skip_verify: bool,
     kind_cluster: str,
+    create_cluster: bool,
     kind_load: bool,
 ) -> None:
     """Bring up NetBox + NVCM on the current cluster.
@@ -271,7 +288,7 @@ def up(
     NATS password NVCM's deployer created.
     """
     require_tools("kubectl", "helm")
-    total = 6 if skip_nvcm else 9
+    total = 7 if skip_nvcm else 10
     step = 0
 
     repo = None if skip_nvcm else _resolve_nvcm_repo(nvcm_repo)
@@ -291,6 +308,26 @@ def up(
     netbox_ref = f"{netbox_image}:{netbox_tag or DEFAULT_NETBOX_TAG}"
 
     step += 1
+    _step(step, total, f"Checking kind cluster {kind_cluster}")
+    if cluster.kind_cluster_exists(kind_cluster):
+        _ok("already running")
+    elif not create_cluster:
+        raise click.ClickException(
+            f"kind cluster {kind_cluster!r} does not exist and --no-create-cluster was given."
+        )
+    else:
+        require_tools("kind")
+        kind_config = _nvcm_repo_candidate(nvcm_repo)[0] / "deploy" / "kind-config.yaml"
+        if not kind_config.is_file():
+            raise click.ClickException(
+                f"kind cluster {kind_cluster!r} does not exist, and NVCM's cluster config "
+                f"is not at {kind_config}.\nCreate the cluster yourself, or point "
+                f"--nvcm-repo / ${NVCM_REPO_ENV} at the checkout."
+            )
+        cluster.create_kind_cluster(kind_cluster, kind_config)
+        _ok(f"created from {kind_config.name}")
+
+    step += 1
     _step(step, total, "Fetching chart dependencies")
     cluster.helm_dependency_build(chart)
 
@@ -305,6 +342,14 @@ def up(
 
     step += 1
     _step(step, total, f"Deploying NetBox to namespace {namespace}")
+    stuck = cluster.pending_release_status(release, namespace)
+    if stuck:
+        raise click.ClickException(
+            f"The {release!r} release is stuck in {stuck}, usually because an earlier run was "
+            f"interrupted mid-install. helm refuses to proceed until it is cleared:\n"
+            f"    helm uninstall {release} -n {namespace}\n"
+            "(or `helm rollback` if there is a completed revision to return to)."
+        )
     # No NATS password yet: NVCM does not exist, so the publisher comes up on the
     # `log` backend. It is switched to NATS at the end.
     cluster.install_netbox(

@@ -40,6 +40,11 @@ make images        # provider wheelhouse + NetBox with the plugin
 `nv-config-manager-dcim` SDK is not published; it is installed from
 `$NVCM_REPO/components/dcim`.
 
+`up` creates the kind cluster if it does not already exist, using NVCM's
+`deploy/kind-config.yaml` (which maps the Gateway's NodePorts onto host 443/80;
+a default `kind create cluster` does not). Pass `--no-create-cluster` to require
+an existing one, and `--no-kind-load` when targeting a real cluster.
+
 Running `up` again is safe.
 
 ```bash
