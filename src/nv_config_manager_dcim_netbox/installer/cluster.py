@@ -22,6 +22,11 @@ NETBOX_SERVICE = "netbox"
 # these regardless of whether NVCM's bundled DCIM is deployed.
 NVCM_NATS_SECRET = "nats-nv-config-manager"
 
+# Postgres and Valkey passwords, generated on first install and kept across
+# uninstall so they stay in step with the data on the PVCs.
+# See deploy/netbox/templates/datastore-credentials.yaml.
+DATASTORE_SECRET = "netbox-datastores"
+
 
 def kubectl(
     *args: str,
@@ -97,29 +102,34 @@ def pending_release_status(
     return status if status.startswith("pending-") else None
 
 
-def orphaned_data_volumes(
-    release: str, namespace: str, runner: Runner | None = None
-) -> list[str]:
-    """Return datastore PVCs left behind by a previous release of this name.
+def orphaned_data_volumes(release: str, namespace: str, runner: Runner | None = None) -> list[str]:
+    """Return datastore PVCs whose credentials Secret is gone.
 
-    `helm uninstall` deletes the generated Secrets but not the StatefulSets'
-    PVCs. Reinstalling then mints new datastore passwords that cannot match the
-    databases already initialised on those volumes. The chart pins the passwords
-    so this cannot happen on its own, but a volume from before that pin (or from
-    a chart with different credentials) still has to be found and named.
+    The chart keeps `netbox-datastores` across uninstall precisely so the
+    passwords keep matching the data on the PVCs. If the volumes are still there
+    but that Secret is not, the databases on them were initialised with
+    passwords nobody holds any more, and NetBox would crashloop on "password
+    authentication failed" until the volumes are deleted.
     """
     try:
         names = kubectl(
             "get",
             "pvc",
             "-o",
-            "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+            'jsonpath={range .items[*]}{.metadata.name}{"\\n"}{end}',
             namespace=namespace,
             runner=runner,
         ).split()
     except CommandError:
         return []
-    return [n for n in names if n.startswith((f"data-{release}-", f"valkey-data-{release}-"))]
+    volumes = [n for n in names if n.startswith((f"data-{release}-", f"valkey-data-{release}-"))]
+    if not volumes:
+        return []
+    try:
+        kubectl("get", "secret", DATASTORE_SECRET, namespace=namespace, runner=runner)
+    except CommandError:
+        return sorted(volumes)
+    return []
 
 
 def install_netbox(

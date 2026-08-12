@@ -350,6 +350,14 @@ def up(
             f"    helm uninstall {release} -n {namespace}\n"
             "(or `helm rollback` if there is a completed revision to return to)."
         )
+    stale = cluster.orphaned_data_volumes(release, namespace)
+    if stale:
+        raise click.ClickException(
+            "These volumes hold databases whose passwords are gone, so NetBox would not be "
+            f"able to log in to them:\n    {' '.join(stale)}\n"
+            "Delete them and run this again (the data on them is not recoverable):\n"
+            f"    kubectl delete pvc -n {namespace} {' '.join(stale)}"
+        )
     # No NATS password yet: NVCM does not exist, so the publisher comes up on the
     # `log` backend. It is switched to NATS at the end.
     cluster.install_netbox(

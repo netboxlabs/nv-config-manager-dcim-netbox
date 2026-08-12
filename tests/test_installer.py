@@ -433,6 +433,48 @@ def test_pending_release_is_reported_with_the_command_that_clears_it(monkeypatch
     assert "helm uninstall netbox -n nv-config-manager" in result.output
 
 
+def test_data_volumes_are_orphaned_only_once_their_secret_is_gone(monkeypatch):
+    from nv_config_manager_dcim_netbox.installer.shell import CommandError
+
+    pvcs = "data-netbox-postgresql-0\nvalkey-data-netbox-valkey-primary-0\nother-pvc\n"
+
+    def fake_kubectl(*args, namespace=None, stdin=None, runner=None):
+        if args[1] == "pvc":
+            return pvcs
+        raise CommandError(["kubectl", "get", "secret"], 1)
+
+    monkeypatch.setattr(cluster, "kubectl", fake_kubectl)
+    assert cluster.orphaned_data_volumes("netbox", "nv-config-manager") == [
+        "data-netbox-postgresql-0",
+        "valkey-data-netbox-valkey-primary-0",
+    ]
+
+    # The Secret survives uninstall, so its presence means the passwords still
+    # match the data on those volumes and they are fine to reuse.
+    monkeypatch.setattr(
+        cluster, "kubectl", lambda *a, namespace=None, stdin=None, runner=None: pvcs
+    )
+    assert cluster.orphaned_data_volumes("netbox", "nv-config-manager") == []
+
+
+def test_orphaned_volumes_are_reported_with_the_command_that_clears_them(monkeypatch):
+    monkeypatch.setattr(cluster, "kind_cluster_exists", lambda name: True)
+    monkeypatch.setattr(cluster, "helm_dependency_build", lambda chart: None)
+    monkeypatch.setattr(cluster, "pending_release_status", lambda r, ns, runner=None: None)
+    monkeypatch.setattr(
+        cluster,
+        "orphaned_data_volumes",
+        lambda r, ns, runner=None: ["data-netbox-postgresql-0"],
+    )
+
+    result = CliRunner().invoke(
+        cli.main,
+        ["up", "--nvcm-repo", str(_nvcm_stub()), "--no-kind-load", "--skip-nvcm"],
+    )
+    assert result.exit_code != 0
+    assert "kubectl delete pvc -n nv-config-manager data-netbox-postgresql-0" in result.output
+
+
 def _nvcm_stub():
     """A directory shaped like an NVCM checkout, for tests that must get past
     repo validation."""
