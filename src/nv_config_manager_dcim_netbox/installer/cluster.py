@@ -204,37 +204,6 @@ def wait_for_netbox(namespace: str, timeout: str = "10m", runner: Runner | None 
     )
 
 
-def netbox_pod(namespace: str, runner: Runner | None = None) -> str:
-    """Return the name of a NetBox pod that is ready to be exec'd into.
-
-    Readiness is checked rather than taking the first pod listed: during a
-    rollout the old pod is still Running while it terminates, and exec'ing into
-    it fails partway through with a bare 137.
-    """
-    # name, ready, and whether it is being deleted, one pod per line.
-    listing = kubectl(
-        "get",
-        "pod",
-        "-l",
-        f"app.kubernetes.io/name={NETBOX_DEPLOYMENT},"
-        f"app.kubernetes.io/component={NETBOX_DEPLOYMENT}",
-        "-o",
-        'jsonpath={range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[0].ready}'
-        '{" "}{.metadata.deletionTimestamp}{"\\n"}{end}',
-        namespace=namespace,
-        runner=runner,
-    )
-    for line in listing.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[1] == "true" and len(parts) == 2:
-            return parts[0]
-    raise CommandError(
-        ["kubectl", "get", "pod"],
-        1,
-        f"No ready NetBox pod in {namespace}. Currently:\n{listing.strip() or '  (none)'}",
-    )
-
-
 def load_topology(
     blueprint: str,
     namespace: str,
@@ -250,14 +219,25 @@ def load_topology(
 
     This is NVCM's `make topology` for NetBox. Without it NetBox comes up empty,
     and an empty DCIM renders nothing.
+
+    The blueprint is streamed as a tar over ``exec`` rather than copied with
+    ``kubectl cp``, because cp needs a pod *name*: resolving one races a rollout
+    and can land on a pod that is terminating, which surfaces as a bare exit 137.
+    ``exec deploy/...`` always picks a ready pod. It also keeps this to two
+    commands with no intermediate value, so the Air path can render it into a
+    script instead of a series of round trips.
     """
-    pod = netbox_pod(namespace, runner=runner)
-    (runner or LocalRunner()).run(
-        ["kubectl", "-n", namespace, "cp", blueprint, f"{pod}:/tmp/blueprint"]
+    remote_dir = "/tmp/blueprint"
+    unpack = f"rm -rf {remote_dir} && mkdir -p {remote_dir} && tar -xf - -C {remote_dir}"
+    pipeline = (
+        f"tar -cf - -C {shlex.quote(blueprint)} . | "
+        f"kubectl -n {shlex.quote(namespace)} exec -i deploy/{NETBOX_DEPLOYMENT} "
+        f"-c {NETBOX_CONTAINER} -- sh -c {shlex.quote(unpack)}"
     )
+    (runner or LocalRunner()).run(["sh", "-c", pipeline])
     return kubectl(
         "exec",
-        pod,
+        f"deploy/{NETBOX_DEPLOYMENT}",
         "-c",
         NETBOX_CONTAINER,
         "--",

@@ -21,7 +21,20 @@ and the NATS-password step in docs/deployment.md uses exactly that flag.
 {{- $gw := (.Values.nvcm).gateway | default dict -}}
 {{- $enabled := true -}}
 {{- if hasKey $gw "enabled" }}{{- $enabled = $gw.enabled -}}{{- end -}}
-{{- if $enabled }}
+{{- /*
+The Gateway API CRDs come from NVCM's deploy (--install-envoy-gateway), and
+NetBox is installed before NVCM because it issues the token NVCM authenticates
+with. So on a first install this kind does not exist yet, and rendering it fails
+the whole release with "ensure CRDs are installed first".
+
+Skipped until the cluster has the API. The route is then created by the helm run
+that switches the publisher onto NATS, which happens after NVCM is up.
+
+`helm template` has no cluster to ask, so pass
+`--api-versions gateway.networking.k8s.io/v1` to render this offline.
+*/ -}}
+{{- $haveGatewayAPI := .Capabilities.APIVersions.Has "gateway.networking.k8s.io/v1" -}}
+{{- if and $enabled $haveGatewayAPI }}
 {{- $base := $gw.baseHostname | default "config-manager.local" }}
 {{- $host := $gw.hostname | default (printf "netbox.%s" $base) }}
 {{- $gwName := $gw.name | default "nv-config-manager-gateway" }}

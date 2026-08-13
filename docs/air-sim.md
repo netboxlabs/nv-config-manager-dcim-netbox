@@ -38,42 +38,48 @@ pluggable-DCIM framework. The sim clones that branch onto its box too, which
 
 ## Running it
 
-Copy the example sim config and fill in your NGC key:
-
 ```bash
-cp deploy/configs/air-trial.yaml air-trial.yaml
-$EDITOR air-trial.yaml          # ngc_api_key, or export NGC_API_KEY
+export NGC_API_KEY=<your key>
+make images PLATFORM=linux/amd64     # sim boxes are x86_64
 
-make images
-nvcm-netbox air up -c air-trial.yaml
+.venv/bin/nvcm-netbox air config     # writes ~/.nvcm-air-sim.yaml
+.venv/bin/nvcm-netbox air up
 ```
 
-Copy rather than editing in place. The working copy takes an NGC key and can
-take a NetBox token, so `/air-trial.yaml` is gitignored while the example is
-tracked.
+`PLATFORM=linux/amd64` matters on an Apple Silicon Mac. `make images` builds for
+the host, and arm64 images loaded onto an x86_64 box die immediately with
+"exec format error". `air up` checks this before shipping anything and stops with
+the command to run, rather than letting it surface later as a helm timeout.
 
-It is NVCM's `air-sim` YAML, and the example carries only the fields you must
-choose. Everything NetBox needs already defaults correctly, so there is little
-to add:
+The config path matches NVCM's air-sim: `~/.nvcm-air-sim.yaml` by default,
+overridden by `$NVCM_AIR_CONFIG` or `--config`, so their documentation applies
+here unchanged.
 
-| Field | Why it is in the example |
+`make setup-air` installs the CLI into the repo's virtualenv rather than on your
+PATH, hence the `.venv/bin/` prefix. `source .venv/bin/activate` once and you can
+drop it.
+
+`air config` writes only the fields you must choose; everything NetBox needs
+already defaults correctly:
+
+| Field | Why it is written |
 | --- | --- |
 | `mock_blueprint` | `air_trial` (7 devices) or `air_superpod` (24) |
 | `deployment_name`, `simulation_name` | Name the sim |
-| `config_manager_ref` | Must not be `main`, see below |
-| `ngc_api_key` | Yours, or `$NGC_API_KEY` |
+| `oob_ssh_password` | Pinned so you can SSH to the box, and so a re-run matches one already provisioned |
 
-The optional `dcim_*` and `netbox_*` keys are listed commented-out at their
-defaults.
+`ngc_api_key` is deliberately absent, so it comes from `$NGC_API_KEY` as the
+guide describes. Add it to the file only to override that. The optional `dcim_*`
+and `netbox_*` keys are listed commented-out at their defaults.
 
-> **Do not copy NVCM's `development/air_sim/configs/air_trial.yaml`.** It sets
-> `config_manager_ref: main` explicitly, which overrides the default here and
-> clones a tree onto the sim box with no pluggable-DCIM framework in it. It also
-> sets `run_mock_topology_job: true`, which `air up` forces off anyway because
-> that job populates a DCIM this deployment does not have.
+> **Do not replace it with NVCM's `development/air_sim/configs/air_trial.yaml`.**
+> That sets `config_manager_ref: main`, which has no pluggable-DCIM framework, so
+> the sim would clone a tree this provider cannot run on. `air up` refuses that
+> config rather than deploying something broken.
 
 | Flag | Effect |
 | --- | --- |
+| `--config`, `-c` | Sim config to use |
 | `--token` | Use a specific v2 token instead of generating one |
 | `--chart` | NetBox chart directory (defaults to `deploy/netbox`) |
 | `--no-blueprint` | Skip the topology load, for a NetBox that already holds the fabric |
@@ -81,20 +87,61 @@ defaults.
 Start with `air_trial` (7 devices). `air_superpod` is 24 and needs more headroom
 on the NVCM box.
 
-## Checking it
+## Accessing it
 
-The command prints the API token and the box's SSH address. On the box:
+Exactly as in NVIDIA's
+[DSX Air simulation user guide](https://docs.nvidia.com/switch-infrastructure/config-manager/getting-started/dsx-air-simulation-user-guide),
+because the sim is theirs: open the SOCKS tunnel printed on the Access panel,
+point a browser at it, then use the service URLs. NetBox takes the place of the
+bundled DCIM and sits alongside the rest:
+
+| | |
+| --- | --- |
+| Config Manager UI | `https://nvcm.air` |
+| **NetBox** | `https://netbox.nvcm.air` |
+| Workflow API | `https://workflow.nvcm.air` |
+| Config Store API | `https://config-store.nvcm.air` |
+| Render API | `https://render.nvcm.air` |
+
+`air up` publishes NetBox on the sim's Gateway and adds `netbox.nvcm.air` to the
+box's `/etc/hosts`, alongside the entries NVCM writes for its own services, so
+the name resolves through the same tunnel with nothing extra to configure.
+
+The NetBox admin password and API token are in the `netbox-superuser` secret:
 
 ```bash
-kubectl -n nv-config-manager get pods           # NetBox and NVCM, no bundled DCIM
-kubectl -n nv-config-manager port-forward svc/netbox 8080:80
+kubectl -n nv-config-manager get secret netbox-superuser -o jsonpath='{.data.password}' | base64 -d && echo
 ```
 
-Then `/api/status/` should list `netbox_nv_config_manager` and `netbox_bgp`, and
-the device count should match the blueprint.
+`air up` also prints the API token when it starts, and the box's SSH address, so
+you can work on it directly:
+
+```bash
+ssh nvcm@<box>            # password is oob_ssh_password from the config
+kubectl -n nv-config-manager get pods    # NetBox and NVCM, no bundled DCIM
+```
+
+## Checking it
+
+The guide's verification steps apply, reading NetBox where it says the bundled
+DCIM:
+
+1. NetBox holds the demo site, devices, interfaces, IPs, cables, roles and
+   platforms. `/api/status/` lists `netbox_nv_config_manager` and `netbox_bgp`,
+   and the device count matches the blueprint.
+2. Config Manager's workflow forms are available.
+3. The Config Store holds intended configs for `tan-leaf-01` .. `tan-leaf-05`.
+4. Those TAN leaves show status **Provisioning**, then **Provisioned** once NVCM
+   has pushed to them. The image registers those statuses with NetBox; without
+   that they would silently read `Active`.
 
 `nvcm-netbox verify` exercises the change-event loop the same way it does for a
 kind cluster.
+
+## Cleaning up
+
+In the DSX Air UI, stop or delete the simulation. Deleting it removes the whole
+cluster and everything on it, NetBox included.
 
 ## Notes
 

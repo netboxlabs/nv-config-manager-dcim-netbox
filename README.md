@@ -44,6 +44,10 @@ make kind-up       # builds the images, then deploys NetBox and NVCM
 `make setup` rather than `pip install -e .` because the `nv-config-manager-dcim`
 SDK is not published; it is installed from `$NVCM_REPO/components/dcim`.
 
+It puts `nvcm-netbox` in the repo's virtualenv rather than on your PATH, which is
+why the commands below are written `.venv/bin/nvcm-netbox`. Run
+`source .venv/bin/activate` once and you can drop the prefix.
+
 Running `up` again is safe.
 
 > **NetBox version.** The plugin needs a GraphQL feature that ships in NetBox
@@ -60,14 +64,14 @@ takes the same commands and flags as NVCM's installer, so anything in
 with `nvcm-netbox` in place of `nv-config-manager-installer`:
 
 ```bash
-nvcm-netbox netbox up                  # cluster, NetBox, API token, config
-nvcm-netbox init                       # optional: edit the config in NVCM's TUI
-nvcm-netbox validate  generated/nv-config-manager-install.yaml
-nvcm-netbox deploy    generated/nv-config-manager-install.yaml \
+.venv/bin/nvcm-netbox netbox up                  # cluster, NetBox, API token, config
+.venv/bin/nvcm-netbox init                       # optional: edit the config in NVCM's TUI
+.venv/bin/nvcm-netbox validate  generated/nv-config-manager-install.yaml
+.venv/bin/nvcm-netbox deploy    generated/nv-config-manager-install.yaml \
   --image-source local --build-images --load-kind \
   --kind-cluster nv-config-manager \
   --install-envoy-gateway --install-cnpg-operator --install-cert-manager
-nvcm-netbox verify
+.venv/bin/nvcm-netbox verify
 ```
 
 | Command | |

@@ -57,6 +57,30 @@ class NetBoxSimConfig(SimConfig):
     # Extra `--set` arguments for the NetBox chart, for one-off overrides.
     netbox_helm_set: list[str] = field(default_factory=list)
 
+    def gateway_overrides(self) -> list[str]:
+        """Chart `--set` arguments that publish NetBox on the sim's Gateway.
+
+        A sim serves NVCM at `nvcm.air`, not the `config-manager.local` a kind
+        cluster uses, so the chart's default hostname would put NetBox on a name
+        nothing resolves. Taken from NVCM's own constant so the two cannot drift.
+
+        Skipped when the caller has already set either key in netbox_helm_set,
+        which is appended after these and would otherwise silently conflict.
+        """
+        from nv_config_manager_installer.air_sim.constants import CONFIG_MANAGER_HOSTNAME
+
+        if any(
+            "gateway.baseHostname" in s or "gateway.hostname" in s for s in self.netbox_helm_set
+        ):
+            return []
+        return [f"nvcm.gateway.baseHostname={CONFIG_MANAGER_HOSTNAME}"]
+
+    def netbox_hostname(self) -> str:
+        """The name NetBox is published under on the sim."""
+        from nv_config_manager_installer.air_sim.constants import CONFIG_MANAGER_HOSTNAME
+
+        return f"netbox.{CONFIG_MANAGER_HOSTNAME}"
+
     def blueprint_dir(self, remote_repo: str) -> str:
         """Path on the sim box to this sim's topology blueprint.
 

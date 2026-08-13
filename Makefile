@@ -16,6 +16,12 @@ ENTRYPOINT ?= REPLACE_ME
 # Tag tracks the version declared in pyproject.toml (the single source of truth).
 VERSION    := $(shell sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
 IMAGE      ?= nv-config-manager-dcim-netbox:$(VERSION)
+# Target architecture for the images. Defaults to this host, which is right for a
+# local kind cluster. A DSX Air sim box is x86_64, so building on Apple Silicon
+# without PLATFORM=linux/amd64 ships images its nodes cannot execute
+# ("exec format error").
+PLATFORM   ?=
+PLATFORM_ARG := $(if $(PLATFORM),--platform $(PLATFORM),)
 NETBOX_IMAGE ?= nv-config-manager-netbox:$(VERSION)
 include build/versions.env
 
@@ -44,7 +50,7 @@ help:
 	@echo "check           lint + test"
 	@echo "image           build the provider-package OCI image (IMAGE=..., SDK from NVCM=...)"
 	@echo "netbox-image    build NetBox + our plugin (PLUGIN=..., pins in build/versions.env)"
-	@echo "images          build both images (what 'nvcm-netbox up' expects)"
+	@echo "images          build both images (PLATFORM=linux/amd64 for a DSX Air sim)"
 	@echo "kind-up         create the Kind cluster and deploy NetBox + NVCM"
 	@echo "kind-down       delete the Kind cluster"
 	@echo "topology        load mock topology data into NetBox (BLUEPRINT=air_trial)"
@@ -92,16 +98,16 @@ check: lint version-check test
 # The SDK is not yet published, so it is passed as a named build context.
 # Requires Docker Buildx (bundled with modern Docker). Override IMAGE / NVCM.
 image:
-	docker build --build-context sdk=$(NVCM)/components/dcim -t $(IMAGE) .
+	docker build $(PLATFORM_ARG) --build-context sdk=$(NVCM)/components/dcim -t $(IMAGE) .
 
 # NetBox + our plugin. netbox-base is a TEMPORARY step: it builds NetBox from a
 # pinned `feature` commit because 4.7 (which the plugin's GraphQL extensions
 # need) is unreleased. See build/versions.env.
 netbox-base:
-	build/netbox-image.sh
+	$(if $(PLATFORM),BUILDX_PLATFORM=$(PLATFORM)) build/netbox-image.sh
 
 netbox-image: netbox-base
-	docker build -f build/netbox.Dockerfile \
+	docker build $(PLATFORM_ARG) -f build/netbox.Dockerfile \
 	  --build-arg NETBOX_BASE_IMAGE=$(NETBOX_BASE_IMAGE) \
 	  --build-arg NETBOX_BGP_VERSION=$(NETBOX_BGP_VERSION) \
 	  --build-context plugin=$(PLUGIN) \

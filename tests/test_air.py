@@ -32,8 +32,60 @@ air_callback = pytest.importorskip(
     reason="the `air` extra is not installed",
     exc_type=ImportError,
 )
+air_cli = pytest.importorskip(
+    "nv_config_manager_dcim_netbox.installer.air.cli",
+    reason="the `air` extra is not installed",
+    exc_type=ImportError,
+)
 NetBoxSimConfig = air_config.NetBoxSimConfig
 NetBoxAirCallback = air_callback.NetBoxAirCallback
+
+
+# -- the mock-topology flag ----------------------------------------------------
+
+
+def test_blueprint_still_builds_the_fabric_and_templates_without_the_dcim_job():
+    """`run_mock_topology_job` drives three things; only one is unwanted.
+
+    Clearing it outright left the orchestrator with no topology at all
+    ("topology_path is required when run_mock_topology_job is disabled") and
+    silently dropped the demo template plugin.
+    """
+    from nv_config_manager_installer.air_sim.installer_config import (
+        build_content_jobs,
+        build_template_plugins,
+    )
+
+    cfg = NetBoxSimConfig(mock_blueprint="air_trial", deployment_name="demo")
+    air_cli._use_blueprint_without_the_dcim_job(cfg)
+
+    # 1. The sim still gets a fabric to boot.
+    assert cfg.topology_path
+    design = yaml.safe_load(Path(cfg.topology_path).read_text())
+    assert design["devices"], "the generated site design has no devices"
+
+    # 2. The job that would load it into a DCIM we do not deploy is gone.
+    jobs, run_after_deploy = build_content_jobs(cfg)
+    assert not jobs and not run_after_deploy
+
+    # 3. The templates that render the demo fabric survive.
+    assert any("superpod-template-plugin" in e["path"] for e in build_template_plugins(cfg))
+
+
+def test_an_explicit_topology_is_not_overwritten():
+    cfg = NetBoxSimConfig(
+        mock_blueprint="air_trial", deployment_name="demo", topology_path="/my/topology.yaml"
+    )
+    air_cli._use_blueprint_without_the_dcim_job(cfg)
+    assert cfg.topology_path == "/my/topology.yaml"
+
+
+def test_nothing_to_preserve_when_the_job_is_already_off():
+    cfg = NetBoxSimConfig(mock_blueprint="air_trial", deployment_name="demo")
+    cfg.run_mock_topology_job = False
+    air_cli._use_blueprint_without_the_dcim_job(cfg)
+    assert cfg.topology_path == ""
+    assert cfg.template_plugin_paths == []
 
 
 # -- config -------------------------------------------------------------------
@@ -213,3 +265,195 @@ def test_a_failed_event_bus_hookup_does_not_fail_a_good_deploy(monkeypatch):
     callback.on_complete(True, "host", 22)
     assert "complete:True" in recorder.events
     assert any("Could not connect NetBox to the event bus" in e for e in recorder.events)
+
+
+def test_generated_config_pins_the_box_password():
+    """SimConfig mints a new one per run, and nothing records it.
+
+    cloud-init sets the box's `nvcm` password from this value, so an unrecorded
+    one cannot be used to SSH in for diagnosis and cannot match a box that was
+    already provisioned. Re-running then fails in rsync with
+    "Permission denied (publickey,password)".
+    """
+    body = air_cli._render_example("air_trial", "demo")
+    written = yaml.safe_load(body)
+    assert written["oob_ssh_password"], "no password pinned in the generated config"
+    assert written["oob_ssh_password"].isalnum()
+
+    # It must survive the round trip rather than being regenerated on load.
+    cfg = NetBoxSimConfig(**{k: v for k, v in written.items() if k != "ngc_api_key"})
+    assert cfg.oob_ssh_password == written["oob_ssh_password"]
+
+
+def test_generated_configs_do_not_share_a_password():
+    a = yaml.safe_load(air_cli._render_example("air_trial", "demo"))
+    b = yaml.safe_load(air_cli._render_example("air_trial", "demo"))
+    assert a["oob_ssh_password"] != b["oob_ssh_password"]
+
+
+# -- SSH retry -----------------------------------------------------------------
+
+
+def _ssh_runner(monkeypatch, results):
+    """An SshRunner whose underlying `run` yields *results* in order."""
+    from nv_config_manager_dcim_netbox.installer import remote
+    from nv_config_manager_dcim_netbox.installer.shell import CommandError
+
+    calls = []
+
+    def fake_run(argv, stdin=None):
+        calls.append(list(argv))
+        outcome = results[len(calls) - 1]
+        if isinstance(outcome, int):
+            raise CommandError(argv, outcome, "boom")
+        return outcome
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote.time, "sleep", lambda _s: None)
+
+    class _Manager:
+        def _ssh_cmd(self, host, port, command):
+            return ["sshpass", "-p", "pw", "ssh", f"{host}:{port}", command]
+
+    return remote.SshRunner(_Manager(), "box", 22), calls
+
+
+def test_ssh_transport_failures_are_retried(monkeypatch):
+    # A freshly booted box refuses the occasional connection while sshd settles,
+    # and one blip should not lose a deploy that is already well underway.
+    runner, calls = _ssh_runner(monkeypatch, [255, 255, "ok"])
+    assert runner.run(["helm", "upgrade"]) == "ok"
+    assert len(calls) == 3
+
+
+def test_remote_command_failures_are_not_retried(monkeypatch):
+    # Only 255 is ssh's own. Anything else came from the remote command, and
+    # re-running it could repeat a side effect.
+    from nv_config_manager_dcim_netbox.installer.shell import CommandError
+
+    runner, calls = _ssh_runner(monkeypatch, [1, "ok"])
+    with pytest.raises(CommandError):
+        runner.run(["helm", "upgrade"])
+    assert len(calls) == 1
+
+
+def test_ssh_retries_are_bounded(monkeypatch):
+    from nv_config_manager_dcim_netbox.installer.shell import CommandError
+
+    runner, calls = _ssh_runner(monkeypatch, [255] * 10)
+    with pytest.raises(CommandError):
+        runner.run(["helm", "upgrade"])
+    assert len(calls) == 4
+
+
+# -- one SSH session -----------------------------------------------------------
+
+
+def _callback_for_script(**overrides):
+    cfg = NetBoxSimConfig(mock_blueprint="air_trial", deployment_name="demo", **overrides)
+    cb = NetBoxAirCallback.__new__(NetBoxAirCallback)
+    cb.cfg = cfg
+    cb.chart = Path("deploy/netbox")
+
+    cb.api_token = "nbt_SECRETKEY123." + "B" * 40
+    return cb
+
+
+def test_bring_up_is_one_script_covering_every_on_box_step():
+    """NVCM runs a deploy as one command on the box and streams it back.
+
+    A command at a time costs an authenticated SSH connection each, and any one
+    of them can catch a freshly booted sshd mid-blip and lose the run.
+    """
+    script = _callback_for_script().bring_up_script("/home/nvcm/i.tar", "/home/nvcm/c.tgz")
+
+    for expected in (
+        "kind load image-archive /home/nvcm/i.tar",
+        "helm upgrade --install netbox",
+        "rollout status deploy/netbox",
+        "nvcm_init --bootstrap",
+        "nvcm_load_dcim",
+    ):
+        assert expected in script, expected
+    # Stops at the first failure, and only says it finished if it did.
+    assert script.startswith("#!/usr/bin/env bash\nset -euo pipefail")
+    assert script.rstrip().endswith("echo NVCM_NETBOX_BRING_UP_COMPLETE")
+
+
+def test_the_api_token_is_never_traced():
+    # The script runs under `set -x` and its output is streamed back to the
+    # operator, so any line carrying the token must disable tracing first.
+    cb = _callback_for_script()
+    script = cb.bring_up_script("/i.tar", "/c.tgz")
+
+    lines = script.splitlines()
+    for i, line in enumerate(lines):
+        if cb.api_token in line:
+            preceding = "\n".join(lines[max(0, i - 4) : i])
+            assert "set +x" in preceding, f"token traced at line {i}: {line[:60]}"
+
+
+def test_the_blueprint_load_is_skipped_when_asked():
+    script = _callback_for_script(load_blueprint=False).bring_up_script("/i.tar", "/c.tgz")
+    assert "nvcm_load_dcim" not in script
+
+
+def test_the_sim_publishes_netbox_on_the_air_hostname():
+    # A sim serves NVCM at nvcm.air, not the config-manager.local a kind cluster
+    # uses, so the chart's default would put NetBox on a name nothing resolves.
+    script = _callback_for_script().bring_up_script("/i.tar", "/c.tgz")
+    assert "nvcm.gateway.baseHostname=nvcm.air" in script
+
+
+def test_script_runner_renders_stdin_as_a_heredoc():
+    from nv_config_manager_dcim_netbox.installer.remote import ScriptRunner
+
+    r = ScriptRunner()
+    r.run(["sh", "-s"], stdin="echo hello\n")
+    body = r.script(marker="DONE")
+    assert "sh -s <<'NVCM_STDIN'\necho hello\nNVCM_STDIN" in body
+
+
+# -- image architecture --------------------------------------------------------
+
+
+def _arch_callback(monkeypatch, box_arch, image_arch):
+    from nv_config_manager_dcim_netbox.installer.air import callback as cb_mod
+
+    cb = NetBoxAirCallback.__new__(NetBoxAirCallback)
+    cb.cfg = NetBoxSimConfig(mock_blueprint="air_trial")
+    cb.on_log = lambda _line: None
+
+    class _Runner:
+        def run(self, argv, stdin=None):
+            return box_arch + "\n"
+
+    cb.runner = lambda h, p: _Runner()
+    monkeypatch.setattr(cb_mod, "run", lambda argv, stdin=None: image_arch + "\n")
+    return cb
+
+
+def test_images_built_for_the_wrong_arch_are_refused(monkeypatch):
+    """`make images` builds for the host; a sim box is x86_64.
+
+    Built on Apple Silicon and loaded onto the box, the containers die instantly
+    with "exec format error", which surfaces ten minutes later as a helm timeout
+    with nothing pointing at the cause.
+    """
+    cb = _arch_callback(monkeypatch, "x86_64", "arm64")
+    with pytest.raises(RuntimeError) as excinfo:
+        cb.check_image_arch("host", 22)
+    message = str(excinfo.value)
+    assert "amd64" in message
+    # It has to say how to fix it, not just that it is wrong.
+    assert "make images PLATFORM=linux/amd64" in message
+
+
+def test_matching_images_pass(monkeypatch):
+    cb = _arch_callback(monkeypatch, "x86_64", "amd64")
+    cb.check_image_arch("host", 22)
+
+
+def test_an_arm_box_wants_arm_images(monkeypatch):
+    cb = _arch_callback(monkeypatch, "aarch64", "arm64")
+    cb.check_image_arch("host", 22)

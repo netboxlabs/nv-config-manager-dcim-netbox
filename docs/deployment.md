@@ -61,7 +61,7 @@ Afterwards:
 
 ```bash
 kubectl -n nv-config-manager port-forward svc/netbox 8080:80
-nvcm-netbox verify
+.venv/bin/nvcm-netbox verify
 ```
 
 The generated config holds a live API token, so it is written `0600` into
@@ -94,8 +94,8 @@ exec /opt/netbox/venv/bin/python /opt/netbox/netbox/manage.py nvcm_init --bootst
 EOF
 
 # 3. NVCM.
-nvcm-netbox config -o my.yaml --token "$TOKEN"
-nvcm-netbox deploy my.yaml --image-source local \
+.venv/bin/nvcm-netbox config -o my.yaml --token "$TOKEN"
+.venv/bin/nvcm-netbox deploy my.yaml --image-source local \
   --build-images --load-kind --kind-cluster nv-config-manager \
   --install-envoy-gateway --install-cnpg-operator --install-cert-manager
 
@@ -130,7 +130,7 @@ To iterate on the plugin, run NetBox on the host with only NVCM in the cluster.
    `public_url: http://127.0.0.1:8000`:
 
    ```bash
-   nvcm-netbox config -o host.yaml
+   .venv/bin/nvcm-netbox config -o host.yaml
    ```
 
 2. Deploy NVCM with it, then expose the cluster's NATS to the host:
