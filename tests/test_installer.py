@@ -210,6 +210,169 @@ def test_up_passes_an_absolute_config_path_to_their_installer(monkeypatch, tmp_p
         assert Path(cfg_arg).is_absolute(), cfg_arg
 
 
+# -- parity with NVCM's own command surface -----------------------------------
+
+
+@pytest.fixture
+def their_cli(monkeypatch):
+    """Capture the argv sent to NVCM's installer instead of running it."""
+    seen: list[list[str]] = []
+    monkeypatch.setattr(cli, "stream", lambda argv, cwd=None: seen.append(list(argv)))
+    return seen
+
+
+@pytest.mark.parametrize(
+    ("command", "subcommand", "extra"),
+    [
+        (["validate"], "validate", []),
+        (["generate-values"], "generate-values", ["-o", "/tmp/out", "--local-images"]),
+        (
+            ["deploy"],
+            "deploy",
+            ["--image-source", "local", "--build-images", "--kind-cluster", "x"],
+        ),
+    ],
+)
+def test_their_commands_are_forwarded_verbatim(their_cli, tmp_path, command, subcommand, extra):
+    # Their flags are not re-declared here, so anything they add keeps working
+    # without a change on our side. Order has to survive too.
+    config = tmp_path / "install.yaml"
+    config.write_text("dcim:\n  server: https://netbox.example\n")
+    repo = _nvcm_stub()
+
+    result = CliRunner().invoke(cli.main, [*command, str(config), "--nvcm-repo", str(repo), *extra])
+    assert result.exit_code == 0, result.output
+    argv = their_cli[0]
+    assert argv[argv.index("nv-config-manager-installer") + 1] == subcommand
+    if extra:
+        assert argv[-len(extra) :] == extra
+    # Their find_project_root() reads the working directory, so it has to be theirs.
+    assert argv[argv.index("--directory") + 1] == str(repo.resolve())
+
+
+@pytest.mark.parametrize("command", ["validate", "generate-values", "deploy"])
+def test_their_commands_resolve_the_config_path(their_cli, tmp_path, monkeypatch, command):
+    config = tmp_path / "install.yaml"
+    config.write_text("dcim:\n  server: https://netbox.example\n")
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(
+        cli.main, [command, "install.yaml", "--nvcm-repo", str(_nvcm_stub())]
+    )
+    assert result.exit_code == 0, result.output
+    argv = their_cli[0]
+    assert Path(argv[argv.index(command) + 1]).is_absolute()
+
+
+def test_deploy_warns_when_the_in_cluster_netbox_is_missing(their_cli, tmp_path, monkeypatch):
+    # A warning, not an error: NVCM will come up and fail to reach its DCIM, but
+    # pointing at a NetBox outside the cluster is legitimate and unverifiable here.
+    monkeypatch.setattr(cluster, "netbox_service_exists", lambda ns, runner=None: False)
+    config = tmp_path / "install.yaml"
+    config.write_text("dcim:\n  server: http://netbox\ncluster:\n  namespace: nv-config-manager\n")
+
+    result = CliRunner().invoke(cli.main, ["deploy", str(config), "--nvcm-repo", str(_nvcm_stub())])
+    assert result.exit_code == 0, result.output
+    assert "No netbox service" in result.output
+    assert their_cli, "the warning must not stop the deploy"
+
+
+def test_deploy_is_quiet_about_a_netbox_it_cannot_check(their_cli, tmp_path, monkeypatch):
+    monkeypatch.setattr(cluster, "netbox_service_exists", lambda ns, runner=None: False)
+    config = tmp_path / "install.yaml"
+    config.write_text("dcim:\n  server: https://netbox.example.com\n")
+
+    result = CliRunner().invoke(cli.main, ["deploy", str(config), "--nvcm-repo", str(_nvcm_stub())])
+    assert result.exit_code == 0, result.output
+    assert "No netbox service" not in result.output
+
+
+def test_init_seeds_the_fields_their_wizard_cannot_express(monkeypatch, tmp_path):
+    # Their TUI has no widget for provider_packages or the token, so both are
+    # written before it opens.
+    seen: list[list[str]] = []
+    monkeypatch.setattr(cli, "stream", lambda argv, cwd=None: seen.append(list(argv)))
+    out = tmp_path / "install.yaml"
+
+    result = CliRunner().invoke(
+        cli.main, ["init", "-c", str(out), "--nvcm-repo", str(_nvcm_stub())]
+    )
+    assert result.exit_code == 0, result.output
+    written = yaml.safe_load(out.read_text())
+    assert written["dcim"]["provider"] == "netbox"
+    assert written["dcim"]["provider_packages"][0]["image"]
+    assert written["services"]["nautobot"] is False
+    assert is_valid_api_token(written["secrets"]["k8s"]["dcim"]["values"]["token"])
+    assert seen[0][seen[0].index("init") + 1 :] == ["--config", str(out.resolve())]
+
+
+def test_init_restores_what_their_wizard_drops(monkeypatch, tmp_path):
+    out = tmp_path / "install.yaml"
+
+    def wizard_drops_our_fields(argv, cwd=None):
+        config = yaml.safe_load(out.read_text())
+        del config["dcim"]["provider_packages"]
+        config["services"]["nautobot"] = True
+        config["dcim"]["provider"] = "nautobot"
+        out.write_text(yaml.safe_dump(config))
+
+    monkeypatch.setattr(cli, "stream", wizard_drops_our_fields)
+    result = CliRunner().invoke(
+        cli.main, ["init", "-c", str(out), "--nvcm-repo", str(_nvcm_stub())]
+    )
+    assert result.exit_code == 0, result.output
+    written = yaml.safe_load(out.read_text())
+    assert written["dcim"]["provider"] == "netbox"
+    assert written["dcim"]["provider_packages"][0]["image"]
+    assert written["services"]["nautobot"] is False
+
+
+def test_init_keeps_the_token_already_in_the_file(monkeypatch, tmp_path):
+    # Regenerating it would break the NetBox side, which already holds this one.
+    token = generate_api_token()
+    out = tmp_path / "install.yaml"
+    out.write_text(yaml.safe_dump({"secrets": {"k8s": {"dcim": {"values": {"token": token}}}}}))
+    monkeypatch.setattr(cli, "stream", lambda argv, cwd=None: None)
+
+    result = CliRunner().invoke(
+        cli.main, ["init", "-c", str(out), "--nvcm-repo", str(_nvcm_stub())]
+    )
+    assert result.exit_code == 0, result.output
+    assert yaml.safe_load(out.read_text())["secrets"]["k8s"]["dcim"]["values"]["token"] == token
+
+
+def test_netbox_up_stops_before_nvcm(monkeypatch, tmp_path):
+    # It is `up` without the NVCM half, so NVCM's installer must never be called
+    # and the run must not need a checkout to be present.
+    seen: list[list[str]] = []
+    monkeypatch.setattr(cluster, "kind_cluster_exists", lambda name: True)
+    monkeypatch.setattr(cluster, "helm_dependency_build", lambda chart: None)
+    monkeypatch.setattr(cluster, "pending_release_status", lambda r, ns, runner=None: None)
+    monkeypatch.setattr(cluster, "orphaned_data_volumes", lambda r, ns, runner=None: [])
+    monkeypatch.setattr(cluster, "install_netbox", lambda *a, **k: None)
+    monkeypatch.setattr(cluster, "wait_for_netbox", lambda *a, **k: None)
+    monkeypatch.setattr(cluster, "run_nvcm_init", lambda *a, **k: "")
+    monkeypatch.setattr(cli, "stream", lambda argv, cwd=None: seen.append(list(argv)))
+
+    out = tmp_path / "install.yaml"
+    result = CliRunner().invoke(
+        cli.main, ["netbox", "up", "--no-kind-load", "--config-out", str(out)]
+    )
+    assert result.exit_code == 0, result.output
+    assert not seen, "NVCM's installer was invoked by `netbox up`"
+    assert "[7/7]" in result.output
+    # It still leaves behind the token and config the NVCM half needs.
+    assert is_valid_api_token(
+        yaml.safe_load(out.read_text())["secrets"]["k8s"]["dcim"]["values"]["token"]
+    )
+
+
+def test_netbox_up_and_up_share_their_options():
+    # `netbox up` is a thin wrapper; a flag added to one must appear on the other.
+    shared = {p.name for p in cli.up.params} - {"skip_nvcm", "skip_verify"}
+    assert shared == {p.name for p in cli.netbox_up.params}
+
+
 def test_require_tools_names_everything_missing():
     with pytest.raises(RuntimeError) as excinfo:
         require_tools("definitely-not-a-real-binary-xyz", "also-not-real-xyz")
@@ -524,3 +687,142 @@ def _nvcm_stub():
     (root / "deploy" / "helm").mkdir(parents=True)
     (root / "deploy" / "helm" / "Chart.yaml").write_text("")
     return root
+
+
+# -- air-gapped bundle --------------------------------------------------------
+
+_AIRGAPPED = _REPO / "deploy" / "airgapped"
+
+
+@pytest.fixture
+def airgapped_images():
+    """The bundle's image list, or a skip when the registry is unreachable.
+
+    Resolving digests needs Docker Hub, which rate-limits anonymous callers, so
+    this cannot be a hard dependency of the suite.
+    """
+    if shutil.which("helm") is None:
+        pytest.skip("helm not installed")
+    if not (_CHART / "charts").is_dir():
+        pytest.skip("chart deps not fetched (helm dependency build)")
+    result = subprocess.run(
+        [str(_AIRGAPPED / "netbox-images.sh")], capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0:
+        if "Could not resolve a digest" in result.stderr:
+            pytest.skip(f"registry unreachable: {result.stderr.strip().splitlines()[-1]}")
+        pytest.fail(result.stderr)
+    return result.stdout.split()
+
+
+def test_airgapped_image_list_covers_the_chart_and_the_provider(airgapped_images):
+    # Read off the rendered chart rather than hand-maintained, so a chart bump
+    # cannot silently drop an image from the bundle.
+    images = airgapped_images
+
+    assert any(i.startswith("nv-config-manager-netbox:") for i in images)
+    # In neither chart: NVCM installs it from dcim.provider_packages.
+    assert any(i.startswith("nv-config-manager-dcim-netbox:") for i in images)
+    assert any("postgresql" in i for i in images)
+    assert any("valkey" in i for i in images)
+
+
+def test_airgapped_images_from_a_registry_are_digest_pinned(airgapped_images):
+    # The bitnami subcharts ship `tag: latest`, which means nothing offline and
+    # drifts between building a bundle and installing from it.
+    for image in airgapped_images:
+        if image.startswith("nv-config-manager-"):
+            continue  # Ours, in no registry; carried as a tarball.
+        assert "@sha256:" in image, f"{image} is not digest-pinned"
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
+@pytest.mark.skipif(
+    not (_CHART / "charts").is_dir(), reason="chart deps not fetched (helm dependency build)"
+)
+def test_every_chart_image_can_be_repointed_at_a_private_registry():
+    # install-netbox.sh repoints these. If a chart bump adds an image with its
+    # own registry value, this catches it before an offline install does.
+    overrides = [
+        "netbox.global.security.allowInsecureImages=true",
+        "netbox.image.registry=reg.example.com/x",
+        "netbox.postgresql.image.registry=reg.example.com/x",
+        "netbox.valkey.image.registry=reg.example.com/x",
+        "netbox.init.image.registry=reg.example.com/x",
+        "netbox.test.image.registry=reg.example.com/x",
+        "netbox.worker.waitForBackend.image.registry=reg.example.com/x",
+    ]
+    argv = ["helm", "template", "nb", str(_CHART)]
+    for override in overrides:
+        argv += ["--set", override]
+    rendered = subprocess.run(argv, capture_output=True, text=True, check=False)
+    assert rendered.returncode == 0, rendered.stderr
+
+    stray = []
+    for line in rendered.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("image:"):
+            continue
+        image = stripped.split(":", 1)[1].strip().strip('"')
+        if image.startswith("reg.example.com/"):
+            continue
+        stray.append(image)
+    # The `helm test` hook hardcodes busybox. Nothing creates that Pod during an
+    # install, so it does not affect an offline deployment.
+    assert all(s.startswith("busybox") for s in stray), stray
+
+
+def test_verify_waits_for_the_consumer_instead_of_racing_it(monkeypatch):
+    # The consumer pulls asynchronously. Reading its log once, immediately after
+    # publishing, reported a working loop as broken.
+    monkeypatch.setattr(cli, "VERIFY_POLL_INTERVAL", 0)
+    monkeypatch.setattr(cluster, "read_nats_password", lambda ns: "pw")
+    monkeypatch.setattr(cluster, "publish_test_event", lambda *a, **k: "")
+
+    calls = {"n": 0}
+
+    def slow_consumer(namespace, since="60s", runner=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return ""
+        return '{"message": "Starting batch queue operation for 1 devices"}'
+
+    monkeypatch.setattr(cluster, "dcim_consumer_logs", slow_consumer)
+    result = CliRunner().invoke(cli.main, ["verify"])
+    assert result.exit_code == 0, result.output
+    assert "Event dispatched" in result.output
+    assert calls["n"] == 3
+
+
+def test_verify_explains_a_device_that_does_not_exist(monkeypatch):
+    # A 400 from NetBox still proves the whole path; only the last hop failed.
+    monkeypatch.setattr(cli, "VERIFY_POLL_INTERVAL", 0)
+    monkeypatch.setattr(cluster, "read_nats_password", lambda ns: "pw")
+    monkeypatch.setattr(cluster, "publish_test_event", lambda *a, **k: "")
+    monkeypatch.setattr(
+        cluster,
+        "dcim_consumer_logs",
+        lambda ns, since="60s", runner=None: (
+            '{"message": "Batch operation completed: 0 queued, 1 failed"}\n'
+            '{"message": "Render request for 1 was not queued: NetBox rejected the request '
+            '(400): device_id Select a valid choice. 1 is not one of the available choices."}'
+        ),
+    )
+    result = CliRunner().invoke(cli.main, ["verify"])
+    assert result.exit_code == 0, result.output
+    assert "NetBox has no device 1" in result.output
+
+
+def test_verify_publishes_through_the_in_cluster_nats_box(monkeypatch):
+    # `kubectl run natsio/nats-box:latest` needs Docker Hub, which fails on an
+    # air-gapped cluster and under Hub's anonymous rate limit.
+    argv: list[list[str]] = []
+    monkeypatch.setattr(
+        cluster,
+        "kubectl",
+        lambda *a, namespace=None, stdin=None, runner=None: argv.append(list(a)) or "",
+    )
+    cluster.publish_test_event("ns", "netbox.change", "pw", "1")
+    assert argv[0][0] == "exec"
+    assert cluster.NATS_BOX_DEPLOYMENT in argv[0][2]
+    assert not any("--image" in str(part) for part in argv[0])

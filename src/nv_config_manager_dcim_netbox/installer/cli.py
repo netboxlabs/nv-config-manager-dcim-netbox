@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 
 import click
+import yaml
 
 from nv_config_manager_dcim_netbox.installer import cluster
 from nv_config_manager_dcim_netbox.installer import config as cfg
@@ -22,6 +24,10 @@ DEFAULT_NAMESPACE = "nv-config-manager"
 DEFAULT_NETBOX_RELEASE = "netbox"
 # Matches netbox.image.tag in deploy/netbox/values.yaml.
 DEFAULT_NETBOX_TAG = "0.1.0"
+
+# The consumer pulls asynchronously; give it a few seconds to log the dispatch.
+VERIFY_POLL_ATTEMPTS = 10
+VERIFY_POLL_INTERVAL = 1.0
 
 # Where to find the NVCM checkout. The sibling default only holds if the repos
 # were cloned side by side; set NVCM_REPO once instead of passing --nvcm-repo
@@ -157,6 +163,139 @@ def main() -> None:
 main.add_command(air_cli.air)
 
 
+# Commands that are theirs, forwarded verbatim. Their `deploy` alone has 18
+# options and they live on a force-pushed branch, so the flags are passed through
+# rather than re-declared here: nothing to keep in sync when they add one.
+_PASSTHROUGH = {"ignore_unknown_options": True}
+
+
+def _nvcm_repo_option(fn):
+    return click.option(
+        "--nvcm-repo",
+        type=click.Path(path_type=Path),
+        default=None,
+        help=f"Path to the nv-config-manager checkout (or set ${NVCM_REPO_ENV}).",
+    )(fn)
+
+
+def _passthrough(subcommand: str, config_path: Path, extra: tuple[str, ...], repo: Path) -> None:
+    """Run one of their subcommands against *config_path*.
+
+    The path is resolved because the subprocess runs from their checkout, where a
+    relative one would point at their tree instead of ours.
+    """
+    stream(_nvcm_installer_argv(repo, subcommand, str(config_path.resolve()), *extra))
+
+
+@main.command(context_settings=_PASSTHROUGH)
+@click.argument("config_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("extra", nargs=-1, type=click.UNPROCESSED)
+@_nvcm_repo_option
+def validate(config_path: Path, extra: tuple[str, ...], nvcm_repo: Path | None) -> None:
+    """Validate an install config. Same as NVCM's `validate`."""
+    _passthrough("validate", config_path, extra, _resolve_nvcm_repo(nvcm_repo))
+
+
+@main.command("generate-values", context_settings=_PASSTHROUGH)
+@click.argument("config_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("extra", nargs=-1, type=click.UNPROCESSED)
+@_nvcm_repo_option
+def generate_values(config_path: Path, extra: tuple[str, ...], nvcm_repo: Path | None) -> None:
+    """Generate Helm values from a config. Same as NVCM's `generate-values`.
+
+    Note that `--output-dir` is theirs, so a relative one resolves against the
+    NVCM checkout. Pass an absolute path to write elsewhere.
+    """
+    _passthrough("generate-values", config_path, extra, _resolve_nvcm_repo(nvcm_repo))
+
+
+@main.command(context_settings=_PASSTHROUGH)
+@click.argument("config_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("extra", nargs=-1, type=click.UNPROCESSED)
+@_nvcm_repo_option
+def deploy(config_path: Path, extra: tuple[str, ...], nvcm_repo: Path | None) -> None:
+    """Deploy NVCM against an existing NetBox. Same as NVCM's `deploy`.
+
+    This deploys NVCM only, exactly as theirs does. NetBox has to exist first,
+    because it owns the API token NVCM authenticates with; `up` sequences both.
+    """
+    repo = _resolve_nvcm_repo(nvcm_repo)
+    _warn_if_no_netbox(config_path)
+    _passthrough("deploy", config_path, extra, repo)
+
+
+def _warn_if_no_netbox(config_path: Path) -> None:
+    """Warn when the config points at an in-cluster NetBox that is not there.
+
+    A warning rather than an error: pointing at a NetBox outside the cluster is
+    legitimate, and this cannot see one.
+    """
+    try:
+        config = yaml.safe_load(config_path.read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        return
+    server = str((config.get("dcim") or {}).get("server") or "")
+    namespace = str((config.get("cluster") or {}).get("namespace") or DEFAULT_NAMESPACE)
+    # Only in-cluster service URLs are checkable, and only those are ours to set up.
+    if not server.startswith(f"http://{cluster.NETBOX_SERVICE}"):
+        return
+    if cluster.netbox_service_exists(namespace):
+        return
+    _warn(
+        f"No {cluster.NETBOX_SERVICE} service in {namespace}, but dcim.server is {server}.\n"
+        "      NVCM will deploy and fail to reach its DCIM. Run `nvcm-netbox up` to "
+        "bring NetBox up first."
+    )
+
+
+@main.command(context_settings=_PASSTHROUGH)
+@click.option(
+    "--config",
+    "-c",
+    "config_path",
+    type=click.Path(path_type=Path),
+    default=Path("generated/nv-config-manager-install.yaml"),
+    show_default=True,
+    help="Config to create or edit.",
+)
+@click.argument("extra", nargs=-1, type=click.UNPROCESSED)
+@_nvcm_repo_option
+def init(config_path: Path, extra: tuple[str, ...], nvcm_repo: Path | None) -> None:
+    """Edit an install config in NVCM's TUI. Same as NVCM's `init`.
+
+    Their wizard has fields for the DCIM provider and endpoint but none for the
+    provider wheelhouse image or the API token, so those are written here before
+    it opens and re-applied after it closes. Their schema carries both, so
+    anything it does not show still survives the round trip.
+    """
+    repo = _resolve_nvcm_repo(nvcm_repo)
+    resolved = config_path.resolve()
+
+    if resolved.exists():
+        config = yaml.safe_load(resolved.read_text()) or {}
+        token = (((config.get("secrets") or {}).get("k8s") or {}).get("dcim") or {}).get(
+            "values", {}
+        ).get("token") or generate_api_token()
+    else:
+        config, token = cfg.load_profile(), generate_api_token()
+
+    options = _config_options(config, api_token=token, namespace=DEFAULT_NAMESPACE, size="small")
+    cfg.write_config(cfg.apply_options(config, options), resolved)
+
+    stream(_nvcm_installer_argv(repo, "init", "--config", str(resolved), *extra))
+
+    # Re-apply, in case the wizard cleared something it has no field for.
+    edited = yaml.safe_load(resolved.read_text()) or {}
+    cfg.write_config(cfg.apply_dcim(edited, options), resolved)
+
+    click.echo(f"\nWrote {resolved}")
+    click.echo(
+        "The API token in it has to be the one NetBox is installed with. "
+        "`nvcm-netbox up` does that;\nif you install NetBox yourself, pass "
+        "`--token` to match."
+    )
+
+
 @main.command("config")
 @click.option(
     "--output",
@@ -223,55 +362,90 @@ def config_command(
     click.echo("Keep it — NetBox and NVCM must both be given this same value.")
 
 
+def _up_options(fn):
+    """Options shared by `up` and `netbox up`, which run the same steps.
+
+    Declared once so the two cannot drift; `netbox up` is `up` stopping after
+    NetBox.
+    """
+    options = [
+        click.option(
+            "--nvcm-repo",
+            type=click.Path(path_type=Path),
+            default=None,
+            help=f"Path to an nv-config-manager checkout. Defaults to ${NVCM_REPO_ENV}, "
+            f"then {DEFAULT_NVCM_REPO}.",
+        ),
+        click.option("--namespace", default=DEFAULT_NAMESPACE, show_default=True),
+        click.option(
+            "--release",
+            default=DEFAULT_NETBOX_RELEASE,
+            show_default=True,
+            help="Helm release name for NetBox.",
+        ),
+        click.option(
+            "--chart",
+            type=click.Path(exists=True, file_okay=False, path_type=Path),
+            default=DEFAULT_CHART,
+            show_default=True,
+        ),
+        click.option(
+            "--size",
+            type=click.Choice(["small", "medium", "large"]),
+            default="small",
+            show_default=True,
+        ),
+        click.option("--token", default=None, help="NetBox v2 API token. Generated if omitted."),
+        click.option("--netbox-image", default="nv-config-manager-netbox", show_default=True),
+        click.option("--netbox-tag", default=None, help="NetBox image tag (default: the chart's)."),
+        click.option("--provider-image", default=None, help="Provider wheelhouse image ref."),
+        click.option(
+            "--config-out",
+            type=click.Path(path_type=Path),
+            default=Path("generated/nv-config-manager-install.yaml"),
+            show_default=True,
+        ),
+        click.option("--kind-cluster", default="nv-config-manager", show_default=True),
+        click.option(
+            "--create-cluster/--no-create-cluster",
+            default=True,
+            show_default=True,
+            help="Create the kind cluster if it does not exist, using NVCM's kind-config.yaml.",
+        ),
+        click.option(
+            "--kind-load/--no-kind-load",
+            default=True,
+            show_default=True,
+            help="Load the locally-built images into the kind node. Disable for a real cluster.",
+        ),
+    ]
+    for option in reversed(options):
+        fn = option(fn)
+    return fn
+
+
+@main.group("netbox")
+def netbox_group() -> None:
+    """Manage the NetBox side on its own."""
+
+
+@netbox_group.command("up")
+@_up_options
+@click.pass_context
+def netbox_up(ctx: click.Context, **kwargs) -> None:
+    """Deploy NetBox and mint the API token, without touching NVCM.
+
+    The first half of `up`, and the step NVCM's installer has no equivalent for.
+    Run it before `deploy`: NVCM authenticates to NetBox with the token this
+    creates, so NetBox has to exist first.
+    """
+    ctx.invoke(up, skip_nvcm=True, skip_verify=True, **kwargs)
+
+
 @main.command()
-@click.option(
-    "--nvcm-repo",
-    type=click.Path(path_type=Path),
-    default=None,
-    help=f"Path to an nv-config-manager checkout. Defaults to ${NVCM_REPO_ENV}, "
-    f"then {DEFAULT_NVCM_REPO}.",
-)
-@click.option("--namespace", default=DEFAULT_NAMESPACE, show_default=True)
-@click.option(
-    "--release",
-    default=DEFAULT_NETBOX_RELEASE,
-    show_default=True,
-    help="Helm release name for NetBox.",
-)
-@click.option(
-    "--chart",
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=DEFAULT_CHART,
-    show_default=True,
-)
-@click.option(
-    "--size", type=click.Choice(["small", "medium", "large"]), default="small", show_default=True
-)
-@click.option("--token", default=None, help="NetBox v2 API token. Generated if omitted.")
-@click.option("--netbox-image", default="nv-config-manager-netbox", show_default=True)
-@click.option("--netbox-tag", default=None, help="NetBox image tag (default: the chart's).")
-@click.option("--provider-image", default=None, help="Provider wheelhouse image ref.")
-@click.option(
-    "--config-out",
-    type=click.Path(path_type=Path),
-    default=Path("generated/nv-config-manager-install.yaml"),
-    show_default=True,
-)
+@_up_options
 @click.option("--skip-nvcm", is_flag=True, help="Deploy NetBox only; skip the NVCM installer.")
 @click.option("--skip-verify", is_flag=True, help="Do not run the event-loop check at the end.")
-@click.option("--kind-cluster", default="nv-config-manager", show_default=True)
-@click.option(
-    "--create-cluster/--no-create-cluster",
-    default=True,
-    show_default=True,
-    help="Create the kind cluster if it does not exist, using NVCM's kind-config.yaml.",
-)
-@click.option(
-    "--kind-load/--no-kind-load",
-    default=True,
-    show_default=True,
-    help="Load the locally-built images into the kind node. Disable for a real cluster.",
-)
 def up(
     nvcm_repo: Path | None,
     namespace: str,
@@ -396,11 +570,15 @@ def up(
 
     if skip_nvcm:
         step += 1
-        _step(step, total, "Skipping NVCM (--skip-nvcm)")
-        manual = " ".join(
-            _nvcm_installer_argv(_nvcm_repo_candidate(nvcm_repo)[0], "deploy", str(written))
+        _step(step, total, "NetBox is up; NVCM was not deployed")
+        click.echo(
+            f"\nNetBox holds the API token in {written}. Deploy NVCM against it with:\n"
+            f"  nvcm-netbox deploy {written} \\\n"
+            f"    --image-source local --build-images --load-kind "
+            f"--kind-cluster {kind_cluster} \\\n"
+            "    --install-envoy-gateway --install-cnpg-operator --install-cert-manager\n"
+            "\nThen `nvcm-netbox verify` to check the change-event loop."
         )
-        click.echo(f"\nDeploy NVCM yourself with:\n  {manual}")
         return
 
     assert repo is not None
@@ -492,12 +670,17 @@ def verify(namespace: str, device_id: str) -> None:
     except CommandError as exc:
         raise click.ClickException(f"Could not publish to NATS:\n{exc.output}") from exc
 
-    logs = cluster.dcim_consumer_logs(namespace)
-    hit = [
-        line
-        for line in logs.splitlines()
-        if any(m in line for m in ("batch queue operation", "queued", "not enabled"))
-    ]
+    # The consumer pulls asynchronously, so reading the log once right after
+    # publishing races it and reports a working loop as broken.
+    markers = ("batch queue operation", "queued", "not enabled")
+    hit: list[str] = []
+    for _ in range(VERIFY_POLL_ATTEMPTS):
+        logs = cluster.dcim_consumer_logs(namespace)
+        hit = [line for line in logs.splitlines() if any(m in line for m in markers)]
+        if hit:
+            break
+        time.sleep(VERIFY_POLL_INTERVAL)
+
     if not hit:
         click.secho("No dispatch seen in the DCIM consumer logs.", fg="red")
         click.echo(
@@ -509,7 +692,13 @@ def verify(namespace: str, device_id: str) -> None:
     click.secho("Event dispatched through the NetBox provider:", fg="green")
     for line in hit[-3:]:
         click.echo(f"  {line.strip()}")
-    if not any("queued" in line and "0 queued" not in line for line in hit):
+
+    if any("is not one of the available choices" in line for line in hit):
+        click.echo(
+            f"\nNote: NetBox has no device {device_id}, so the render was refused at the end of\n"
+            "an otherwise complete path. Pass --device-id for one that exists to go further."
+        )
+    elif not any("queued" in line and "0 queued" not in line for line in hit):
         click.echo(
             "\nNote: '0 queued ... not enabled' still proves the full path. To get a real\n"
             "render, mark the device render-enabled via the plugin's DeviceConfigStatus."

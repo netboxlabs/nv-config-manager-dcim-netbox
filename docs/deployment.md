@@ -95,8 +95,7 @@ EOF
 
 # 3. NVCM.
 nvcm-netbox config -o my.yaml --token "$TOKEN"
-uv run --project "$NVCM_REPO/installer" \
-  nv-config-manager-installer deploy my.yaml --image-source local \
+nvcm-netbox deploy my.yaml --image-source local \
   --build-images --load-kind --kind-cluster nv-config-manager \
   --install-envoy-gateway --install-cnpg-operator --install-cert-manager
 
@@ -109,6 +108,12 @@ helm upgrade netbox deploy/netbox -n nv-config-manager --reuse-values \
 
 Run steps 1 and 2 before step 3: NVCM authenticates to NetBox with `$TOKEN`, and
 the NATS password step 4 needs does not exist until NVCM is deployed.
+
+`nvcm-netbox deploy` is NVCM's own `deploy` with its arguments forwarded
+unchanged, so its flags are documented in
+[NVIDIA's repository](https://github.com/nvidia/nv-config-manager). The same
+holds for `validate`, `generate-values` and `init`. They run inside your NVCM
+checkout, so relative paths in their flags resolve there; pass absolute ones.
 
 `$TOKEN` must be a NetBox v2 token: `nbt_` + a 12-character key + `.` + a
 40-character secret, all alphanumeric. Generate one with:

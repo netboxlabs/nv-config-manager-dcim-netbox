@@ -22,6 +22,10 @@ NETBOX_SERVICE = "netbox"
 # these regardless of whether NVCM's bundled DCIM is deployed.
 NVCM_NATS_SECRET = "nats-nv-config-manager"
 
+# NVCM's nats-box, used to publish the verification event. Both the Deployment
+# and its container carry this name.
+NATS_BOX_DEPLOYMENT = "nv-config-manager-nats-box"
+
 # Postgres and Valkey passwords, generated on first install and kept across
 # uninstall so they stay in step with the data on the PVCs.
 # See deploy/netbox/templates/datastore-credentials.yaml.
@@ -200,6 +204,15 @@ def wait_for_netbox(namespace: str, timeout: str = "10m", runner: Runner | None 
     )
 
 
+def netbox_service_exists(namespace: str, runner: Runner | None = None) -> bool:
+    """Return whether NetBox is reachable in-cluster under its fixed Service name."""
+    try:
+        kubectl("get", "service", NETBOX_SERVICE, namespace=namespace, runner=runner)
+    except CommandError:
+        return False
+    return True
+
+
 def run_nvcm_init(
     namespace: str, api_token: str, *, bootstrap: bool = True, runner: Runner | None = None
 ) -> str:
@@ -268,9 +281,14 @@ def publish_test_event(
     Proves consumer -> provider -> render dispatch without needing a real NetBox
     edit, so it works even before any device exists.
 
+    Runs in NVCM's own nats-box, which is already in the namespace with the
+    `nats` CLI on it. Spawning a pod from `natsio/nats-box:latest` instead means
+    a Docker Hub pull, which fails on an air-gapped cluster and on any host that
+    has hit Hub's anonymous rate limit.
+
     The password reaches the pod on stdin for the same reason ``run_nvcm_init``
-    does it: as a ``kubectl run`` argument it is persisted in the pod spec, where
-    anyone with `kubectl get pod -o yaml` can read it.
+    does it: as a command argument it is persisted in the pod spec, where anyone
+    with `kubectl get pod -o yaml` can read it.
     """
     envelope = json.dumps(
         {
@@ -292,15 +310,11 @@ def publish_test_event(
         f"{shlex.quote(envelope)}\n"
     )
     return kubectl(
-        "run",
-        "nvcm-netbox-verify",
-        "--image=natsio/nats-box:latest",
-        "--restart=Never",
-        "--rm",
-        "--attach",
-        "--quiet",
-        "--stdin",
-        "--command",
+        "exec",
+        "-i",
+        f"deploy/{NATS_BOX_DEPLOYMENT}",
+        "-c",
+        NATS_BOX_DEPLOYMENT,
         "--",
         "sh",
         "-s",

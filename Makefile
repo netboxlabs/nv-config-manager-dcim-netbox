@@ -27,7 +27,7 @@ TEMPLATE := $(VENV)/bin/template-cli
 
 .PHONY: help setup lint version-check test test-netbox discovery probe provider-config \
         cache-query render-cli test-sdk test-templates check clean image \
-        netbox-base netbox-image images \
+        netbox-base netbox-image images kind-up kind-down airgapped airgapped-images \
         inventory reference ipam hosts dhcp ztp firmware state secrets render \
         spectrumx ib infiniband spx lifecycle events
 
@@ -45,6 +45,9 @@ help:
 	@echo "image           build the provider-package OCI image (IMAGE=..., SDK from NVCM=...)"
 	@echo "netbox-image    build NetBox + our plugin (PLUGIN=..., pins in build/versions.env)"
 	@echo "images          build both images (what 'nvcm-netbox up' expects)"
+	@echo "kind-up         create the Kind cluster and deploy NetBox + NVCM"
+	@echo "kind-down       delete the Kind cluster"
+	@echo "airgapped       build an offline bundle carrying NVCM + NetBox"
 	@echo "clean           remove venv and caches"
 	@echo ""
 	@echo "per-area (implement one at a time):"
@@ -104,6 +107,24 @@ netbox-image: netbox-base
 	  -t $(NETBOX_IMAGE) .
 
 images: image netbox-image
+
+# --- deployment ---
+# Named after NVCM's own targets. Theirs creates the cluster then deploys NVCM;
+# ours deploys NetBox first, because NetBox owns the API token NVCM uses.
+KIND_CLUSTER ?= nv-config-manager
+
+kind-up:
+	NVCM_REPO=$(NVCM) $(VENV)/bin/nvcm-netbox up --kind-cluster $(KIND_CLUSTER)
+
+kind-down:
+	kind delete cluster --name $(KIND_CLUSTER)
+
+# --- air-gapped ---
+airgapped-images:
+	deploy/airgapped/netbox-images.sh -o generated/netbox-extra-images.txt
+
+airgapped:
+	NVCM_REPO=$(NVCM) deploy/airgapped/create-airgapped.sh --version v$(VERSION)
 
 # --- Tier 1: provider dev loop ---
 discovery:

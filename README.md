@@ -33,7 +33,7 @@ export NVCM_REPO=../nv-config-manager
 
 make setup         # venv, the SDK from your NVCM checkout, and the CLI
 make images        # provider wheelhouse + NetBox with the plugin
-.venv/bin/nvcm-netbox up
+make kind-up       # or: .venv/bin/nvcm-netbox up
 ```
 
 `make setup` rather than `pip install -e .` because the
@@ -51,6 +51,7 @@ Running `up` again is safe.
 .venv/bin/nvcm-netbox verify           # re-run the event-loop check
 .venv/bin/nvcm-netbox up --size medium # larger NVCM resource profile
 .venv/bin/nvcm-netbox up --skip-nvcm   # NetBox only
+make kind-down                         # delete the cluster
 kubectl -n nv-config-manager port-forward svc/netbox 8080:80
 ```
 
@@ -63,26 +64,37 @@ kubectl -n nv-config-manager port-forward svc/netbox 8080:80
 See [docs/deployment.md](docs/deployment.md) for the manual sequence, the
 host-NetBox development mode, and troubleshooting.
 
-## Using NVCM's installer TUI
+## Step by step
 
-NVCM has an interactive TUI (`nv-config-manager-installer init`) for writing its
-`nv-config-manager-install.yaml`. It can't set up a NetBox deployment on its own.
-There's no field for `dcim.provider_packages`, and without that block NVCM never
-installs this provider. It doesn't deploy NetBox either.
-
-Generate the config first, then open it in the TUI to change anything else you
-need, such as `cluster.size`, SSO, vault or ZTP. `provider_packages` is a real
-field in NVCM's schema and just lacks a widget, so the TUI preserves it:
+`up` is the whole sequence in one command. To drive it yourself, `nvcm-netbox`
+takes the same commands and flags as NVCM's own installer, so anything in
+[NVIDIA's documentation](https://github.com/nvidia/nv-config-manager) works here
+with `nvcm-netbox` in place of `nv-config-manager-installer`:
 
 ```bash
-.venv/bin/nvcm-netbox config -o my.yaml
-uv run --project "$NVCM_REPO/installer" \
-  nv-config-manager-installer init -c my.yaml     # TUI, pre-populated
-.venv/bin/nvcm-netbox up --config-out my.yaml
+nvcm-netbox up --skip-nvcm             # cluster, NetBox, API token, config
+nvcm-netbox init                       # optional: edit the config in NVCM's TUI
+nvcm-netbox validate  generated/nv-config-manager-install.yaml
+nvcm-netbox deploy    generated/nv-config-manager-install.yaml \
+  --image-source local --build-images --load-kind \
+  --kind-cluster nv-config-manager \
+  --install-envoy-gateway --install-cnpg-operator --install-cert-manager
+nvcm-netbox verify
 ```
 
-Use `nvcm-netbox config` on its own if you'd rather run NVCM's installer
-yourself. It writes the same file that `up` uses.
+`validate`, `generate-values` and `deploy` hand their arguments straight to
+NVCM's installer, so every flag it accepts works unchanged. `deploy` deploys
+NVCM only, exactly as theirs does, which is why NetBox has to be up first: NetBox
+issues the API token NVCM authenticates with.
+
+`init` opens NVCM's TUI on the config. The wizard has no field for the provider
+wheelhouse image or the API token, so `nvcm-netbox` writes those before it opens
+and puts them back afterwards. Everything else, `cluster.size`, SSO, vault, ZTP,
+is yours to change there.
+
+One caveat: those commands run inside your NVCM checkout, so a relative
+`--output-dir` or `--chart-dir` resolves against *that* directory. Pass absolute
+paths.
 
 ## Development
 
@@ -102,6 +114,8 @@ To work against a live NetBox without a cluster, see
 
 - [Deployment](docs/deployment.md): the installer, manual bring-up, troubleshooting
 - [DSX Air simulations](docs/air-sim.md): running a simulated fabric with NetBox
+- [Air-gapped installation](docs/airgapped.md): building and installing an
+  offline bundle carrying both NVCM and NetBox
 - [Event delivery](docs/event-delivery.md): how change events reach NVCM
 - [Supported operations](docs/supported-operations.mdx): the full operation surface
   by area, and how each maps onto NetBox
