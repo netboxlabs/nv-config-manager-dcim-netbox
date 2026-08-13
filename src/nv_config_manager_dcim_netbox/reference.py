@@ -14,8 +14,26 @@ from nv_config_manager_dcim_netbox.fabric_common import VRFS_PATH, chunked
 
 logger = logging.getLogger(__name__)
 
-_LOCATIONS_QUERY = "query { location_list { id name } }"
-_LOCATION_BY_ID_QUERY = "query ($id: ID!) { location(id: $id) { id name } }"
+# NVCM asks for locations by type ("Site" for the site dropdown). NetBox has no
+# per-location type field; its hierarchy *is* the type, one model per level. So a
+# requested type selects the model to query rather than filtering one list.
+#
+# Devices attach to a Site, and the mock-topology loader maps a blueprint's
+# Provider/Region levels onto Regions and its Site level onto a Site, creating no
+# NetBox Location objects at all. Querying `location_list` therefore returned
+# nothing and left NVCM's site dropdown empty.
+_LOCATION_MODELS = {
+    "site": ("site_list", "site"),
+    "region": ("region_list", "region"),
+    "sitegroup": ("site_group_list", "site_group"),
+    "site_group": ("site_group_list", "site_group"),
+    "location": ("location_list", "location"),
+}
+
+# With no type given, return what devices can actually be scoped to. Sites first:
+# ids are per-model in NetBox, so a Site and a Location can share one, and
+# get_location_metadata resolves in this same order to stay consistent.
+_DEFAULT_LOCATION_MODELS = ("site", "location")
 _TENANTS_QUERY = "query { tenant_list { id name } }"
 
 # Only the two nested objects the managed-only dropdowns need, for the given ids.
@@ -72,12 +90,27 @@ class NetBoxReferenceMixin:
         # ``location_types`` is inert: NetBox's Region/SiteGroup/Site/Location
         # hierarchy has no per-location type to filter on, so it is accepted only
         # for contract parity. Logged so callers can see it did not filter.
-        if location_types:
-            logger.debug(
-                "NetBox has no location-type concept; ignoring location_types=%r", location_types
-            )
-        data = await self.graphql_query(_LOCATIONS_QUERY)
-        return _selections(data.get("location_list") or [])
+        wanted = [t.lower().replace(" ", "_") for t in location_types] or list(
+            _DEFAULT_LOCATION_MODELS
+        )
+        unknown = [t for t in wanted if t not in _LOCATION_MODELS]
+        if unknown:
+            logger.debug("No NetBox model for location type(s) %r; skipping", unknown)
+
+        seen: set[tuple[str, str]] = set()
+        found: list[dict[str, Any]] = []
+        for kind in wanted:
+            model = _LOCATION_MODELS.get(kind)
+            if model is None:
+                continue
+            list_field = model[0]
+            data = await self.graphql_query(f"query {{ {list_field} {{ id name }} }}")
+            for item in data.get(list_field) or []:
+                key = (str(item["id"]), item["name"])
+                if key not in seen:
+                    seen.add(key)
+                    found.append(item)
+        return _selections(found)
 
     async def get_location_metadata(self, location_id: str) -> DCIMSelection | None:
         """Return normalized metadata for one NetBox location PK, or ``None``.
@@ -88,14 +121,18 @@ class NetBoxReferenceMixin:
         GraphQL error on the singular query, classified by the transport as
         ``DCIMNotFoundError``.
         """
-        try:
-            data = await self.graphql_query(_LOCATION_BY_ID_QUERY, {"id": location_id})
-        except DCIMNotFoundError:
-            return None
-        location = data.get("location")
-        if not location:
-            return None
-        return DCIMSelection(id=str(location["id"]), name=location["name"])
+        for kind in _DEFAULT_LOCATION_MODELS:
+            field = _LOCATION_MODELS[kind][1]
+            try:
+                data = await self.graphql_query(
+                    f"query ($id: ID!) {{ {field}(id: $id) {{ id name }} }}", {"id": location_id}
+                )
+            except DCIMNotFoundError:
+                continue
+            found = data.get(field)
+            if found:
+                return DCIMSelection(id=str(found["id"]), name=found["name"])
+        return None
 
     async def _managed_device_selections(self, field: str) -> list[DCIMSelection]:
         """Return distinct ``tenant``/``role`` choices across managed devices.

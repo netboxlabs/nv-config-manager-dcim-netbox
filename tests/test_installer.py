@@ -934,3 +934,32 @@ def test_config_command_keeps_a_nats_password_already_present(tmp_path):
     assert again.exit_code == 0, again.output
     second = yaml.safe_load(out.read_text())["secrets"]["k8s"]["nautobot"]["values"]["natsPassword"]
     assert second == first
+
+
+def test_kind_refuses_images_the_node_cannot_run(monkeypatch):
+    """`make images PLATFORM=...` targets one architecture, which the DSX Air
+    path needs. Loading those into a kind node of another architecture fails two
+    ways: NetBox dies with "exec format error", and the provider wheelhouse
+    installs nothing because pip rejects every wheel, so the pod starts with no
+    provider at all.
+    """
+    monkeypatch.setattr(cluster, "kind_node_arch", lambda c: "arm64")
+    monkeypatch.setattr(cluster, "image_arch", lambda i: "amd64")
+
+    with pytest.raises(Exception) as excinfo:
+        cluster.check_image_arch(["netbox:0.1.0"], "nv-config-manager")
+    message = str(excinfo.value)
+    assert "arm64" in message
+    assert "make images PLATFORM=linux/arm64" in message
+
+
+def test_kind_accepts_matching_images(monkeypatch):
+    monkeypatch.setattr(cluster, "kind_node_arch", lambda c: "arm64")
+    monkeypatch.setattr(cluster, "image_arch", lambda i: "arm64")
+    cluster.check_image_arch(["netbox:0.1.0"], "nv-config-manager")
+
+
+def test_no_kind_node_is_not_an_arch_failure(monkeypatch):
+    # Nothing to ask; the load step reports its own failure.
+    monkeypatch.setattr(cluster, "kind_node_arch", lambda c: "")
+    cluster.check_image_arch(["netbox:0.1.0"], "nv-config-manager")

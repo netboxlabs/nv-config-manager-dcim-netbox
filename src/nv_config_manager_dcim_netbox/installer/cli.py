@@ -591,6 +591,7 @@ def up(
     if kind_load:
         _step(step, total, f"Loading images into kind cluster {kind_cluster}")
         require_tools("kind")
+        cluster.check_image_arch([netbox_ref, provider_ref], kind_cluster)
         cluster.load_images_into_kind([netbox_ref, provider_ref], kind_cluster)
         _ok("images available to the node")
     else:

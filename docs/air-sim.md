@@ -164,21 +164,32 @@ A good first Day-2 workflow, because the trial has five TAN leaves that should
 receive the same diff. NVIDIA's example appends a DNS server to the site config
 context; in NetBox that is a config context object, and the flow is the same.
 
-The demo context already carries `8.8.8.8`. Append `8.8.4.4`:
+The demo context already carries `8.8.8.8`. Append `8.8.4.4`.
+
+`data` is a single JSON field, so PATCHing it replaces the whole object. Read it,
+change the one key, write it back. Overwriting it wholesale drops `ztp`,
+`management_prefixes` and `provisioning_servers`, and the DHCP service then
+crashloops with `No ZTP server found ... in DHCP context`:
 
 ```bash
 TOKEN=$(kubectl -n nv-config-manager get secret netbox-superuser \
           -o jsonpath='{.data.api_token}' | base64 -d)
+API=https://netbox.nvcm.air/api/extras/config-contexts
 CTX=$(curl -sk -H "Authorization: Token $TOKEN" \
-        "https://netbox.nvcm.air/api/extras/config-contexts/?q=network-management-services" \
+        "$API/?q=network-management-services" \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["results"][0]["id"])')
 
-curl -sk -X PATCH -H "Authorization: Token $TOKEN" -H "Content-Type: application/json" \
-  -d '{"data": {"dhcp": {}, "dns": {"ipv4": ["8.8.8.8", "8.8.4.4"]}}}' \
-  "https://netbox.nvcm.air/api/extras/config-contexts/$CTX/"
+curl -sk -H "Authorization: Token $TOKEN" "$API/$CTX/" \
+  | python3 -c 'import json,sys
+ctx = json.load(sys.stdin)["data"]
+ctx.setdefault("dns", {}).setdefault("ipv4", []).append("8.8.4.4")
+print(json.dumps({"data": ctx}))' \
+  | curl -sk -X PATCH -H "Authorization: Token $TOKEN" -H "Content-Type: application/json" \
+      --data-binary @- "$API/$CTX/"
 ```
 
-Editing it in the NetBox UI works just as well. The plugin publishes an
+Editing it in the NetBox UI is safer, since the form round-trips the whole
+object. The plugin publishes an
 `extras.configcontext` change, this provider resolves the context's scope to the
 devices it applies to, the render service produces new intended configs, and
 Multi-Deploy groups the identical diffs for approval.

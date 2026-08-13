@@ -76,6 +76,47 @@ def create_kind_cluster(name: str, config: Path, timeout: str = "5m") -> None:
     )
 
 
+def image_arch(image: str) -> str:
+    """Return an image's architecture, or "" if it is not built."""
+    try:
+        return run(["docker", "image", "inspect", image, "--format", "{{.Architecture}}"]).strip()
+    except CommandError:
+        return ""
+
+
+def kind_node_arch(cluster: str) -> str:
+    """Return the kind node's architecture in Docker's naming."""
+    try:
+        raw = run(["docker", "exec", f"{cluster}-control-plane", "uname", "-m"]).strip()
+    except CommandError:
+        return ""
+    return {"x86_64": "amd64", "aarch64": "arm64"}.get(raw, raw)
+
+
+def check_image_arch(images: list[str], cluster: str) -> None:
+    """Refuse to load images the kind node cannot run.
+
+    `make images PLATFORM=...` builds for a named architecture, which the DSX Air
+    path needs (its boxes are x86_64). Loading those into a kind node of another
+    architecture fails in two different ways: the NetBox container dies with
+    "exec format error", and the provider wheelhouse installs nothing because pip
+    rejects every wheel as "not a supported wheel on this platform" -- the pod
+    then starts without the provider at all.
+    """
+    want = kind_node_arch(cluster)
+    if not want:
+        return  # No node to ask; the load step will report its own failure.
+    wrong = [f"  {i}: {image_arch(i) or 'not built'}" for i in images if image_arch(i) != want]
+    if wrong:
+        raise CommandError(
+            ["docker", "image", "inspect"],
+            1,
+            f"The kind node is {want}, but these images are not:\n"
+            + "\n".join(wrong)
+            + f"\n\nRebuild them for it:\n  make images PLATFORM=linux/{want}",
+        )
+
+
 def load_images_into_kind(images: list[str], cluster: str) -> None:
     """Make locally-built images visible to a kind node.
 
