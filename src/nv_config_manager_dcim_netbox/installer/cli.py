@@ -49,10 +49,18 @@ def _nvcm_installer_argv(nvcm_repo: Path, *args: str) -> list[str]:
     Deployer.run() is a hardcoded call sequence in a very large module on a
     force-pushed branch; the CLI and the config-file schema are the stable
     surface, so those are the only things we depend on.
+
+    `--directory` runs it from the NVCM checkout, because their
+    find_project_root() walks up from the working directory looking for
+    `deploy/`, a `Makefile` or `.git`. Run from here it finds *this* repo, and
+    the image builds then fail on contexts like `components/nats-ready` that
+    only exist in theirs. Any path passed in *args must be absolute.
     """
     return [
         "uv",
         "run",
+        "--directory",
+        str(nvcm_repo),
         "--project",
         str(nvcm_repo / "installer"),
         "nv-config-manager-installer",
@@ -382,7 +390,8 @@ def up(
         profile, api_token=token, namespace=namespace, size=size, provider_image=provider_ref
     )
     config = cfg.apply_options(profile, options)
-    written = cfg.write_config(config, config_out)
+    # Absolute: the installer subprocess runs from the NVCM checkout, not here.
+    written = cfg.write_config(config, config_out).resolve()
     _ok(f"{written}")
 
     if skip_nvcm:

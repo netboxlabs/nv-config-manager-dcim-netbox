@@ -166,10 +166,48 @@ def test_up_rejects_a_path_that_is_not_an_nvcm_checkout(tmp_path):
 
 
 def test_nvcm_installer_argv_targets_their_cli_not_our_imports():
-    argv = _nvcm_installer_argv(Path("/tmp/nvcm"), "validate", "cfg.yaml")
-    assert argv[:3] == ["uv", "run", "--project"]
-    assert argv[3].endswith("/tmp/nvcm/installer")
-    assert argv[4:] == ["nv-config-manager-installer", "validate", "cfg.yaml"]
+    argv = _nvcm_installer_argv(Path("/tmp/nvcm"), "validate", "/abs/cfg.yaml")
+    assert argv[:2] == ["uv", "run"]
+    assert argv[2:4] == ["--directory", "/tmp/nvcm"]
+    assert argv[4] == "--project"
+    assert argv[5].endswith("/tmp/nvcm/installer")
+    assert argv[6:] == ["nv-config-manager-installer", "validate", "/abs/cfg.yaml"]
+
+
+def test_nvcm_installer_runs_from_their_checkout_not_ours():
+    # Their find_project_root() walks up from the working directory for
+    # `deploy/` / `Makefile` / `.git`, all of which this repo also has. Without
+    # --directory it picks us, and their image builds fail on contexts like
+    # `components/nats-ready` that exist only in their tree.
+    argv = _nvcm_installer_argv(Path("/tmp/nvcm"), "deploy", "/abs/cfg.yaml")
+    assert argv[argv.index("--directory") + 1] == "/tmp/nvcm"
+
+
+def test_up_passes_an_absolute_config_path_to_their_installer(monkeypatch, tmp_path):
+    # The path is relative by default and the subprocess now runs from a
+    # different directory, so a relative one would resolve inside their tree.
+    seen: list[list[str]] = []
+    monkeypatch.setattr(cluster, "kind_cluster_exists", lambda name: True)
+    monkeypatch.setattr(cluster, "helm_dependency_build", lambda chart: None)
+    monkeypatch.setattr(cluster, "pending_release_status", lambda r, ns, runner=None: None)
+    monkeypatch.setattr(cluster, "orphaned_data_volumes", lambda r, ns, runner=None: [])
+    monkeypatch.setattr(cluster, "install_netbox", lambda *a, **k: None)
+    monkeypatch.setattr(cluster, "wait_for_netbox", lambda *a, **k: None)
+    monkeypatch.setattr(cluster, "run_nvcm_init", lambda *a, **k: "")
+    monkeypatch.setattr(cluster, "read_nats_password", lambda *a, **k: "")
+    monkeypatch.setattr(cli, "stream", lambda argv, cwd=None: seen.append(list(argv)))
+
+    with CliRunner().isolated_filesystem(temp_dir=tmp_path):
+        result = CliRunner().invoke(
+            cli.main,
+            ["up", "--nvcm-repo", str(_nvcm_stub()), "--no-kind-load"],
+        )
+    # The run stops at the last step (nothing published a NATS secret), which is
+    # past both calls this test is about.
+    assert len(seen) == 2, result.output
+    for argv in seen:
+        cfg_arg = argv[-1] if argv[-2] == "validate" else argv[argv.index("deploy") + 1]
+        assert Path(cfg_arg).is_absolute(), cfg_arg
 
 
 def test_require_tools_names_everything_missing():
