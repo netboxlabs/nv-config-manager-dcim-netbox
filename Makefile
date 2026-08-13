@@ -114,7 +114,9 @@ images: image netbox-image
 # ours deploys NetBox first, because NetBox owns the API token NVCM uses.
 KIND_CLUSTER ?= nv-config-manager
 
-kind-up:
+# Depends on `images` so this is one command like NVCM's. Our two images are not
+# built by the installer -- it builds NVCM's -- and a cached rebuild is seconds.
+kind-up: images
 	NVCM_REPO=$(NVCM) $(VENV)/bin/nvcm-netbox up --kind-cluster $(KIND_CLUSTER)
 
 kind-down:

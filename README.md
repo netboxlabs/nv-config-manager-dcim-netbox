@@ -38,8 +38,7 @@ cd nv-config-manager-dcim-netbox
 export NVCM_REPO=../nv-config-manager
 
 make setup         # venv, the SDK from your NVCM checkout, and the CLI
-make images        # provider wheelhouse + NetBox with the plugin
-make kind-up       # or: .venv/bin/nvcm-netbox up
+make kind-up       # builds the images, then deploys NetBox and NVCM
 ```
 
 `make setup` rather than `pip install -e .` because the `nv-config-manager-dcim`
@@ -48,10 +47,10 @@ SDK is not published; it is installed from `$NVCM_REPO/components/dcim`.
 Running `up` again is safe.
 
 > **NetBox version.** The plugin needs a GraphQL feature that ships in NetBox
-> 4.7, which isn't released yet, so `make images` builds NetBox from a pinned
-> commit on the `feature` branch. The pins are in
-> [`build/versions.env`](build/versions.env). Once the 4.7 beta is out we can
-> drop that step and pull a published image instead.
+> 4.7, which isn't released yet, so the NetBox image is built from a pinned
+> commit on the `feature` branch. That first build takes a while; later ones are
+> cached. The pins are in [`build/versions.env`](build/versions.env). Once the
+> 4.7 beta is out we can pull a published image instead.
 
 ### Step by Step
 
@@ -143,9 +142,19 @@ and the profile does not change that.
 make kind-up
 ```
 
-Creates the Kind cluster if needed, builds nothing (run `make images` first),
-loads the local images into the node, deploys NetBox, then runs NVCM's installer
-against it.
+The default `make kind-up` target creates the Kind cluster if needed, builds the
+two local images, loads them into Kind, deploys NetBox, then runs NVCM's
+installer, which builds NVCM's own images, installs the required operators, and
+deploys using `deploy/configs/local-netbox.yaml`.
+
+That profile is NVCM's `local-superpod.yaml` with the DCIM pointed at NetBox:
+same site and same `small` sizing, plus `dcim.provider`, `provider_packages` and
+`services.nautobot: false`. To start from one of theirs instead, pass it as the
+base and the same overlay is applied:
+
+```bash
+.venv/bin/nvcm-netbox config --profile "$NVCM_REPO/deploy/configs/local-dgxc.yaml" -o mine.yaml
+```
 
 The cluster is created from NVCM's own `deploy/kind-config.yaml`, which maps the
 Gateway's NodePorts onto host 443/80. A default `kind create cluster` does not,
