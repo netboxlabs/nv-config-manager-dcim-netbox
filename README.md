@@ -142,19 +142,9 @@ and the profile does not change that.
 make kind-up
 ```
 
-The default `make kind-up` target creates the Kind cluster if needed, builds the
-two local images, loads them into Kind, deploys NetBox, then runs NVCM's
-installer, which builds NVCM's own images, installs the required operators, and
-deploys using `deploy/configs/local-netbox.yaml`.
-
-That profile is NVCM's `local-superpod.yaml` with the DCIM pointed at NetBox:
-same site and same `small` sizing, plus `dcim.provider`, `provider_packages` and
-`services.nautobot: false`. To start from one of theirs instead, pass it as the
-base and the same overlay is applied:
-
-```bash
-.venv/bin/nvcm-netbox config --profile "$NVCM_REPO/deploy/configs/local-dgxc.yaml" -o mine.yaml
-```
+The default `make kind-up` target creates the Kind cluster if needed, builds
+local images, loads them into Kind, installs required operators, deploys NetBox,
+and deploys using `deploy/configs/local-netbox.yaml`.
 
 The cluster is created from NVCM's own `deploy/kind-config.yaml`, which maps the
 Gateway's NodePorts onto host 443/80. A default `kind create cluster` does not,
@@ -174,8 +164,8 @@ make topology                      # air_trial, 7 devices
 make topology BLUEPRINT=air_superpod   # 24 devices
 ```
 
-It reads NVCM's own blueprints from `development/mock_topology/context/` in your
-checkout, so the data matches what their deployment gets.
+The blueprints come from `development/mock_topology/context/` in your NVCM
+checkout.
 
 See [docs/deployment.md](docs/deployment.md) for the manual sequence and
 troubleshooting.
