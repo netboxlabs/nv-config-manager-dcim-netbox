@@ -186,3 +186,56 @@ async def test_get_device_interfaces():
     client = _client(rest_list={"dcim/interfaces/": [iface]})
     result = await client.get_device_interfaces("1")
     assert [i.name for i in result] == ["swp1"] and result[0].vrf_id == "8"
+
+
+async def test_list_devices_sends_a_site_id_not_a_slug():
+    """NVCM passes the site id it got from `list_locations` (a NetBox PK).
+
+    NetBox's `site` filter matches the *slug*; the id belongs under `site_id`.
+    Sent as `site=1` NetBox rejects the whole request with HTTP 400
+    ("Select a valid choice. 1 is not one of the available choices"), which fails
+    device discovery for Multi-Deploy and anything else scoped by site.
+    """
+    from nv_config_manager_dcim import DCIMDeviceSelectionFilter
+
+    from tests._fake import params_for
+
+    queries: list = []
+    client = _client(rest_list={"dcim/devices/": [_REST_DEVICE]}, queries=queries)
+    await client.list_devices(DCIMDeviceSelectionFilter(sites=["1"]))
+    sent = params_for(queries, "dcim/devices/")
+    assert ("site_id", "1") in sent
+    assert not [v for k, v in sent if k == "site"]
+
+
+async def test_list_devices_slugifies_a_role_name():
+    # Workflows send the display name ("TAN-HLEAF"); NetBox keys roles by slug.
+    from nv_config_manager_dcim import DCIMDeviceSelectionFilter
+
+    from tests._fake import params_for
+
+    queries: list = []
+    client = _client(rest_list={"dcim/devices/": [_REST_DEVICE]}, queries=queries)
+    await client.list_devices(DCIMDeviceSelectionFilter(roles=["TAN-HLEAF"]))
+    assert ("role", "tan-hleaf") in params_for(queries, "dcim/devices/")
+
+
+async def test_a_slug_filter_is_passed_through_unchanged():
+    from nv_config_manager_dcim import DCIMDeviceSelectionFilter
+
+    from tests._fake import params_for
+
+    queries: list = []
+    client = _client(rest_list={"dcim/devices/": [_REST_DEVICE]}, queries=queries)
+    await client.list_devices(DCIMDeviceSelectionFilter(roles=["tan-hleaf"]))
+    assert ("role", "tan-hleaf") in params_for(queries, "dcim/devices/")
+
+
+def test_slug_or_id_covers_the_name_and_id_forms():
+    from nv_config_manager_dcim_netbox._mappers import slug_or_id
+
+    assert slug_or_id("site", "1") == ("site_id", "1")
+    assert slug_or_id("role", "TAN-HLEAF") == ("role", "tan-hleaf")
+    assert slug_or_id("tenant", "Acme Corp") == ("tenant", "acme-corp")
+    # Idempotent for a value that is already a slug.
+    assert slug_or_id("role", "tan-hleaf") == ("role", "tan-hleaf")

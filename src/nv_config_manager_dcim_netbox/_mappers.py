@@ -11,6 +11,7 @@ NetBox specifics reflected here:
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import netaddr
@@ -137,6 +138,27 @@ def status_slug(value: Any) -> str:
     value that is already a slug.
     """
     return str(value).lower()
+
+
+def slug_or_id(key: str, value: Any) -> tuple[str, str]:
+    """Return the NetBox query param and value for a name-or-id filter.
+
+    NetBox's ``site``/``role``/``tenant``/``platform``/``manufacturer`` filters
+    match the *slug*; the id is a separate ``<key>_id`` param. NVCM sends
+    whichever it holds: a site id taken from ``list_locations`` (a NetBox PK), and
+    a role as its display name (``TAN-HLEAF``). Forwarding either verbatim makes
+    NetBox reject the whole request with HTTP 400 ("Select a valid choice"),
+    which fails device discovery for Multi-Deploy and anything else scoped by
+    site or role.
+
+    A value that is already a slug is unchanged, so this is idempotent. Same
+    class of problem as :func:`status_slug`, generalized to the id/slug split.
+    """
+    text = str(value)
+    if text.isdigit() and int(text) > 0:
+        return (f"{key}_id", text)
+    # NetBox slugs are lowercase with separators collapsed to hyphens.
+    return (key, re.sub(r"[\s_]+", "-", text.strip().lower()))
 
 
 def name_of(obj: Any) -> str | None:

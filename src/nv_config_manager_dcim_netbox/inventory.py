@@ -21,6 +21,7 @@ from nv_config_manager_dcim_netbox._mappers import (
     host_device_from_gql,
     interface_from_rest,
     network_device_from_rest,
+    slug_or_id,
     status_slug,
 )
 from nv_config_manager_dcim_netbox.fabric_common import DEVICES_PATH, INTERFACES_PATH, chunked
@@ -159,10 +160,16 @@ class NetBoxInventoryMixin:
             ("manufacturer", filters.manufacturers),
             ("platform", filters.platforms),
         ):
-            # ``status`` must be the NetBox slug (lowercase); workflows pass the
-            # display label ("Active"). See ``status_slug``.
-            coerce = status_slug if key == "status" else str
-            params.extend((key, coerce(value)) for value in values or ())
+            for value in values or ():
+                if key == "status":
+                    # Slug (lowercase); workflows pass the display label ("Active").
+                    params.append((key, status_slug(value)))
+                elif key == "device_type_id":
+                    params.append((key, str(value)))
+                else:
+                    # Name-or-id: NetBox keys these by slug, with the id under
+                    # `<key>_id`. Workflows send either. See ``slug_or_id``.
+                    params.append(slug_or_id(key, value))
         if filters.managed_only:
             # render_enabled ids, ANDed with the rest of the filter.
             managed_ids = await self.status_flag_device_ids(render_enabled=True)
@@ -289,20 +296,24 @@ class NetBoxInventoryMixin:
         """
         params: list[tuple[str, str]] = []
         if filters.site:
-            params.append(("site", str(filters.site)))
+            params.append(slug_or_id("site", filters.site))
         if filters.tenant:
-            params.append(("tenant", str(filters.tenant)))
+            params.append(slug_or_id("tenant", filters.tenant))
         for key, values in (
             ("role", filters.roles),
             ("status", filters.statuses),
             ("device_type_id", filters.device_type_ids),
         ):
-            # ``status`` must be the NetBox slug (lowercase); workflows pass the
-            # display label ("Active"). See ``status_slug``.
-            coerce = status_slug if key == "status" else str
-            params.extend((key, coerce(value)) for value in values or ())
+            for value in values or ():
+                if key == "status":
+                    # Slug (lowercase); workflows pass the display label ("Active").
+                    params.append((key, status_slug(value)))
+                elif key == "device_type_id":
+                    params.append((key, str(value)))
+                else:
+                    params.append(slug_or_id(key, value))
         for platform in filters.platforms or []:
-            params.append(("platform", str(platform.value)))
+            params.append(slug_or_id("platform", platform.value))
 
         # Every filter that narrows to a set of device ids, collected for
         # intersection. managed_only proxies to render_enabled, so it only applies
