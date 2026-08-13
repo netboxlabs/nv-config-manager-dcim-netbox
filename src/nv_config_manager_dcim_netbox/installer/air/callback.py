@@ -20,7 +20,10 @@ from nv_config_manager_dcim_netbox.installer.air import AirSupportUnavailable
 from nv_config_manager_dcim_netbox.installer.air.config import NetBoxSimConfig
 from nv_config_manager_dcim_netbox.installer.remote import ScriptRunner, SshRunner
 from nv_config_manager_dcim_netbox.installer.shell import run
-from nv_config_manager_dcim_netbox.installer.tokens import generate_api_token
+from nv_config_manager_dcim_netbox.installer.tokens import (
+    generate_api_token,
+    generate_nats_password,
+)
 
 try:
     from nv_config_manager_installer.air_sim.constants import (
@@ -62,6 +65,9 @@ class NetBoxAirCallback:
         self.cfg = cfg
         self.chart = chart or cfg.netbox_chart or DEFAULT_CHART
         self.api_token = cfg.dcim_token or generate_api_token()
+        # Supplied to NVCM in the install config, so NetBox is installed with it
+        # rather than upgraded again once NVCM's deployer has minted one.
+        self.nats_password = generate_nats_password()
         self.host = ""
         self.port = 0
         # Injectable so the bring-up can be tested without a simulation.
@@ -93,14 +99,9 @@ class NetBoxAirCallback:
             self._inner.on_deploy_started(host, port)
 
     def on_complete(self, success: bool, host: str = "", port: int = 0) -> None:
-        # NVCM's deployer creates the NATS password, so the publisher can only be
-        # switched on now. Until this runs NetBox logs envelopes instead.
+        # NetBox already holds the NATS password (see __init__), so nothing has to
+        # be re-installed here.
         if success:
-            try:
-                self.connect_event_bus(host or self.host, port or self.port)
-            except Exception as exc:  # noqa: BLE001 - never fail a good deploy here
-                self.on_log(f"Could not connect NetBox to the event bus: {exc}")
-                self.on_log("Re-run `nvcm-netbox air connect` once the cluster settles.")
             try:
                 self.publish_hostname(host or self.host, port or self.port)
             except Exception as exc:  # noqa: BLE001 - cosmetic, never fail the deploy
@@ -162,6 +163,7 @@ class NetBoxAirCallback:
             api_token=self.api_token,
             image_repository=self.cfg.netbox_image,
             image_tag=self.cfg.netbox_image_tag,
+            nats_password=self.nats_password,
             extra_set=[*self.cfg.gateway_overrides(), *self.cfg.netbox_helm_set],
             runner=script,
         )
@@ -318,23 +320,3 @@ class NetBoxAirCallback:
             runner.upload(local, remote)
         finally:
             local.unlink(missing_ok=True)
-
-    def connect_event_bus(self, host: str, port: int) -> None:
-        """Re-run the NetBox release with the NATS password NVCM created."""
-        runner = self.runner(host, port)
-        password = cluster.read_nats_password(NAMESPACE, runner=runner)
-        if not password:
-            self.on_log("No NATS secret yet; NetBox stays on the log publisher.")
-            return
-        cluster.install_netbox(
-            f"/home/{NVCM_BOX_USER}/charts/{self.chart.name}",
-            release=self.cfg.netbox_release,
-            namespace=NAMESPACE,
-            api_token=self.api_token,
-            image_repository=self.cfg.netbox_image,
-            image_tag=self.cfg.netbox_image_tag,
-            nats_password=password,
-            extra_set=[*self.cfg.gateway_overrides(), *self.cfg.netbox_helm_set],
-            runner=runner,
-        )
-        self.on_log("NetBox is publishing change events to NVCM.")

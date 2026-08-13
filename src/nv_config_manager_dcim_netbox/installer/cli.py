@@ -16,7 +16,11 @@ from nv_config_manager_dcim_netbox.installer import cluster
 from nv_config_manager_dcim_netbox.installer import config as cfg
 from nv_config_manager_dcim_netbox.installer.air import cli as air_cli
 from nv_config_manager_dcim_netbox.installer.shell import CommandError, require_tools, stream
-from nv_config_manager_dcim_netbox.installer.tokens import generate_api_token, is_valid_api_token
+from nv_config_manager_dcim_netbox.installer.tokens import (
+    generate_api_token,
+    generate_nats_password,
+    is_valid_api_token,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CHART = _REPO_ROOT / "deploy" / "netbox"
@@ -82,6 +86,7 @@ def _config_options(
     size: str,
     provider_image: str | None = None,
     public_url: str | None = None,
+    nats_password: str | None = None,
 ) -> cfg.ConfigOptions:
     """Resolve the installer config options `config` and `up` both write.
 
@@ -98,7 +103,18 @@ def _config_options(
         or (dcim.get("provider_packages") or [{}])[0].get("image")
         or defaults.provider_image,
         netbox_public_url=public_url or dcim.get("public_url") or defaults.netbox_public_url,
+        nats_password=nats_password or "",
     )
+
+
+def _existing_nats_password(config: dict) -> str:
+    """Return a natsPassword already in the config, so re-runs keep it.
+
+    Regenerating it would leave NVCM's NATS users and the deployed NetBox
+    disagreeing until both are rolled.
+    """
+    k8s = ((config.get("secrets") or {}).get("k8s") or {}).get("nautobot") or {}
+    return (k8s.get("values") or {}).get("natsPassword") or ""
 
 
 def _nvcm_repo_candidate(nvcm_repo: Path | None) -> tuple[Path, str]:
@@ -279,7 +295,13 @@ def init(config_path: Path, extra: tuple[str, ...], nvcm_repo: Path | None) -> N
     else:
         config, token = cfg.load_profile(), generate_api_token()
 
-    options = _config_options(config, api_token=token, namespace=DEFAULT_NAMESPACE, size="small")
+    options = _config_options(
+        config,
+        api_token=token,
+        namespace=DEFAULT_NAMESPACE,
+        size="small",
+        nats_password=_existing_nats_password(config) or generate_nats_password(),
+    )
     cfg.write_config(cfg.apply_options(config, options), resolved)
 
     stream(_nvcm_installer_argv(repo, "init", "--config", str(resolved), *extra))
@@ -355,6 +377,7 @@ def config_command(
         size=size,
         provider_image=provider_image,
         public_url=public_url,
+        nats_password=_existing_nats_password(base) or generate_nats_password(),
     )
     written = cfg.write_config(cfg.apply_options(base, options), output)
     click.echo(f"Wrote {written}")
@@ -515,7 +538,7 @@ def up(
     NATS password NVCM's deployer created.
     """
     require_tools("kubectl", "helm")
-    total = 7 if skip_nvcm else 10
+    total = 7 if skip_nvcm else 9
     step = 0
 
     repo = None if skip_nvcm else _resolve_nvcm_repo(nvcm_repo)
@@ -525,6 +548,12 @@ def up(
     token = token or generate_api_token()
     if not is_valid_api_token(token):
         raise click.ClickException("--token must be a NetBox v2 token: nbt_<12>.<40>.")
+
+    # Minted here rather than left to NVCM's deployer. Supplying it in the install
+    # config means NetBox can be given the password at install time, so the
+    # release does not have to be upgraded again afterwards just to switch its
+    # publisher from `log` to NATS.
+    nats_password = generate_nats_password()
 
     # Both refs resolved up front: the same values are loaded into the node and
     # written into NVCM's config, so they cannot disagree.
@@ -585,8 +614,9 @@ def up(
             "Delete them and run this again (the data on them is not recoverable):\n"
             f"    kubectl delete pvc -n {namespace} {' '.join(stale)}"
         )
-    # No NATS password yet: NVCM does not exist, so the publisher comes up on the
-    # `log` backend. It is switched to NATS at the end.
+    # Installed with the NATS password already set. NVCM does not exist yet, so
+    # the publisher cannot connect until it does, but the plugin only reads the
+    # password when it publishes -- no second install needed.
     cluster.install_netbox(
         str(chart),
         release=release,
@@ -594,6 +624,7 @@ def up(
         api_token=token,
         image_repository=netbox_image,
         image_tag=netbox_tag or DEFAULT_NETBOX_TAG,
+        nats_password=nats_password,
     )
     cluster.wait_for_netbox(namespace)
     _ok("NetBox rolled out")
@@ -606,7 +637,12 @@ def up(
     step += 1
     _step(step, total, "Generating the NVCM installer config")
     options = _config_options(
-        profile, api_token=token, namespace=namespace, size=size, provider_image=provider_ref
+        profile,
+        api_token=token,
+        namespace=namespace,
+        size=size,
+        provider_image=provider_ref,
+        nats_password=nats_password,
     )
     config = cfg.apply_options(profile, options)
     # Absolute: the installer subprocess runs from the NVCM checkout, not here.
@@ -649,26 +685,6 @@ def up(
             "--install-cert-manager",
         )
     )
-
-    step += 1
-    _step(step, total, "Connecting NetBox to the NVCM event bus")
-    nats_password = cluster.read_nats_password(namespace)
-    if not nats_password:
-        _warn(
-            f"No {cluster.NVCM_NATS_SECRET} secret found; leaving the publisher on the "
-            "`log` backend. Re-run once NVCM is healthy."
-        )
-    else:
-        cluster.install_netbox(
-            str(chart),
-            release=release,
-            namespace=namespace,
-            api_token=token,
-            image_repository=netbox_image,
-            image_tag=netbox_tag or DEFAULT_NETBOX_TAG,
-            nats_password=nats_password,
-        )
-        _ok("NetBox publishing to NATS")
 
     step += 1
     if skip_verify:

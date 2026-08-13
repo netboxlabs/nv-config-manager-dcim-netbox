@@ -254,17 +254,27 @@ def test_a_generated_token_is_valid_and_reused():
     assert other.api_token == supplied
 
 
-def test_a_failed_event_bus_hookup_does_not_fail_a_good_deploy(monkeypatch):
-    # NVCM is deployed by this point; losing the publisher is recoverable and
-    # must not turn a working sim into a reported failure.
+def test_a_failed_post_deploy_step_does_not_fail_a_good_deploy(monkeypatch):
+    # The sim is up by this point; a cosmetic step failing must not turn a
+    # working deploy into a reported failure.
     recorder = _Recorder()
     callback = NetBoxAirCallback(recorder, NetBoxSimConfig(), manager=_FakeManager())
     monkeypatch.setattr(
-        callback, "connect_event_bus", lambda h, p: (_ for _ in ()).throw(RuntimeError("nope"))
+        callback, "publish_hostname", lambda h, p: (_ for _ in ()).throw(RuntimeError("nope"))
     )
     callback.on_complete(True, "host", 22)
     assert "complete:True" in recorder.events
-    assert any("Could not connect NetBox to the event bus" in e for e in recorder.events)
+    assert any("/etc/hosts" in e for e in recorder.events)
+
+
+def test_netbox_is_installed_once_with_the_nats_password():
+    """NVCM accepts a supplied natsPassword (installer/secrets.py), so NetBox can
+    be configured with it up front instead of being upgraded a second time once
+    NVCM's deployer has generated one."""
+    cb = _callback_for_script()
+    script = cb.bring_up_script("/i.tar", "/c.tgz")
+    assert script.count("helm upgrade --install") == 1
+    assert f"nvcm.natsPassword={cb.nats_password}" in script
 
 
 def test_generated_config_pins_the_box_password():
@@ -356,6 +366,7 @@ def _callback_for_script(**overrides):
     cb.chart = Path("deploy/netbox")
 
     cb.api_token = "nbt_SECRETKEY123." + "B" * 40
+    cb.nats_password = "NatsProbePassword123"
     return cb
 
 

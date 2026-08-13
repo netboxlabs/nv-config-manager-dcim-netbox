@@ -46,3 +46,23 @@ def is_valid_api_token(value: str) -> bool:
     as NVCM authentication errors.
     """
     return bool(_TOKEN_RE.match(value or ""))
+
+
+# NVCM interpolates this into its NATS config file unquoted, so it constrains the
+# alphabet (installer/secrets.py: `natsPassword must match [A-Za-z][A-Za-z0-9]*`,
+# minimum 16). Generated here rather than left to NVCM so NetBox can be given the
+# password up front, in one install, instead of being rolled a second time once
+# NVCM's deploy has minted one.
+NATS_PASSWORD_LENGTH = 32
+
+
+def generate_nats_password(length: int = NATS_PASSWORD_LENGTH) -> str:
+    """Generate a NATS password NVCM will accept."""
+    if length < 16:
+        raise ValueError("NVCM requires at least 16 characters")
+    return secrets.choice(string.ascii_letters) + _random(length - 1)
+
+
+def is_valid_nats_password(value: str) -> bool:
+    """Mirror of NVCM's own validation, so a bad value fails here not mid-deploy."""
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9]{15,}", value or ""))

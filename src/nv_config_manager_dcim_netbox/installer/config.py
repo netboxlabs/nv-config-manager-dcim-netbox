@@ -63,6 +63,9 @@ class ConfigOptions:
     provider_image: str = PROVIDER_IMAGE
     netbox_server: str = "http://netbox"
     netbox_public_url: str = "http://127.0.0.1:8080"
+    # Supplied rather than left to NVCM's deployer to generate, so NetBox can be
+    # installed once with it instead of rolled again afterwards.
+    nats_password: str = ""
 
 
 def load_profile(path: Path | None = None) -> dict[str, Any]:
@@ -99,6 +102,17 @@ def apply_dcim(config: dict[str, Any], options: ConfigOptions) -> dict[str, Any]
     config.setdefault("secrets", {}).setdefault("k8s", {}).setdefault("dcim", {}).setdefault(
         "values", {}
     )["token"] = options.api_token
+
+    # NVCM generates a NATS password unless the config supplies one
+    # (installer/secrets.py: `_v("nautobot", "natsPassword") or _generate...`).
+    # Supplying it lets NetBox be configured with the password before NVCM is
+    # deployed, so the release does not have to be upgraded a second time just to
+    # switch its publisher on. The key lives under the `nautobot` group even for
+    # an external DCIM, which is where their deployer reads it from.
+    if options.nats_password:
+        nautobot = config.setdefault("secrets", {}).setdefault("k8s", {}).setdefault("nautobot", {})
+        nautobot["enabled"] = True
+        nautobot.setdefault("values", {})["natsPassword"] = options.nats_password
 
     # Must match the chart's nvcm.eventSubject, which the plugin publishes to.
     dcim["event_stream"] = EVENT_STREAM

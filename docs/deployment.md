@@ -85,7 +85,7 @@ which is not released yet. Once the 4.7 beta is out, delete
 # 1. NetBox.
 helm dependency build deploy/netbox
 helm upgrade --install netbox deploy/netbox -n nv-config-manager --create-namespace \
-  --set netbox.superuser.apiToken="$TOKEN" --wait
+  --set netbox.superuser.apiToken="$TOKEN" --set nvcm.natsPassword="$PW" --wait
 
 # 2. Initialise it.
 kubectl -n nv-config-manager exec -i deploy/netbox -c netbox -- sh -s <<EOF
@@ -99,15 +99,15 @@ EOF
   --build-images --load-kind --kind-cluster nv-config-manager \
   --install-envoy-gateway --install-cnpg-operator --install-cert-manager
 
-# 4. Turn the publisher on.
-PW=$(kubectl -n nv-config-manager get secret nats-nv-config-manager \
-       -o jsonpath='{.data.password}' | base64 -d)
-helm upgrade netbox deploy/netbox -n nv-config-manager --reuse-values \
-  --set nvcm.natsPassword="$PW"
 ```
 
-Run steps 1 and 2 before step 3: NVCM authenticates to NetBox with `$TOKEN`, and
-the NATS password step 4 needs does not exist until NVCM is deployed.
+Run steps 1 and 2 before step 3: NVCM authenticates to NetBox with `$TOKEN`.
+
+`$PW` is a NATS password you choose, at least 16 characters matching
+`[A-Za-z][A-Za-z0-9]*`. It goes into the install config at
+`secrets.k8s.nautobot.values.natsPassword`, which `nvcm-netbox config` fills in,
+and NVCM uses it rather than generating its own. That is what lets NetBox be
+installed once with the publisher already configured.
 
 `nvcm-netbox deploy` is NVCM's own `deploy` with its arguments forwarded
 unchanged, so its flags are documented in

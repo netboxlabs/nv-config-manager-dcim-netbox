@@ -44,3 +44,6 @@ API_TOKENS
 TESTING.md
 # generated installer configs carry a NetBox API token
 generated/
+
+# Working notes on upstream issues, not part of the deliverable.
+/NVIDIA.md

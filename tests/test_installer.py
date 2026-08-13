@@ -884,3 +884,53 @@ def test_the_shipped_profile_agrees_with_apply_dcim():
     profile = cfg.load_profile()
     assert profile["dcim"]["event_stream"] == cfg.EVENT_STREAM
     assert profile["dcim"]["event_subject"] == cfg.EVENT_SUBJECT
+
+
+def test_nats_password_is_seeded_where_nvcm_reads_it():
+    """NVCM generates a NATS password unless the config supplies one, at
+    `secrets.k8s.nautobot.values.natsPassword` (installer/secrets.py:125).
+
+    Supplying it is what lets NetBox be installed once, with the password
+    already set, instead of upgraded a second time to switch its publisher on.
+    The key lives under `nautobot` even for an external DCIM, and that group
+    must be enabled or their `_k8s_val` returns empty and silently generates.
+    """
+    from nv_config_manager_dcim_netbox.installer.tokens import (
+        generate_nats_password,
+        is_valid_nats_password,
+    )
+
+    password = generate_nats_password()
+    assert is_valid_nats_password(password)
+
+    patched = cfg.apply_dcim(
+        {}, cfg.ConfigOptions(api_token=generate_api_token(), nats_password=password)
+    )
+    group = patched["secrets"]["k8s"]["nautobot"]
+    assert group["enabled"] is True
+    assert group["values"]["natsPassword"] == password
+
+
+def test_nats_password_matches_the_alphabet_nvcm_enforces():
+    # It is interpolated unquoted into NVCM's NATS config, so their validator
+    # requires [A-Za-z][A-Za-z0-9]* and at least 16 characters.
+    import re
+
+    from nv_config_manager_dcim_netbox.installer.tokens import generate_nats_password
+
+    for _ in range(20):
+        assert re.fullmatch(r"[A-Za-z][A-Za-z0-9]{15,}", generate_nats_password())
+
+
+def test_config_command_keeps_a_nats_password_already_present(tmp_path):
+    # Regenerating it would leave NVCM's NATS users and a deployed NetBox
+    # disagreeing until both are rolled.
+    out = tmp_path / "install.yaml"
+    result = CliRunner().invoke(main, ["config", "-o", str(out)])
+    assert result.exit_code == 0, result.output
+    first = yaml.safe_load(out.read_text())["secrets"]["k8s"]["nautobot"]["values"]["natsPassword"]
+
+    again = CliRunner().invoke(main, ["config", "-o", str(out), "--profile", str(out)])
+    assert again.exit_code == 0, again.output
+    second = yaml.safe_load(out.read_text())["secrets"]["k8s"]["nautobot"]["values"]["natsPassword"]
+    assert second == first

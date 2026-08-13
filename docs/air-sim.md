@@ -13,13 +13,14 @@ NetBox, and points NVCM at it.
    uploads NVCM's install config.
 2. Ships the provider and NetBox images into the sim's kind cluster. Neither is
    in a registry, so both are `docker save`d, uploaded once and `kind load`ed.
-3. Deploys NetBox with `deploy/netbox` and runs `nvcm_init` (migrations,
-   superuser, API token, custom fields, bootstrap data).
+3. Deploys NetBox with `deploy/netbox`, already holding the NATS password, and
+   runs `nvcm_init` (migrations, superuser, API token, custom fields, bootstrap
+   data).
 4. Loads the sim's topology into NetBox with `nvcm_load_dcim`. This replaces the
    topology job the bundled-DCIM path runs.
 5. Rewrites the install config on the box to select NetBox, then lets NVCM's
    deploy run.
-6. Rolls NetBox once more at the end, to pick up the NATS password NVCM created.
+6. Publishes NetBox on the sim's Gateway at `netbox.nvcm.air`.
 
 ## Requirements
 
