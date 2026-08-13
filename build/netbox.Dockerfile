@@ -34,9 +34,12 @@ ARG NETBOX_BGP_VERSION
 COPY --from=plugin-build /wheels/ /tmp/wheels/
 # uv, not pip: netbox-docker builds /opt/netbox/venv with `uv venv`, which does
 # not put pip inside it. uv ships in the image at /usr/local/bin/uv.
+# The [nats] extra pulls nats-py, which the plugin's event publisher imports
+# lazily. Without it the chart's `event_publisher: nats` config still loads, and
+# every change event is then lost at publish time with ModuleNotFoundError.
 RUN uv pip install --python /opt/netbox/venv/bin/python --no-cache \
       "netbox-bgp==${NETBOX_BGP_VERSION}" \
-      /tmp/wheels/netbox_nv_config_manager-*.whl \
+      "$(echo /tmp/wheels/netbox_nv_config_manager-*.whl)[nats]" \
  && rm -rf /tmp/wheels
 
 # Collect the plugins' static assets. NetBox only sees a plugin's static files
@@ -58,6 +61,10 @@ COPY build/netbox-field-choices.py /etc/netbox/config/zz-nvcm-field-choices.py
 # Fail the build rather than the cluster if either plugin is unimportable.
 RUN /opt/netbox/venv/bin/python -c \
       "import netbox_nv_config_manager, netbox_bgp; print(netbox_nv_config_manager.__version__)"
+
+# Likewise for nats: the publisher imports it lazily, so a missing package only
+# shows up as change events silently failing at runtime.
+RUN /opt/netbox/venv/bin/python -c "import nats; print('nats-py ok:', nats.__file__)"
 
 # Likewise for the statuses: an image that cannot register them would look fine
 # and silently write every device as `active`.

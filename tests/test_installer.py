@@ -858,3 +858,29 @@ def test_the_route_waits_for_the_gateway_api_to_exist():
     with_api = render("--api-versions", "gateway.networking.k8s.io/v1")
     assert "kind: HTTPRoute" in with_api
     assert "netbox.config-manager.local" in with_api
+
+
+def test_apply_dcim_sets_the_event_stream_and_subject():
+    """NVCM builds the JetStream stream, its subject filter and the consumer's
+    filter from these, and the chart renders the plugin's nats_subject from the
+    same value.
+
+    Left unset, NVCM uses its own defaults and creates a stream filtering on
+    `nautobot` while NetBox publishes to `netbox.change`. Nothing matches, so
+    every change event is dropped by the broker with no error anywhere: the
+    publisher succeeds, the stream stays empty, and the consumer sits idle.
+    """
+    # The Air path patches the config NVCM's generator wrote, which has no events.
+    patched = cfg.apply_dcim({"dcim": {}}, cfg.ConfigOptions(api_token=generate_api_token()))
+    assert patched["dcim"]["event_stream"] == cfg.EVENT_STREAM
+    assert patched["dcim"]["event_subject"] == cfg.EVENT_SUBJECT
+
+    # And it must equal what the chart tells the plugin to publish on.
+    chart_values = yaml.safe_load((_CHART / "values.yaml").read_text())
+    assert patched["dcim"]["event_subject"] == chart_values["nvcm"]["eventSubject"]
+
+
+def test_the_shipped_profile_agrees_with_apply_dcim():
+    profile = cfg.load_profile()
+    assert profile["dcim"]["event_stream"] == cfg.EVENT_STREAM
+    assert profile["dcim"]["event_subject"] == cfg.EVENT_SUBJECT

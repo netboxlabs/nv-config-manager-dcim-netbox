@@ -40,6 +40,14 @@ TOKEN_PLACEHOLDER = "REPLACED_BY_INSTALLER"
 # the `provider` field the plugin stamps on every change event.
 PROVIDER_NAME = "netbox"
 
+# The JetStream stream and subject NetBox publishes change events on. Both sides
+# must agree: NVCM creates the stream with this subject filter, and the chart
+# renders the plugin's nats_subject from the same value. Left at NVCM's defaults
+# the stream filters on `nautobot` while NetBox publishes to `netbox.change`, so
+# every event is dropped by the broker and the consumer simply never sees one.
+EVENT_STREAM = "netbox"
+EVENT_SUBJECT = "netbox.change"
+
 # The NVCM branch carrying the pluggable-DCIM framework. `main` has none of it, so
 # a checkout or sim clone on main cannot deploy this provider.
 NVCM_BRANCH = "zb/pluggable-dcim"
@@ -91,6 +99,10 @@ def apply_dcim(config: dict[str, Any], options: ConfigOptions) -> dict[str, Any]
     config.setdefault("secrets", {}).setdefault("k8s", {}).setdefault("dcim", {}).setdefault(
         "values", {}
     )["token"] = options.api_token
+
+    # Must match the chart's nvcm.eventSubject, which the plugin publishes to.
+    dcim["event_stream"] = EVENT_STREAM
+    dcim["event_subject"] = EVENT_SUBJECT
 
     # NetBox is the DCIM provider, so NVCM's bundled one is not deployed.
     config.setdefault("services", {})["nautobot"] = False

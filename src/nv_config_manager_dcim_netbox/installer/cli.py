@@ -708,6 +708,22 @@ def verify(namespace: str, device_id: str) -> None:
             f"No {cluster.NVCM_NATS_SECRET} secret in {namespace} — NVCM does not look deployed."
         )
 
+    # This command publishes its own envelope, so it never exercises NetBox's
+    # publisher. Check that separately or a broken one looks like a pass.
+    backend, importable = cluster.netbox_publisher_status(namespace)
+    if backend == "nats" and not importable:
+        click.secho(
+            "NetBox is configured to publish to NATS but cannot import nats-py, so real\n"
+            "changes are lost at publish time. The check below bypasses that path and\n"
+            "will still pass. Rebuild the NetBox image (it installs the [nats] extra).",
+            fg="red",
+        )
+    elif backend == "log":
+        _warn(
+            "NetBox is on the `log` publisher, so real changes go to its log rather than\n"
+            "      NVCM. That is expected until NVCM exists; re-run `up` to switch it over."
+        )
+
     subject = cfg.event_subject(cfg.load_profile())
     click.echo(f"Publishing a synthetic dcim.device event to {subject} ...")
     try:

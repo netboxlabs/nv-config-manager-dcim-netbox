@@ -138,6 +138,63 @@ DCIM:
 `nvcm-netbox verify` exercises the change-event loop the same way it does for a
 kind cluster.
 
+## Workflow Support
+
+The demo is for Ethernet and Cumulus Linux workflows, and the same ones NVIDIA
+lists apply here. NetBox replaces the DCIM they read and write; the workflows
+themselves are NVCM's and are driven the same way.
+
+Worth trying: Configuration Backup, Configuration Deploy, Batch Deploy,
+Multi-Device Deploy, Tenant Deploy (scoped to demo devices with tenant data),
+Cable Validation, Hardware Validation, Device Reprovision, and the lifecycle
+actions (approve, reject, retry, terminate).
+
+Not usable in the sim, for reasons that have nothing to do with the DCIM:
+
+| Workflow family | Why |
+| --- | --- |
+| InfiniBand | DSX Air does not simulate the InfiniBand fabric for this demo |
+| NVLink switch | DSX Air does not simulate NVLink switches for this demo |
+| Switch OS Upgrade | DSX Air cannot complete the ONIE install path it uses |
+
+### Try Multi-Deploy
+
+A good first Day-2 workflow, because the trial has five TAN leaves that should
+receive the same diff. NVIDIA's example appends a DNS server to the site config
+context; in NetBox that is a config context object, and the flow is the same.
+
+The demo context already carries `8.8.8.8`. Append `8.8.4.4`:
+
+```bash
+TOKEN=$(kubectl -n nv-config-manager get secret netbox-superuser \
+          -o jsonpath='{.data.api_token}' | base64 -d)
+CTX=$(curl -sk -H "Authorization: Token $TOKEN" \
+        "https://netbox.nvcm.air/api/extras/config-contexts/?q=network-management-services" \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["results"][0]["id"])')
+
+curl -sk -X PATCH -H "Authorization: Token $TOKEN" -H "Content-Type: application/json" \
+  -d '{"data": {"dhcp": {}, "dns": {"ipv4": ["8.8.8.8", "8.8.4.4"]}}}' \
+  "https://netbox.nvcm.air/api/extras/config-contexts/$CTX/"
+```
+
+Editing it in the NetBox UI works just as well. The plugin publishes an
+`extras.configcontext` change, this provider resolves the context's scope to the
+devices it applies to, the render service produces new intended configs, and
+Multi-Deploy groups the identical diffs for approval.
+
+To watch it happen:
+
+```bash
+kubectl -n nv-config-manager logs -l component=consumer-nautobot -c consumer -f
+```
+
+Renders bump `commit_id` on the affected devices:
+
+```bash
+curl -sk -H "Authorization: Token $TOKEN" \
+  "https://netbox.nvcm.air/api/plugins/nv-config-manager/intended-configs/"
+```
+
 ## Cleaning up
 
 In the DSX Air UI, stop or delete the simulation. Deleting it removes the whole

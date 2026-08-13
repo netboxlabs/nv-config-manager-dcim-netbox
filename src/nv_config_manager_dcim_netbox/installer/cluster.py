@@ -254,6 +254,49 @@ def load_topology(
     )
 
 
+def netbox_publisher_status(namespace: str, runner: Runner | None = None) -> tuple[str, bool]:
+    """Return NetBox's configured event backend and whether it can actually run.
+
+    The `nats` backend imports nats-py lazily, inside publish(). A NetBox image
+    without that package therefore starts, loads the config and looks healthy,
+    then loses every change event with ModuleNotFoundError at publish time.
+
+    `verify` publishes its synthetic event through NVCM's nats-box, so it proves
+    the consumer and provider work but never touches this path. Checked
+    separately for that reason.
+    """
+    try:
+        out = kubectl(
+            "exec",
+            "-i",
+            f"deploy/{NETBOX_DEPLOYMENT}",
+            "-c",
+            NETBOX_CONTAINER,
+            "--",
+            "/opt/netbox/venv/bin/python",
+            "/opt/netbox/netbox/manage.py",
+            "shell",
+            "-c",
+            "import json;from django.conf import settings;"
+            "cfg=settings.PLUGINS_CONFIG.get('netbox_nv_config_manager',{});"
+            "ok=True\ntry:\n import nats\nexcept ImportError:\n ok=False\n"
+            "print(json.dumps({'backend':cfg.get('event_publisher','log'),'importable':ok}))",
+            namespace=namespace,
+            runner=runner,
+        )
+    except CommandError:
+        return ("unknown", True)
+    for line in reversed(out.splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                payload = json.loads(line)
+            except ValueError:
+                continue
+            return (str(payload.get("backend", "unknown")), bool(payload.get("importable")))
+    return ("unknown", True)
+
+
 def netbox_service_exists(namespace: str, runner: Runner | None = None) -> bool:
     """Return whether NetBox is reachable in-cluster under its fixed Service name."""
     try:
