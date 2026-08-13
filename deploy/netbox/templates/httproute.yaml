@@ -1,0 +1,55 @@
+{{- /*
+Browser access to NetBox through NVCM's Gateway.
+
+NVCM's chart publishes a route for its bundled DCIM, gated on that DCIM being
+enabled. We disable it, so nothing would route to NetBox and the only way in
+would be `kubectl port-forward`. This restores parity by attaching to the same
+Gateway from this chart, which needs no change on the NVCM side.
+
+Two things this relies on, both already true and neither ours to configure:
+the Gateway's TLS certificate is issued for `*.<baseHostname>`, so a
+`netbox.` prefix is covered; and NVCM's `namespace-isolation` NetworkPolicy
+already admits ingress from the envoy-gateway-system namespace.
+*/ -}}
+{{- /*
+Read defensively. `helm upgrade --reuse-values` replays the values stored with
+the previous release, so on the first upgrade after this block was added to
+values.yaml `nvcm.gateway` is simply absent. Reading it directly nil-pointers,
+and the NATS-password step in docs/deployment.md uses exactly that flag.
+`hasKey` rather than `default` for the boolean, so an explicit false is honoured.
+*/ -}}
+{{- $gw := (.Values.nvcm).gateway | default dict -}}
+{{- $enabled := true -}}
+{{- if hasKey $gw "enabled" }}{{- $enabled = $gw.enabled -}}{{- end -}}
+{{- if $enabled }}
+{{- $base := $gw.baseHostname | default "config-manager.local" }}
+{{- $host := $gw.hostname | default (printf "netbox.%s" $base) }}
+{{- $gwName := $gw.name | default "nv-config-manager-gateway" }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: netbox
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: nvcm-netbox
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: netbox-route
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  parentRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: {{ $gwName }}
+    namespace: {{ $gw.namespace | default .Release.Namespace }}
+  hostnames:
+  - {{ $host | quote }}
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    # Fixed by netbox.fullnameOverride, which is why that is set at all.
+    - name: {{ .Values.netbox.fullnameOverride }}
+      port: 80
+{{- end }}

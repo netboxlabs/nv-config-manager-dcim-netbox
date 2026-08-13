@@ -429,6 +429,51 @@ def netbox_group() -> None:
     """Manage the NetBox side on its own."""
 
 
+@netbox_group.command("load-topology")
+@click.option(
+    "--blueprint",
+    default="air_trial",
+    show_default=True,
+    help="Blueprint under NVCM's development/mock_topology/context/, or a path to one.",
+)
+@click.option("--namespace", default=DEFAULT_NAMESPACE, show_default=True)
+@click.option(
+    "--deployment-name",
+    default=None,
+    help="Fills the blueprint's {{ deployment_name }}. Defaults to the blueprint name.",
+)
+@_nvcm_repo_option
+def load_topology(
+    blueprint: str, namespace: str, deployment_name: str | None, nvcm_repo: Path | None
+) -> None:
+    """Load mock topology data into NetBox. NVCM's `make topology`.
+
+    NetBox comes up empty, and an empty DCIM renders nothing, so this is what
+    makes a fresh deployment demonstrable.
+    """
+    require_tools("kubectl")
+    path = Path(blueprint)
+    if not path.is_dir():
+        repo = _resolve_nvcm_repo(nvcm_repo)
+        path = repo / "development" / "mock_topology" / "context" / blueprint
+        if not path.is_dir():
+            available = sorted(
+                p.name
+                for p in (repo / "development" / "mock_topology" / "context").glob("*")
+                if p.is_dir() and not p.name.startswith("_")
+            )
+            raise click.ClickException(
+                f"No blueprint at {path}.\nAvailable: {', '.join(available) or 'none'}"
+            )
+
+    click.echo(f"Loading {path.name} into NetBox ...")
+    output = cluster.load_topology(
+        str(path), namespace, deployment_name=deployment_name or path.name
+    )
+    click.echo(output.strip() or "done")
+    click.secho(f"Loaded {path.name}.", fg="green")
+
+
 @netbox_group.command("up")
 @_up_options
 @click.pass_context

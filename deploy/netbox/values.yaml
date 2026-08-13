@@ -24,6 +24,21 @@ nvcm:
   # consumes them.
   eventSubject: netbox.change
 
+  # Browser access through NVCM's Gateway, so NetBox is reachable the same way
+  # NVCM's own services are rather than only through `kubectl port-forward`.
+  # See templates/httproute.yaml.
+  gateway:
+    enabled: true
+    # NVCM's Gateway. `<release>-gateway`, and the NVCM release is normally
+    # `nv-config-manager`. Deployed into the same namespace unless overridden.
+    name: nv-config-manager-gateway
+    namespace: ""
+    # NVCM's `cluster.hostname`. Its TLS certificate is issued for this name and
+    # `*.<name>`, so any prefix below is already covered.
+    baseHostname: config-manager.local
+    # Defaults to netbox.<baseHostname>.
+    hostname: ""
+
 # --- upstream netbox chart ---------------------------------------------------
 netbox:
   # Fixes the Service name to `netbox` rather than `<release>-netbox`, so the
@@ -39,6 +54,20 @@ netbox:
     repository: nv-config-manager-netbox
     tag: "0.1.0"
     pullPolicy: IfNotPresent
+
+  # The upstream chart's `resourcesPreset: medium` caps memory at 1536Mi, which
+  # nvcm_load_dcim exceeds: a topology import is far heavier than serving, and
+  # being OOMKilled mid-import takes the serving pod down with it.
+  #
+  # Only the limit is raised. Requests drive scheduling, so the idle footprint
+  # is unchanged and the headroom is used only during an import.
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 750m
+      memory: 3Gi
 
   plugins:
     - netbox_nv_config_manager

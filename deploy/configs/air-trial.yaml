@@ -1,0 +1,54 @@
+# DSX Air simulation with NetBox as the DCIM provider.
+#
+#   cp deploy/configs/air-trial.yaml air-trial.yaml
+#   $EDITOR air-trial.yaml          # ngc_api_key, or export NGC_API_KEY
+#   nvcm-netbox air up -c air-trial.yaml
+#
+# Copy it rather than editing in place: the working copy takes an NGC key and can
+# take a NetBox token, and the repo ignores /air-trial.yaml for that reason.
+#
+# This is NVCM's own air-sim format. Only the fields that must be chosen, or that
+# differ from a default, are here; everything else NetBox needs already defaults
+# correctly in NetBoxSimConfig. Do not copy NVCM's development/air_sim/configs/
+# air_trial.yaml over this, see config_manager_ref below.
+
+# 7 devices. `air_superpod` is 24 and needs a much larger box.
+mock_blueprint: air_trial
+
+deployment_name: demo
+simulation_name: nv-config-manager-netbox-air-trial
+
+# The branch carrying the pluggable-DCIM framework. cloud-init clones this onto
+# the sim box, and SimConfig's default is `main`, which has none of it. This is
+# the field to check first if the sim comes up with no DCIM support.
+config_manager_ref: zb/pluggable-dcim
+
+size: small
+
+# Also read from $NGC_API_KEY, which is the better place for it.
+ngc_api_key: ''
+
+# --- optional, shown at their defaults ---------------------------------------
+#
+# Images built by `make images`. Neither exists in a registry, so both are
+# shipped into the sim's kind cluster over SSH.
+# netbox_image: nv-config-manager-netbox
+# netbox_image_tag: '0.1.0'
+# dcim_provider_package_image: nv-config-manager-dcim-netbox:0.1.0
+#
+# The in-cluster Service deploy/netbox publishes.
+# dcim_server: http://netbox
+#
+# Generated when empty, then installed into NetBox and handed to NVCM.
+# dcim_token: ''
+#
+# Load the sim's topology into NetBox with the plugin's nvcm_load_dcim. Off
+# leaves an empty NetBox, which renders nothing; only turn it off when pointing
+# at a NetBox that already holds the fabric.
+# load_blueprint: true
+#
+# Extra `--set` arguments for the NetBox chart.
+# netbox_helm_set: []
+#
+# run_mock_topology_job is deliberately absent. It populates the DCIM that is
+# not being deployed here, and `air up` forces it off whatever the file says.

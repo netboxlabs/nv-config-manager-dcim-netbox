@@ -27,7 +27,7 @@ TEMPLATE := $(VENV)/bin/template-cli
 
 .PHONY: help setup lint version-check test test-netbox discovery probe provider-config \
         cache-query render-cli test-sdk test-templates check clean image \
-        netbox-base netbox-image images kind-up kind-down airgapped airgapped-images \
+        netbox-base netbox-image images kind-up kind-down topology airgapped airgapped-images \
         inventory reference ipam hosts dhcp ztp firmware state secrets render \
         spectrumx ib infiniband spx lifecycle events
 
@@ -47,6 +47,7 @@ help:
 	@echo "images          build both images (what 'nvcm-netbox up' expects)"
 	@echo "kind-up         create the Kind cluster and deploy NetBox + NVCM"
 	@echo "kind-down       delete the Kind cluster"
+	@echo "topology        load mock topology data into NetBox (BLUEPRINT=air_trial)"
 	@echo "airgapped       build an offline bundle carrying NVCM + NetBox"
 	@echo "clean           remove venv and caches"
 	@echo ""
@@ -118,6 +119,13 @@ kind-up:
 
 kind-down:
 	kind delete cluster --name $(KIND_CLUSTER)
+
+# NVCM's target of the same name, for NetBox. A fresh NetBox is empty, and an
+# empty DCIM renders nothing.
+BLUEPRINT ?= air_trial
+
+topology:
+	NVCM_REPO=$(NVCM) $(VENV)/bin/nvcm-netbox netbox load-topology --blueprint $(BLUEPRINT)
 
 # --- air-gapped ---
 airgapped-images:

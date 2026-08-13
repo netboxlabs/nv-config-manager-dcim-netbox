@@ -190,39 +190,11 @@ class NetBoxAirCallback:
         The blueprint is already on the box in the NVCM clone; it just has to
         reach the pod.
         """
-        runner = self.runner(host, port)
-        blueprint = self.cfg.blueprint_dir(CONFIG_MANAGER_REMOTE_DIR)
-        pod = cluster.kubectl(
-            "get",
-            "pod",
-            "-l",
-            f"app.kubernetes.io/name={cluster.NETBOX_DEPLOYMENT},"
-            f"app.kubernetes.io/component={cluster.NETBOX_DEPLOYMENT}",
-            "-o",
-            "jsonpath={.items[0].metadata.name}",
-            namespace=NAMESPACE,
-            runner=runner,
-        ).strip()
-        if not pod:
-            raise RuntimeError("No NetBox pod to load the topology into")
-
-        runner.run(["kubectl", "-n", NAMESPACE, "cp", blueprint, f"{pod}:/tmp/blueprint"])
-        cluster.kubectl(
-            "exec",
-            pod,
-            "-c",
-            cluster.NETBOX_CONTAINER,
-            "--",
-            "/opt/netbox/venv/bin/python",
-            "/opt/netbox/netbox/manage.py",
-            "nvcm_load_dcim",
-            "/tmp/blueprint",
-            "--deployment-name",
-            self.cfg.deployment_name or self.cfg.mock_blueprint,
-            # A bulk ingest should not fire one change event per object.
-            "--no-events",
-            namespace=NAMESPACE,
-            runner=runner,
+        cluster.load_topology(
+            self.cfg.blueprint_dir(CONFIG_MANAGER_REMOTE_DIR),
+            NAMESPACE,
+            deployment_name=self.cfg.deployment_name or self.cfg.mock_blueprint,
+            runner=self.runner(host, port),
         )
 
     def patch_install_config(self, host: str, port: int) -> None:

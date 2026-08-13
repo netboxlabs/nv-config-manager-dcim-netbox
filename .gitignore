@@ -28,6 +28,16 @@ deploy/netbox/charts/
 
 # local test artifacts (may contain a token)
 netbox-provider.toml
+
+# DSX Air sim configs. docs/air-sim.md has you write one of these in the working
+# directory, and it can carry an NGC API key and a NetBox token. Rooted, so a
+# checked-in example under deploy/configs/ is still tracked -- the same split
+# NVCM uses, which commits development/air_sim/configs/air_trial.yaml but
+# ignores the working copies written next to it.
+/air-trial.yaml
+/air-superpod.yaml
+/nvcm-air-sim.yaml
+/.nvcm-air-sim.yaml
 rd.json
 out.txt
 API_TOKENS

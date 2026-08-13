@@ -155,11 +155,60 @@ and the Gateway is then unreachable from the host.
 .venv/bin/nvcm-netbox up --no-create-cluster  # require an existing cluster
 .venv/bin/nvcm-netbox up --no-kind-load       # a real cluster, images from a registry
 .venv/bin/nvcm-netbox up --size medium        # larger resource profile
-kubectl -n nv-config-manager port-forward svc/netbox 8080:80
 ```
+
+A fresh NetBox is empty, and an empty DCIM renders nothing. Populate or refresh
+the mock topology:
+
+```bash
+make topology                      # air_trial, 7 devices
+make topology BLUEPRINT=air_superpod   # 24 devices
+```
+
+It reads NVCM's own blueprints from `development/mock_topology/context/` in your
+checkout, so the data matches what their deployment gets.
 
 See [docs/deployment.md](docs/deployment.md) for the manual sequence and
 troubleshooting.
+
+### Local Hostnames
+
+NetBox is published through NVCM's Gateway alongside NVCM's own services. Add
+these to `/etc/hosts` to reach it from your workstation:
+
+```
+127.0.0.1 config-manager.local
+127.0.0.1 netbox.config-manager.local
+127.0.0.1 render.config-manager.local
+127.0.0.1 ztp.config-manager.local
+127.0.0.1 dhcp.config-manager.local
+127.0.0.1 workflow.config-manager.local
+127.0.0.1 config-store.config-manager.local
+127.0.0.1 temporal.config-manager.local
+```
+
+Local endpoints:
+
+- UI: https://config-manager.local
+- NetBox: https://netbox.config-manager.local
+- Workflow API: https://workflow.config-manager.local
+- Config Store API: https://config-store.config-manager.local
+
+The Gateway's certificate is self-signed, so a browser warns on first visit.
+`make install-cert` in your NVCM checkout trusts it system-wide.
+
+### NetBox Credentials
+
+Generated at install and kept in the `netbox-superuser` secret. The username is
+`admin`:
+
+```bash
+kubectl get secret netbox-superuser -n nv-config-manager -o jsonpath='{.data.password}' | base64 -d && echo
+kubectl get secret netbox-superuser -n nv-config-manager -o jsonpath='{.data.api_token}' | base64 -d && echo
+```
+
+The API token is the one NVCM authenticates with, so both sides hold the same
+value. Pass `--token` to `up` to choose it yourself.
 
 ## Makefile Commands
 
@@ -216,6 +265,47 @@ cd nv-config-manager-netbox-airgapped-v0.1.0-amd64
 ```
 
 See [docs/airgapped.md](docs/airgapped.md) for the full workflow.
+
+## Testing
+
+No cluster required:
+
+```bash
+make test                     # unit tests
+make lint                     # ruff check + format check
+make check                    # both
+.venv/bin/pytest tests/test_render.py
+.venv/bin/pytest -m ipam      # one functional area
+```
+
+Per-area suites match the functional modules, and `make help` lists them:
+`inventory`, `reference`, `ipam`, `hosts`, `dhcp`, `ztp`, `firmware`, `state`,
+`secrets`, `render`, `spectrumx`, `ib`, `lifecycle`, `events`.
+
+The render tests under `tests/integration/` compare rendered output against
+NVCM's own templates. They need the SDK and templates from your checkout, which
+`make setup` installs, but no running deployment:
+
+```bash
+.venv/bin/pytest tests/integration/ -v
+```
+
+Against a live deployment, the event loop is checked end to end by:
+
+```bash
+.venv/bin/nvcm-netbox verify --device-id 3
+```
+
+That publishes a synthetic change event and confirms the DCIM consumer
+dispatches a render. It reports `1 queued, 0 failed` on a deployment with
+topology loaded; without one, NetBox rejects the device and it says so.
+
+The DSX Air tests are skipped unless the `air` extra is installed, since it
+pulls NVCM's installer from your checkout:
+
+```bash
+make setup-air && .venv/bin/pytest tests/test_air.py
+```
 
 ## Documentation
 

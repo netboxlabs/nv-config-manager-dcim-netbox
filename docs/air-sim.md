@@ -38,29 +38,39 @@ pluggable-DCIM framework. The sim clones that branch onto its box too, which
 
 ## Running it
 
-Write a sim config. It is NVCM's `air-sim` YAML plus this provider's keys:
-
-```yaml
-# air-trial.yaml
-mock_blueprint: air_trial          # or air_superpod
-deployment_name: air-trial
-size: small
-ngc_api_key: ""                    # or set NGC_API_KEY
-
-# Optional; these are the defaults.
-dcim_server: http://netbox
-netbox_image: nv-config-manager-netbox
-netbox_image_tag: "0.1.0"
-dcim_provider_package_image: nv-config-manager-dcim-netbox:0.1.0
-load_blueprint: true
-```
-
-Then:
+Copy the example sim config and fill in your NGC key:
 
 ```bash
+cp deploy/configs/air-trial.yaml air-trial.yaml
+$EDITOR air-trial.yaml          # ngc_api_key, or export NGC_API_KEY
+
 make images
 nvcm-netbox air up -c air-trial.yaml
 ```
+
+Copy rather than editing in place. The working copy takes an NGC key and can
+take a NetBox token, so `/air-trial.yaml` is gitignored while the example is
+tracked.
+
+It is NVCM's `air-sim` YAML, and the example carries only the fields you must
+choose. Everything NetBox needs already defaults correctly, so there is little
+to add:
+
+| Field | Why it is in the example |
+| --- | --- |
+| `mock_blueprint` | `air_trial` (7 devices) or `air_superpod` (24) |
+| `deployment_name`, `simulation_name` | Name the sim |
+| `config_manager_ref` | Must not be `main`, see below |
+| `ngc_api_key` | Yours, or `$NGC_API_KEY` |
+
+The optional `dcim_*` and `netbox_*` keys are listed commented-out at their
+defaults.
+
+> **Do not copy NVCM's `development/air_sim/configs/air_trial.yaml`.** It sets
+> `config_manager_ref: main` explicitly, which overrides the default here and
+> clones a tree onto the sim box with no pluggable-DCIM framework in it. It also
+> sets `run_mock_topology_job: true`, which `air up` forces off anyway because
+> that job populates a DCIM this deployment does not have.
 
 | Flag | Effect |
 | --- | --- |

@@ -204,6 +204,76 @@ def wait_for_netbox(namespace: str, timeout: str = "10m", runner: Runner | None 
     )
 
 
+def netbox_pod(namespace: str, runner: Runner | None = None) -> str:
+    """Return the name of a NetBox pod that is ready to be exec'd into.
+
+    Readiness is checked rather than taking the first pod listed: during a
+    rollout the old pod is still Running while it terminates, and exec'ing into
+    it fails partway through with a bare 137.
+    """
+    # name, ready, and whether it is being deleted, one pod per line.
+    listing = kubectl(
+        "get",
+        "pod",
+        "-l",
+        f"app.kubernetes.io/name={NETBOX_DEPLOYMENT},"
+        f"app.kubernetes.io/component={NETBOX_DEPLOYMENT}",
+        "-o",
+        'jsonpath={range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[0].ready}'
+        '{" "}{.metadata.deletionTimestamp}{"\\n"}{end}',
+        namespace=namespace,
+        runner=runner,
+    )
+    for line in listing.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "true" and len(parts) == 2:
+            return parts[0]
+    raise CommandError(
+        ["kubectl", "get", "pod"],
+        1,
+        f"No ready NetBox pod in {namespace}. Currently:\n{listing.strip() or '  (none)'}",
+    )
+
+
+def load_topology(
+    blueprint: str,
+    namespace: str,
+    *,
+    deployment_name: str,
+    runner: Runner | None = None,
+) -> str:
+    """Load a mock-topology blueprint into NetBox with the plugin's loader.
+
+    ``blueprint`` is a directory as the *runner* sees it: a local path on the
+    kind path, and a path on the sim box on the Air path, where cloud-init has
+    already cloned the NVCM repo that holds it.
+
+    This is NVCM's `make topology` for NetBox. Without it NetBox comes up empty,
+    and an empty DCIM renders nothing.
+    """
+    pod = netbox_pod(namespace, runner=runner)
+    (runner or LocalRunner()).run(
+        ["kubectl", "-n", namespace, "cp", blueprint, f"{pod}:/tmp/blueprint"]
+    )
+    return kubectl(
+        "exec",
+        pod,
+        "-c",
+        NETBOX_CONTAINER,
+        "--",
+        "/opt/netbox/venv/bin/python",
+        "/opt/netbox/netbox/manage.py",
+        "nvcm_load_dcim",
+        "/tmp/blueprint",
+        "--deployment-name",
+        deployment_name,
+        # A bulk ingest should not fire one change event per object.
+        "--no-events",
+        namespace=namespace,
+        runner=runner,
+    )
+
+
 def netbox_service_exists(namespace: str, runner: Runner | None = None) -> bool:
     """Return whether NetBox is reachable in-cluster under its fixed Service name."""
     try:

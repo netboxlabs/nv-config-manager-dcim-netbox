@@ -50,6 +50,17 @@ RUN printf "PLUGINS = ['netbox_nv_config_manager', 'netbox_bgp']\n" \
       /opt/netbox/venv/bin/python /opt/netbox/netbox/manage.py collectstatic --no-input \
  && rm /etc/netbox/config/zz-build-plugins.py
 
+# Registers the plugin's extra device statuses. NetBox reads FIELD_CHOICES from
+# its configuration before plugins load, so this cannot come from the plugin.
+# The chart mounts only configuration.py into this directory, so it survives.
+COPY build/netbox-field-choices.py /etc/netbox/config/zz-nvcm-field-choices.py
+
 # Fail the build rather than the cluster if either plugin is unimportable.
 RUN /opt/netbox/venv/bin/python -c \
       "import netbox_nv_config_manager, netbox_bgp; print(netbox_nv_config_manager.__version__)"
+
+# Likewise for the statuses: an image that cannot register them would look fine
+# and silently write every device as `active`.
+RUN /opt/netbox/venv/bin/python -c \
+      "from netbox_nv_config_manager.field_choices import FIELD_CHOICES as c; \
+       assert 'dcim.Device.status+' in c, sorted(c); print(sorted(c))"
