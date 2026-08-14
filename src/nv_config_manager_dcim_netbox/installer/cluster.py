@@ -192,9 +192,9 @@ def install_netbox(
 ) -> None:
     """helm upgrade --install the NetBox release.
 
-    Called twice: once before NVCM exists (no NATS password, so the publisher
-    stays on the `log` backend) and once after, which rolls the pods onto the
-    real event bus.
+    Called once. ``nats_password`` is resolved before this runs -- adopted from a
+    deployed NVCM, or minted -- so the publisher is configured at install time
+    rather than the release being upgraded a second time to switch it on.
 
     ``chart_ref`` is a path as the *runner* sees it, so the Air path passes the
     chart's location on the sim box rather than a local one.

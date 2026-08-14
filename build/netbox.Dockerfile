@@ -71,3 +71,13 @@ RUN /opt/netbox/venv/bin/python -c "import nats; print('nats-py ok:', nats.__fil
 RUN /opt/netbox/venv/bin/python -c \
       "from netbox_nv_config_manager.field_choices import FIELD_CHOICES as c; \
        assert 'dcim.Device.status+' in c, sorted(c); print(sorted(c))"
+
+# netbox-docker creates this account (uid 999, gid 0) but never switches to it,
+# so its image runs as root by default. The chart already pins a non-root
+# securityContext, but the image should not depend on the caller for that.
+# Group 0, not 999: netbox-docker chowns media/reports/scripts to netbox:root
+# and makes them group-writable, which is what grants write access.
+#
+# Last instruction on purpose -- every RUN above writes to /opt/netbox or
+# /etc/netbox as root.
+USER 999:0

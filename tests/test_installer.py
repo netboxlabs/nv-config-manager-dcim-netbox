@@ -34,6 +34,17 @@ _REPO = Path(__file__).resolve().parents[1]
 _CHART = _REPO / "deploy" / "netbox"
 
 
+@pytest.fixture(autouse=True)
+def _no_deployed_nats(monkeypatch):
+    """Answer "no NATS deployed" unless a test says otherwise.
+
+    `config`, `init` and `up` all prefer the password of a running NVCM over
+    minting one. Left alone, that reads through kubectl to whatever cluster the
+    developer's kubeconfig points at, which makes these tests depend on it.
+    """
+    monkeypatch.setattr(cluster, "read_nats_password", lambda *a, **k: None)
+
+
 # -- tokens -------------------------------------------------------------------
 
 
@@ -934,6 +945,38 @@ def test_config_command_keeps_a_nats_password_already_present(tmp_path):
     assert again.exit_code == 0, again.output
     second = yaml.safe_load(out.read_text())["secrets"]["k8s"]["nautobot"]["values"]["natsPassword"]
     assert second == first
+
+
+def test_a_deployed_nats_password_beats_the_one_in_the_config(tmp_path, monkeypatch):
+    """NVCM's deployer skips any secret that already exists (`deployer.py`,
+    `_apply_secret`: `if exists and not self.options.recreate_secrets`).
+
+    So on a redeploy the natsPassword we put in the install config is read,
+    validated, and then not applied -- nats-nv-config-manager keeps whatever it
+    was first created with. Writing anything else into the NetBox release leaves
+    the publisher authenticating with a password NATS rejects, and the only
+    trace is `Authorization Violation` in the NetBox log while renders silently
+    stop happening.
+    """
+    monkeypatch.setattr(cluster, "read_nats_password", lambda *a, **k: "DeployedPassword123456")
+
+    out = tmp_path / "install.yaml"
+    result = CliRunner().invoke(main, ["config", "-o", str(out)])
+    assert result.exit_code == 0, result.output
+
+    values = yaml.safe_load(out.read_text())["secrets"]["k8s"]["nautobot"]["values"]
+    assert values["natsPassword"] == "DeployedPassword123456"
+
+
+def test_a_deployed_nats_password_nvcm_would_reject_fails_loudly(tmp_path, monkeypatch):
+    # Writing it back would abort the deploy inside their validator, far from
+    # the cause. Say which secret is wrong and how to clear it instead.
+    monkeypatch.setattr(cluster, "read_nats_password", lambda *a, **k: "9-bad-password-value")
+
+    result = CliRunner().invoke(main, ["config", "-o", str(tmp_path / "install.yaml")])
+    assert result.exit_code != 0
+    assert cluster.NVCM_NATS_SECRET in result.output
+    assert "--recreate-secrets" in result.output
 
 
 def test_kind_refuses_images_the_node_cannot_run(monkeypatch):

@@ -20,6 +20,7 @@ from nv_config_manager_dcim_netbox.installer.tokens import (
     generate_api_token,
     generate_nats_password,
     is_valid_api_token,
+    is_valid_nats_password,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -115,6 +116,32 @@ def _existing_nats_password(config: dict) -> str:
     """
     k8s = ((config.get("secrets") or {}).get("k8s") or {}).get("nautobot") or {}
     return (k8s.get("values") or {}).get("natsPassword") or ""
+
+
+def _nats_password(config: dict, namespace: str) -> str:
+    """The password NetBox must publish with: deployed, then configured, then new.
+
+    A deployed NATS outranks the config file. NVCM's deployer skips any secret
+    that already exists (`deployer.py:_apply_secret`, `if exists and not
+    recreate_secrets`), so on a redeploy the natsPassword in the install config
+    is read, validated, and then quietly not applied -- nats-nv-config-manager
+    keeps whatever it was first created with. Writing a different one into the
+    NetBox release leaves the publisher authenticating against a password NATS
+    rejects, and the only trace is `Authorization Violation` in the NetBox log
+    while renders silently never happen.
+    """
+    deployed = cluster.read_nats_password(namespace)
+    if deployed:
+        if not is_valid_nats_password(deployed):
+            raise click.ClickException(
+                f"The deployed NATS password in {cluster.NVCM_NATS_SECRET} does not match "
+                "NVCM's own rule ([A-Za-z][A-Za-z0-9]{15,}), so it cannot be written back "
+                "into the install config. Redeploy NVCM with --recreate-secrets, or delete "
+                "the secret and let this run mint a new one:\n"
+                f"    kubectl delete secret -n {namespace} {cluster.NVCM_NATS_SECRET}"
+            )
+        return deployed
+    return _existing_nats_password(config) or generate_nats_password()
 
 
 def _nvcm_repo_candidate(nvcm_repo: Path | None) -> tuple[Path, str]:
@@ -300,7 +327,7 @@ def init(config_path: Path, extra: tuple[str, ...], nvcm_repo: Path | None) -> N
         api_token=token,
         namespace=DEFAULT_NAMESPACE,
         size="small",
-        nats_password=_existing_nats_password(config) or generate_nats_password(),
+        nats_password=_nats_password(config, DEFAULT_NAMESPACE),
     )
     cfg.write_config(cfg.apply_options(config, options), resolved)
 
@@ -377,7 +404,7 @@ def config_command(
         size=size,
         provider_image=provider_image,
         public_url=public_url,
-        nats_password=_existing_nats_password(base) or generate_nats_password(),
+        nats_password=_nats_password(base, namespace),
     )
     written = cfg.write_config(cfg.apply_options(base, options), output)
     click.echo(f"Wrote {written}")
@@ -549,12 +576,6 @@ def up(
     if not is_valid_api_token(token):
         raise click.ClickException("--token must be a NetBox v2 token: nbt_<12>.<40>.")
 
-    # Minted here rather than left to NVCM's deployer. Supplying it in the install
-    # config means NetBox can be given the password at install time, so the
-    # release does not have to be upgraded again afterwards just to switch its
-    # publisher from `log` to NATS.
-    nats_password = generate_nats_password()
-
     # Both refs resolved up front: the same values are loaded into the node and
     # written into NVCM's config, so they cannot disagree.
     profile = cfg.load_profile()
@@ -582,6 +603,12 @@ def up(
             )
         cluster.create_kind_cluster(kind_cluster, kind_config)
         _ok(f"created from {kind_config.name}")
+
+    # Resolved after the cluster exists, so an already-deployed NATS can be read.
+    # Supplying it in the install config means NetBox can be given the password at
+    # install time, so the release does not have to be upgraded again afterwards
+    # just to switch its publisher from `log` to NATS.
+    nats_password = _nats_password(profile, namespace)
 
     step += 1
     _step(step, total, "Fetching chart dependencies")
