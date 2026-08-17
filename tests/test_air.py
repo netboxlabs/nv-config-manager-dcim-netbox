@@ -386,9 +386,48 @@ def test_bring_up_is_one_script_covering_every_on_box_step():
         "nvcm_load_dcim",
     ):
         assert expected in script, expected
-    # Stops at the first failure, and only says it finished if it did.
+    # Stops at the first failure, and only says it finished if it did. The marker
+    # the SSH tail actually watches for is emitted by run_script's wrapper, after it
+    # has deleted the script -- see SCRIPT_DONE_MARKER.
     assert script.startswith("#!/usr/bin/env bash\nset -euo pipefail")
-    assert script.rstrip().endswith("echo NVCM_NETBOX_BRING_UP_COMPLETE")
+    assert script.rstrip().endswith("echo NVCM_NETBOX_SCRIPT_DONE")
+
+
+def test_the_bring_up_script_is_deleted_before_the_run_reports_done(tmp_path):
+    """The script carries the API token and the NATS password.
+
+    `_ssh_run_and_tail` terminates the SSH process the instant it sees the marker
+    it was given, so a `rm -f` sequenced after the command that emits it never
+    runs and the script survives on the box. The wrapper must therefore delete it
+    *before* emitting that marker.
+    """
+    cb = _callback_for_script()
+    seen = {}
+
+    class _Manager:
+        def _ssh_run_and_tail(self, host, port, command, *, marker, label, timeout):
+            seen["command"] = command
+            seen["marker"] = marker
+            return True
+
+    cb._manager = _Manager()
+    cb.runner = lambda host, port: _Uploads()
+
+    cb.run_script("box", 22, "#!/usr/bin/env bash\necho hi\n")
+
+    command, marker = seen["command"], seen["marker"]
+    assert marker == "NVCM_NETBOX_BRING_UP_COMPLETE"
+    assert "rm -f" in command
+    assert command.index("rm -f") < command.index(f"echo {marker}"), command
+    # And only on success, so a failure is not reported as a completed deploy.
+    assert 'if [ "$rc" -eq 0 ]' in command
+
+
+class _Uploads:
+    """An SshRunner stand-in that accepts the upload and records nothing."""
+
+    def upload(self, local, remote):
+        assert local.exists()
 
 
 def test_the_api_token_is_never_traced():

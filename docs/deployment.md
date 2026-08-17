@@ -99,9 +99,19 @@ EOF
   --build-images --load-kind --kind-cluster nv-config-manager \
   --install-envoy-gateway --install-cnpg-operator --install-cert-manager
 
+# 4. Publish NetBox through NVCM's Gateway.
+helm upgrade netbox deploy/netbox -n nv-config-manager --reuse-values --wait
+kubectl -n nv-config-manager get httproute netbox
 ```
 
 Run steps 1 and 2 before step 3: NVCM authenticates to NetBox with `$TOKEN`.
+
+Step 4 is not optional if you want to reach NetBox at
+`https://netbox.<cluster.hostname>`. Its HTTPRoute is skipped during step 1
+because rendering one before the Gateway API CRDs exist fails the whole release,
+and those CRDs arrive with `--install-envoy-gateway` in step 3 — so the release
+has to be upgraded once more afterwards to create it. Nothing else about the
+release changes, and `nvcm-netbox up` does this for you.
 
 `$PW` is a NATS password you choose, at least 16 characters matching
 `[A-Za-z][A-Za-z0-9]*`. It goes into the install config at

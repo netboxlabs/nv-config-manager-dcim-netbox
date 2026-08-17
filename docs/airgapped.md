@@ -72,7 +72,10 @@ That prints an API token. Put it in `install.yaml` under
 ```
 
 Finally connect NetBox to NVCM's event bus, which cannot happen earlier because
-the NATS password does not exist until NVCM is deployed:
+the NATS password does not exist until NVCM is deployed. The same upgrade also
+creates NetBox's HTTPRoute: it is skipped at install time because the Gateway API
+CRDs arrive with NVCM, so do not omit this step even if you set
+`nvcm.natsPassword` by hand earlier.
 
 ```bash
 PW=$(kubectl -n nv-config-manager get secret nats-nv-config-manager \

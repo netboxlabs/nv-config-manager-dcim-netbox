@@ -153,12 +153,26 @@ def slug_or_id(key: str, value: Any) -> tuple[str, str]:
 
     A value that is already a slug is unchanged, so this is idempotent. Same
     class of problem as :func:`status_slug`, generalized to the id/slug split.
+
+    The name -> slug step reproduces NetBox's own slugify, which is what its UI
+    prefills the field with: lowercase, every run of non-alphanumerics collapsed
+    to one hyphen, ends trimmed. Only collapsing whitespace and underscores left
+    punctuation in place, so ``DSX Air (DC1)`` asked NetBox for
+    ``site=dsx-air-(dc1)`` — a filter that matches nothing, and NetBox answers 200
+    with an empty list rather than rejecting it, so discovery silently found no
+    devices.
+
+    A slug that was edited away from its name (a site named ``DSX Air Demo``
+    slugged ``demo``) still cannot be derived and behaves the same way. Deriving
+    it is a best effort on NVCM sending a display name where NetBox wants a key;
+    sending the id avoids the guess entirely.
     """
     text = str(value)
     if text.isdigit() and int(text) > 0:
+        # Ambiguous only for an all-digit slug, which NetBox permits but its
+        # slugify never produces from a name. A PK is by far the likelier meaning.
         return (f"{key}_id", text)
-    # NetBox slugs are lowercase with separators collapsed to hyphens.
-    return (key, re.sub(r"[\s_]+", "-", text.strip().lower()))
+    return (key, re.sub(r"[^a-z0-9]+", "-", text.strip().lower()).strip("-"))
 
 
 def name_of(obj: Any) -> str | None:

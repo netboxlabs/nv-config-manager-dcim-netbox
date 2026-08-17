@@ -378,6 +378,112 @@ def test_netbox_up_stops_before_nvcm(monkeypatch, tmp_path):
     )
 
 
+def _up_with_cluster_mocked(monkeypatch, *, kind_exists=True):
+    """Stub every cluster call `up` makes. Returns the list NVCM's argv lands in."""
+    seen: list[list[str]] = []
+    monkeypatch.setattr(cluster, "kind_cluster_exists", lambda name: kind_exists)
+    monkeypatch.setattr(cluster, "helm_dependency_build", lambda chart: None)
+    monkeypatch.setattr(cluster, "pending_release_status", lambda r, ns, runner=None: None)
+    monkeypatch.setattr(cluster, "orphaned_data_volumes", lambda r, ns, runner=None: [])
+    monkeypatch.setattr(cluster, "install_netbox", lambda *a, **k: None)
+    monkeypatch.setattr(cluster, "wait_for_netbox", lambda *a, **k: None)
+    monkeypatch.setattr(cluster, "run_nvcm_init", lambda *a, **k: "")
+    monkeypatch.setattr(cli, "stream", lambda argv, cwd=None: seen.append(list(argv)))
+    return seen
+
+
+def test_up_publishes_the_route_only_after_nvcm_has_deployed(monkeypatch, tmp_path):
+    """The HTTPRoute cannot render until the Gateway API CRDs exist, and those
+    arrive with NVCM's deploy -- which runs after NetBox, because NetBox owns the
+    API token NVCM authenticates with.
+
+    So `up` has to upgrade the release once more at the end. Without it the route
+    is skipped on a first install and nothing ever re-renders it: NetBox's
+    hostname silently does not resolve until someone upgrades the release by hand.
+    """
+    order: list[str] = []
+    seen = _up_with_cluster_mocked(monkeypatch)
+    monkeypatch.setattr(
+        cli, "stream", lambda argv, cwd=None: (seen.append(list(argv)), order.append("nvcm"))
+    )
+    monkeypatch.setattr(
+        cluster,
+        "publish_netbox_route",
+        lambda chart, **k: order.append("route"),
+    )
+    monkeypatch.setattr(cluster, "netbox_route_exists", lambda ns, runner=None: True)
+
+    result = CliRunner().invoke(
+        cli.main,
+        [
+            "up",
+            "--no-kind-load",
+            "--skip-verify",
+            "--config-out",
+            str(tmp_path / "install.yaml"),
+            "--nvcm-repo",
+            str(_nvcm_stub()),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    # Deploy (validate + deploy) first, then the route -- the other way round
+    # renders nothing, which is the bug this guards.
+    assert order == ["nvcm", "nvcm", "route"], order
+    assert "[10/10]" in result.output
+
+
+def test_up_warns_when_the_route_did_not_appear(monkeypatch, tmp_path):
+    # A successful upgrade still renders nothing if the Gateway API is missing or
+    # nvcm.gateway.enabled is false, and the symptom is a hostname that does not
+    # resolve much later. Not fatal: NVCM and NetBox are both up by this point.
+    seen = _up_with_cluster_mocked(monkeypatch)
+    assert seen is not None
+    monkeypatch.setattr(cluster, "publish_netbox_route", lambda chart, **k: None)
+    monkeypatch.setattr(cluster, "netbox_route_exists", lambda ns, runner=None: False)
+
+    result = CliRunner().invoke(
+        cli.main,
+        [
+            "up",
+            "--no-kind-load",
+            "--skip-verify",
+            "--config-out",
+            str(tmp_path / "install.yaml"),
+            "--nvcm-repo",
+            str(_nvcm_stub()),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "no netbox httproute" in result.output.lower()
+    assert "port-forward" in result.output
+
+
+def test_up_deploys_to_a_cluster_kind_did_not_create(monkeypatch, tmp_path):
+    """`--no-create-cluster` means "use the cluster I already have", including a
+    real one.
+
+    `kind_cluster_exists` is false for any cluster kind did not create -- and for
+    every cluster when kind is not installed, since the CommandError is swallowed.
+    Treating that as fatal made the flag refuse to deploy anywhere but kind, which
+    is exactly what `--no-kind-load` exists to support.
+    """
+    _up_with_cluster_mocked(monkeypatch, kind_exists=False)
+
+    result = CliRunner().invoke(
+        cli.main,
+        [
+            "netbox",
+            "up",
+            "--no-create-cluster",
+            "--no-kind-load",
+            "--config-out",
+            str(tmp_path / "install.yaml"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "current kubectl context" in result.output
+
+
 def test_netbox_up_and_up_share_their_options():
     # `netbox up` is a thin wrapper; a flag added to one must appear on the other.
     shared = {p.name for p in cli.up.params} - {"skip_nvcm", "skip_verify"}
@@ -783,6 +889,137 @@ def test_every_chart_image_can_be_repointed_at_a_private_registry():
     assert all(s.startswith("busybox") for s in stray), stray
 
 
+def test_the_image_list_creates_its_output_directory(tmp_path, monkeypatch):
+    """`make airgapped-images` writes into gitignored generated/, which nothing
+    creates.
+
+    Piping through `tee` masked this: a `tee` that cannot open its file exits 1,
+    the `|| cat` fallback then drained an already-consumed stdin, and the pipeline
+    still reported success -- so the target printed nothing, wrote nothing, and
+    exited 0.
+    """
+    if shutil.which("helm") is None:
+        pytest.skip("helm not installed")
+    if not (_CHART / "charts").is_dir():
+        pytest.skip("chart deps not fetched (helm dependency build)")
+
+    import os
+
+    # Digest resolution goes to Docker Hub, which rate-limits anonymous callers.
+    # Stubbed so this tests the script's own output handling rather than the
+    # network; the digests themselves are covered by the fixture above.
+    stub_bin = tmp_path / "bin"
+    stub_bin.mkdir()
+    docker = stub_bin / "docker"
+    docker.write_text('#!/bin/sh\necho \'{"Descriptor":{"digest":"sha256:stub"}}\'\n')
+    docker.chmod(0o755)
+
+    out = tmp_path / "does" / "not" / "exist" / "images.txt"
+    result = subprocess.run(
+        [str(_AIRGAPPED / "netbox-images.sh"), "-o", str(out)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=dict(os.environ, PATH=f"{stub_bin}:{os.environ['PATH']}"),
+    )
+    assert result.returncode == 0, result.stderr
+    assert out.is_file(), "the output file was not written"
+    assert out.read_text().strip(), "the output file is empty"
+    # Also echoed, so the calling script can log what it collected.
+    assert result.stdout.strip() == out.read_text().strip()
+
+
+def _bundle(tmp_path: Path, image_list: str) -> Path:
+    """Lay out a bundle the way create-airgapped.sh does, around the real script."""
+    root = tmp_path / "bundle"
+    (root / "netbox-chart").mkdir(parents=True)
+    (root / "images").mkdir()
+    (root / "images" / "image-list.txt").write_text(image_list)
+    shutil.copy(_AIRGAPPED / "install-netbox.sh", root / "install-netbox.sh")
+    (root / "install-netbox.sh").chmod(0o755)
+
+    stub_bin = tmp_path / "bin"
+    stub_bin.mkdir()
+    for tool in ("helm", "kubectl"):
+        script = stub_bin / tool
+        script.write_text(f'#!/bin/sh\necho "$@" >> "{tmp_path}/{tool}.argv"\nexit 0\n')
+        script.chmod(0o755)
+    return root
+
+
+def _run_install(root: Path, tmp_path: Path):
+    import os
+
+    env = dict(os.environ, PATH=f"{tmp_path / 'bin'}:{os.environ['PATH']}")
+    return subprocess.run(
+        [str(root / "install-netbox.sh"), "--registry", "reg.example.com/nvcm"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+
+def test_airgapped_install_mints_a_token_under_pipefail(tmp_path):
+    """`head -c` closes the pipe as soon as it has enough, so the `tr` reading
+    /dev/urandom takes SIGPIPE and the pipeline exits 141.
+
+    Under `set -euo pipefail` that aborted the script at the token line, with no
+    message and nothing installed -- on the documented default path, where no
+    --token is passed.
+    """
+    root = _bundle(tmp_path, "docker.io/bitnami/postgresql@sha256:aaa\n")
+    result = _run_install(root, tmp_path)
+
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+    tokens = [w for w in result.stdout.split() if w.startswith("nbt_")]
+    assert tokens, result.stdout
+    assert is_valid_api_token(tokens[0]), tokens[0]
+
+
+def test_airgapped_install_asks_for_the_tags_the_bundle_actually_pushed(tmp_path):
+    """NVCM's upload-to-registry.sh rewrites a digest reference into a *tag*
+    (`target_ref`: `foo@sha256:abc` -> `$REGISTRY/foo:sha256-abc`), and
+    netbox-images.sh digest-pins every image in the bundle that came from a
+    registry.
+
+    So overriding image.registry alone left the chart asking for the original
+    `:latest` / `:1.38.0` tags, which were never pushed: ImagePullBackOff on every
+    pod of an air-gapped install.
+    """
+    root = _bundle(
+        tmp_path,
+        "registry-1.docker.io/bitnami/postgresql@sha256:aaa\n"
+        "registry-1.docker.io/bitnami/valkey@sha256:bbb\n"
+        "docker.io/busybox@sha256:ccc\n"
+        "docker.io/rancher/kubectl@sha256:ddd\n"
+        "nv-config-manager-netbox:0.1.0\n",
+    )
+    result = _run_install(root, tmp_path)
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+
+    argv = (tmp_path / "helm.argv").read_text()
+    for expected in (
+        "netbox.postgresql.image.tag=sha256-aaa",
+        "netbox.valkey.image.tag=sha256-bbb",
+        "netbox.init.image.tag=sha256-ccc",
+        "netbox.test.image.tag=sha256-ccc",
+        "netbox.worker.waitForBackend.image.tag=sha256-ddd",
+    ):
+        assert expected in argv, f"{expected} not in {argv}"
+
+
+def test_airgapped_install_says_so_when_it_cannot_map_a_tag(tmp_path):
+    # Silence here means an ImagePullBackOff ten minutes into an offline install
+    # with nothing pointing at the cause.
+    root = _bundle(tmp_path, "registry-1.docker.io/bitnami/postgresql@sha256:aaa\n")
+    result = _run_install(root, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "bitnami/valkey" in result.stderr
+    assert "netbox.valkey.image.tag" in result.stderr
+
+
 def test_verify_waits_for_the_consumer_instead_of_racing_it(monkeypatch):
     # The consumer pulls asynchronously. Reading its log once, immediately after
     # publishing, reported a working loop as broken.
@@ -933,18 +1170,34 @@ def test_nats_password_matches_the_alphabet_nvcm_enforces():
         assert re.fullmatch(r"[A-Za-z][A-Za-z0-9]{15,}", generate_nats_password())
 
 
+def _written_nats_password(path: Path) -> str:
+    return yaml.safe_load(path.read_text())["secrets"]["k8s"]["nautobot"]["values"]["natsPassword"]
+
+
 def test_config_command_keeps_a_nats_password_already_present(tmp_path):
-    # Regenerating it would leave NVCM's NATS users and a deployed NetBox
-    # disagreeing until both are rolled.
+    """Regenerating it would leave NVCM's NATS users and a deployed NetBox
+    disagreeing until both are rolled.
+
+    Re-run exactly as a user would, with no --profile: the password lives in the
+    file this command *writes*, and reading the profile for it (which never has
+    one) minted a fresh password every invocation. The mismatch surfaces only
+    later, as `Authorization Violation` in the NetBox log with renders silently
+    not happening.
+    """
     out = tmp_path / "install.yaml"
     result = CliRunner().invoke(main, ["config", "-o", str(out)])
     assert result.exit_code == 0, result.output
-    first = yaml.safe_load(out.read_text())["secrets"]["k8s"]["nautobot"]["values"]["natsPassword"]
+    first = _written_nats_password(out)
 
-    again = CliRunner().invoke(main, ["config", "-o", str(out), "--profile", str(out)])
+    again = CliRunner().invoke(main, ["config", "-o", str(out)])
     assert again.exit_code == 0, again.output
-    second = yaml.safe_load(out.read_text())["secrets"]["k8s"]["nautobot"]["values"]["natsPassword"]
-    assert second == first
+    assert _written_nats_password(out) == first
+
+    # And the same when the profile is passed explicitly, which is what a caller
+    # driving NVCM's installer by hand does.
+    third = CliRunner().invoke(main, ["config", "-o", str(out), "--profile", str(out)])
+    assert third.exit_code == 0, third.output
+    assert _written_nats_password(out) == first
 
 
 def test_a_deployed_nats_password_beats_the_one_in_the_config(tmp_path, monkeypatch):

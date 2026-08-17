@@ -38,9 +38,17 @@ except ImportError as exc:  # pragma: no cover - depends on the `air` extra
 # cloud-init creates the cluster with this name.
 KIND_CLUSTER = "nvcm"
 
-# Echoed by the bring-up script on success. NVCM streams a remote command and
-# watches for a marker like this to tell completion from a dropped connection.
+# Echoed on success by the *wrapper* around the bring-up script. NVCM streams a
+# remote command and watches for a marker like this to tell completion from a
+# dropped connection.
 BRING_UP_MARKER = "NVCM_NETBOX_BRING_UP_COMPLETE"
+
+# Echoed by the script body itself, and watched for by nothing. `_ssh_run_and_tail`
+# terminates the SSH process the moment it sees the marker it was given, so any
+# command sequenced after the marker-producing one never runs. The two are kept
+# distinct so the wrapper's cleanup happens before the marker the tail is
+# watching for is emitted.
+SCRIPT_DONE_MARKER = "NVCM_NETBOX_SCRIPT_DONE"
 NAMESPACE = "nv-config-manager"
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -99,13 +107,19 @@ class NetBoxAirCallback:
             self._inner.on_deploy_started(host, port)
 
     def on_complete(self, success: bool, host: str = "", port: int = 0) -> None:
-        # NetBox already holds the NATS password (see __init__), so nothing has to
-        # be re-installed here.
+        # NetBox already holds the NATS password (see __init__), so the publisher
+        # needs nothing here. Its HTTPRoute does: that could not render during
+        # bring-up because NVCM's deploy had not yet registered the Gateway API
+        # CRDs, and this is the first point at which it has.
         if success:
-            try:
-                self.publish_hostname(host or self.host, port or self.port)
-            except Exception as exc:  # noqa: BLE001 - cosmetic, never fail the deploy
-                self.on_log(f"Could not add {self.cfg.netbox_hostname()} to /etc/hosts: {exc}")
+            for label, action in (
+                ("publish the NetBox route", self.publish_route),
+                (f"add {self.cfg.netbox_hostname()} to /etc/hosts", self.publish_hostname),
+            ):
+                try:
+                    action(host or self.host, port or self.port)
+                except Exception as exc:  # noqa: BLE001 - cosmetic, never fail the deploy
+                    self.on_log(f"Could not {label}: {exc}")
         self._inner.on_complete(success, host, port)
 
     # -- the work ------------------------------------------------------------
@@ -176,7 +190,7 @@ class NetBoxAirCallback:
                 deployment_name=self.cfg.deployment_name or self.cfg.mock_blueprint,
                 runner=script,
             )
-        return script.script(marker=BRING_UP_MARKER, redact=[self.api_token])
+        return script.script(marker=SCRIPT_DONE_MARKER, redact=[self.api_token])
 
     def run_script(self, host: str, port: int, body: str) -> None:
         """Upload the script and run it in a single SSH session.
@@ -185,7 +199,10 @@ class NetBoxAirCallback:
         watches for a completion marker; that is how their deploy reports
         progress, and it means one authentication for the whole bring-up.
 
-        The script holds the API token, so it is written 0600 and removed after.
+        The script holds the API token and the NATS password, so it is written 0600
+        and deleted before the run reports completion -- the wrapper echoes
+        BRING_UP_MARKER only after the `rm`, because the tail kills the process as
+        soon as it sees that marker (see SCRIPT_DONE_MARKER).
         """
         remote = f"/home/{NVCM_BOX_USER}/nvcm-netbox-bring-up.sh"
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -194,11 +211,12 @@ class NetBoxAirCallback:
             local.chmod(0o600)
             self.runner(host, port).upload(local, remote)
 
+        quoted = shlex.quote(remote)
         ok = self._manager._ssh_run_and_tail(
             host,
             port,
-            f"chmod 600 {shlex.quote(remote)} && bash {shlex.quote(remote)}; "
-            f"rc=$?; rm -f {shlex.quote(remote)}; exit $rc",
+            f"chmod 600 {quoted} && bash {quoted}; rc=$?; rm -f {quoted}; "
+            f'if [ "$rc" -eq 0 ]; then echo {BRING_UP_MARKER}; fi; exit "$rc"',
             marker=BRING_UP_MARKER,
             label="netbox",
             timeout=self.cfg.deploy_timeout or 3600,
@@ -207,6 +225,35 @@ class NetBoxAirCallback:
             raise RuntimeError(
                 "The NetBox bring-up did not finish. Its output is above; the failing "
                 "command is the last one echoed."
+            )
+
+    def publish_route(self, host: str, port: int) -> None:
+        """Create NetBox's HTTPRoute, now that the Gateway API CRDs are registered.
+
+        The bring-up installs the chart before NVCM deploys, so at that point the
+        Gateway API does not exist on the box and templates/httproute.yaml is
+        skipped -- rendering an HTTPRoute without its CRDs fails the whole release.
+        Nothing else upgrades the release afterwards, so without this the sim's
+        `https://netbox.<hostname>` never routes, even though publish_hostname
+        resolves the name.
+
+        The chart is still unpacked at the path the bring-up put it, and
+        --reuse-values replays the install's own values.
+        """
+        runner = self.runner(host, port)
+        remote_chart = f"/home/{NVCM_BOX_USER}/charts/{self.chart.name}"
+        cluster.publish_netbox_route(
+            remote_chart,
+            release=self.cfg.netbox_release,
+            namespace=NAMESPACE,
+            runner=runner,
+        )
+        if cluster.netbox_route_exists(NAMESPACE, runner=runner):
+            self.on_log(f"NetBox route published for https://{self.cfg.netbox_hostname()}")
+        else:
+            self.on_log(
+                "NetBox still has no HTTPRoute after the upgrade, so its hostname will not "
+                "resolve. Reach it with kubectl port-forward on the sim box instead."
             )
 
     def publish_hostname(self, host: str, port: int) -> None:

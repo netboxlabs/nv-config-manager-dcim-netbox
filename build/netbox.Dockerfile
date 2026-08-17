@@ -37,9 +37,25 @@ COPY --from=plugin-build /wheels/ /tmp/wheels/
 # The [nats] extra pulls nats-py, which the plugin's event publisher imports
 # lazily. Without it the chart's `event_publisher: nats` config still loads, and
 # every change event is then lost at publish time with ModuleNotFoundError.
-RUN uv pip install --python /opt/netbox/venv/bin/python --no-cache \
+#
+# The wheel is matched with a shell loop and the count asserted rather than
+# interpolated with `"$(echo <glob>)[nats]"`: two matches collapse into a single
+# quoted argument (`/tmp/wheels/a.whl /tmp/wheels/b.whl[nats]`) that uv rejects
+# with an opaque error, and a cached plugin-build layer holding a wheel from a
+# previous version is enough to produce two.
+RUN set -eu; \
+    wheels=""; count=0; \
+    for w in /tmp/wheels/netbox_nv_config_manager-*.whl; do \
+      [ -f "$w" ] || continue; \
+      wheels="$w"; count=$((count + 1)); \
+    done; \
+    if [ "$count" -ne 1 ]; then \
+      echo "Expected exactly one netbox_nv_config_manager wheel, found $count:" >&2; \
+      ls -1 /tmp/wheels >&2; exit 1; \
+    fi; \
+    uv pip install --python /opt/netbox/venv/bin/python --no-cache \
       "netbox-bgp==${NETBOX_BGP_VERSION}" \
-      "$(echo /tmp/wheels/netbox_nv_config_manager-*.whl)[nats]" \
+      "${wheels}[nats]" \
  && rm -rf /tmp/wheels
 
 # Collect the plugins' static assets. NetBox only sees a plugin's static files

@@ -20,7 +20,10 @@ NetBox, and points NVCM at it.
    topology job the bundled-DCIM path runs.
 5. Rewrites the install config on the box to select NetBox, then lets NVCM's
    deploy run.
-6. Publishes NetBox on the sim's Gateway at `netbox.nvcm.air`.
+6. Publishes NetBox on the sim's Gateway at `netbox.nvcm.air`, once the deploy has
+   finished. Its HTTPRoute cannot be created before then — the Gateway API CRDs
+   arrive with NVCM — so this is a second, values-preserving helm pass over the
+   NetBox release, followed by the `/etc/hosts` entry for the name.
 
 ## Requirements
 

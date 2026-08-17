@@ -113,6 +113,10 @@ def _existing_nats_password(config: dict) -> str:
 
     Regenerating it would leave NVCM's NATS users and the deployed NetBox
     disagreeing until both are rolled.
+
+    Note this has to be given the *generated* config, not the base profile — the
+    profile never carries a natsPassword, so passing it here always reads "" and
+    every run mints a new one.
     """
     k8s = ((config.get("secrets") or {}).get("k8s") or {}).get("nautobot") or {}
     return (k8s.get("values") or {}).get("natsPassword") or ""
@@ -397,6 +401,16 @@ def config_command(
             "The plugin silently skips installing a malformed token."
         )
 
+    # Any natsPassword this command wrote on a previous run lives in `output`, not
+    # in the profile -- reading the profile for it always came up empty, so every
+    # invocation minted a new password. With NVCM not yet deployed there is no
+    # secret to adopt either, and the mismatch only shows up much later as
+    # `Authorization Violation` in the NetBox log with renders silently not
+    # happening. `up` avoids this by resolving the config it just wrote.
+    previous: dict = {}
+    if output.is_file():
+        previous = yaml.safe_load(output.read_text()) or {}
+
     options = _config_options(
         base,
         api_token=token,
@@ -404,7 +418,7 @@ def config_command(
         size=size,
         provider_image=provider_image,
         public_url=public_url,
-        nats_password=_nats_password(base, namespace),
+        nats_password=_nats_password(previous, namespace),
     )
     written = cfg.write_config(cfg.apply_options(base, options), output)
     click.echo(f"Wrote {written}")
@@ -561,11 +575,13 @@ def up(
     """Bring up NetBox + NVCM on the current cluster.
 
     Order matters: NetBox is deployed first so it owns the API token NVCM
-    authenticates with, then NVCM, then NetBox is rolled once more to pick up the
-    NATS password NVCM's deployer created.
+    authenticates with, then NVCM. NetBox is installed with the NATS password
+    already set, so it does not have to be rolled again to start publishing; the
+    one thing that does need a second helm pass is its HTTPRoute, which cannot
+    render until NVCM's deploy has put the Gateway API CRDs on the cluster.
     """
     require_tools("kubectl", "helm")
-    total = 7 if skip_nvcm else 9
+    total = 7 if skip_nvcm else 10
     step = 0
 
     repo = None if skip_nvcm else _resolve_nvcm_repo(nvcm_repo)
@@ -589,9 +605,11 @@ def up(
     if cluster.kind_cluster_exists(kind_cluster):
         _ok("already running")
     elif not create_cluster:
-        raise click.ClickException(
-            f"kind cluster {kind_cluster!r} does not exist and --no-create-cluster was given."
-        )
+        # Not an error: `kind_cluster_exists` is false for any cluster kind did not
+        # create (and whenever kind is not installed at all), so treating it as
+        # fatal made --no-create-cluster refuse to deploy onto a real cluster --
+        # which is exactly what --no-kind-load exists to support.
+        _ok(f"no kind cluster {kind_cluster!r}; deploying to the current kubectl context")
     else:
         require_tools("kind")
         kind_config = _nvcm_repo_candidate(nvcm_repo)[0] / "deploy" / "kind-config.yaml"
@@ -715,6 +733,27 @@ def up(
     )
 
     step += 1
+    _step(step, total, "Publishing NetBox through NVCM's Gateway")
+    # Only possible now: the HTTPRoute needs the Gateway API CRDs that the deploy
+    # above installs. Not fatal -- NVCM and NetBox are both up and working at this
+    # point, and the only thing missing is browser access by hostname.
+    try:
+        cluster.publish_netbox_route(str(chart), release=release, namespace=namespace)
+    except CommandError as exc:
+        _warn(
+            f"Could not re-render the NetBox route:\n{exc.output}\n"
+            f"      Retry with: helm upgrade {release} {chart} -n {namespace} --reuse-values"
+        )
+    if cluster.netbox_route_exists(namespace):
+        _ok(f"HTTPRoute {cluster.NETBOX_ROUTE} created")
+    else:
+        _warn(
+            "No NetBox HTTPRoute after the upgrade, so the hostname below will not\n"
+            "      resolve. Use the port-forward instead, and check that NVCM's Gateway\n"
+            "      exists (kubectl get gateway -n " + namespace + ")."
+        )
+
+    step += 1
     if skip_verify:
         _step(step, total, "Skipping verification (--skip-verify)")
     else:
@@ -765,7 +804,10 @@ def verify(namespace: str, device_id: str) -> None:
     elif backend == "log":
         _warn(
             "NetBox is on the `log` publisher, so real changes go to its log rather than\n"
-            "      NVCM. That is expected until NVCM exists; re-run `up` to switch it over."
+            "      NVCM. That means the release was installed with no nvcm.natsPassword —\n"
+            f"      `up` sets it on install. Switch it over with:\n"
+            f"      helm upgrade {DEFAULT_NETBOX_RELEASE} {DEFAULT_CHART} -n {namespace} "
+            "--reuse-values --set nvcm.natsPassword=<pw>"
         )
 
     subject = cfg.event_subject(cfg.load_profile())

@@ -27,8 +27,12 @@ NetBox is installed before NVCM because it issues the token NVCM authenticates
 with. So on a first install this kind does not exist yet, and rendering it fails
 the whole release with "ensure CRDs are installed first".
 
-Skipped until the cluster has the API. The route is then created by the helm run
-that switches the publisher onto NATS, which happens after NVCM is up.
+Skipped until the cluster has the API. Something has to upgrade the release once
+NVCM's deploy has registered the CRDs, or the route is never created at all:
+`nvcm-netbox up` does that in its "Publishing NetBox through NVCM's Gateway" step
+(cluster.publish_netbox_route), the Air path in its on_complete callback, and the
+air-gapped install in the `--reuse-values` run documented at the end of
+install-netbox.sh.
 
 `helm template` has no cluster to ask, so pass
 `--api-versions gateway.networking.k8s.io/v1` to render this offline.

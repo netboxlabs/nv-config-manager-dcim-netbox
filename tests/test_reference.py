@@ -107,6 +107,64 @@ async def test_unfiltered_locations_cover_sites_and_locations():
     assert {s.name for s in await client.list_locations()} == {"TRIAL01", "Row 1"}
 
 
+async def test_locations_never_offer_two_entries_under_one_id():
+    """NetBox PKs are per-model, so a Site and a Location can both be id 1.
+
+    NVCM stores a location id as the bare integer (`is_valid_location_id` rejects
+    anything else) and sends only that back, so two choices sharing an id are
+    indistinguishable -- and `get_location_metadata` would resolve both to the
+    Site, silently returning a different object than the one that was picked.
+    Dedup used to key on (id, name), which let the pair through.
+    """
+    client = _client(
+        gql={
+            "site_list": [{"id": 1, "name": "demo-site"}],
+            "location_list": [{"id": 1, "name": "rack-row-a"}, {"id": 2, "name": "rack-row-b"}],
+        }
+    )
+    result = await client.list_locations()
+
+    assert len({s.id for s in result}) == len(result), [(s.id, s.name) for s in result]
+    # Sites win, matching the order get_location_metadata resolves in.
+    assert ("1", "demo-site") in [(s.id, s.name) for s in result]
+    assert ("2", "rack-row-b") in [(s.id, s.name) for s in result]
+
+
+async def test_get_location_metadata_resolves_every_level():
+    """A region id comes back from `list_locations(("Region",))`, so it has to
+    resolve here too.
+
+    Only `site` then `location` were tried, so an explicitly-typed region or
+    site-group selection resolved to None -- NVCM reports that as "Unknown
+    location" -- or, worse, to whichever Site happened to hold the same PK.
+    """
+    client = _client(gql={"region": {"id": 7, "name": "DSX Air Trial"}})
+    found = await client.get_location_metadata("7")
+    assert found is not None and (found.id, found.name) == ("7", "DSX Air Trial")
+
+    client = _client(gql={"site_group": {"id": 8, "name": "Trial Group"}})
+    found = await client.get_location_metadata("8")
+    assert found is not None and found.name == "Trial Group"
+
+
+async def test_a_location_type_spelled_two_ways_is_queried_once():
+    # "sitegroup" and "site_group" are the same model; querying it twice would
+    # duplicate every row in the dropdown.
+    calls: list[str] = []
+    client = _client(gql={"site_group_list": [{"id": 1, "name": "Trial Group"}]})
+    inner = client.graphql_query
+
+    async def _counting(query, variables=None):
+        calls.append(query)
+        return await inner(query, variables)
+
+    client.graphql_query = _counting
+    result = await client.list_locations(("SiteGroup", "site_group"))
+
+    assert [s.name for s in result] == ["Trial Group"]
+    assert len(calls) == 1, calls
+
+
 async def test_an_unknown_location_type_is_skipped_not_fatal():
     client = _client(gql={"site_list": [{"id": 1, "name": "TRIAL01"}]})
     assert [s.name for s in await client.list_locations(("Site", "Rack"))] == ["TRIAL01"]

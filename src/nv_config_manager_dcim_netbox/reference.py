@@ -30,10 +30,18 @@ _LOCATION_MODELS = {
     "location": ("location_list", "location"),
 }
 
-# With no type given, return what devices can actually be scoped to. Sites first:
-# ids are per-model in NetBox, so a Site and a Location can share one, and
-# get_location_metadata resolves in this same order to stay consistent.
+# With no type given, return what devices can actually be scoped to: a Site, or
+# one of its optional Location sub-groupings. Sites first, because ids are
+# per-model in NetBox -- a Site and a Location can hold the same PK, and only one
+# of them can be offered under that id (see list_locations).
 _DEFAULT_LOCATION_MODELS = ("site", "location")
+
+# Order in which a bare PK is resolved back to an object. NVCM stores a location
+# id as the plain integer NetBox uses (`is_valid_location_id` rejects anything
+# else), so the id alone cannot say which model it came from and this fixes which
+# one wins. Every model is listed, or an id from an explicitly-typed
+# `list_locations(("region",))` call would resolve to None.
+_LOCATION_RESOLUTION_ORDER = ("site", "location", "region", "site_group")
 _TENANTS_QUERY = "query { tenant_list { id name } }"
 
 # Only the two nested objects the managed-only dropdowns need, for the given ids.
@@ -86,31 +94,50 @@ def _selections(items: list[dict[str, Any]]) -> list[DCIMSelection]:
 class NetBoxReferenceMixin:
     """Read-only reference data used to populate workflow forms."""
 
+    async def _locations_of(self, kind: str) -> list[dict[str, Any]]:
+        """Return the ``{id, name}`` rows for one level of NetBox's hierarchy."""
+        list_field = _LOCATION_MODELS[kind][0]
+        data = await self.graphql_query(f"query {{ {list_field} {{ id name }} }}")
+        return list(data.get(list_field) or [])
+
     async def list_locations(self, location_types: tuple[str, ...] = ()) -> list[DCIMSelection]:
-        # ``location_types`` is inert: NetBox's Region/SiteGroup/Site/Location
-        # hierarchy has no per-location type to filter on, so it is accepted only
-        # for contract parity. Logged so callers can see it did not filter.
-        wanted = [t.lower().replace(" ", "_") for t in location_types] or list(
-            _DEFAULT_LOCATION_MODELS
-        )
-        unknown = [t for t in wanted if t not in _LOCATION_MODELS]
+        # A requested type selects which model to query -- NetBox's
+        # Region/SiteGroup/Site/Location hierarchy *is* the type, with no per-object
+        # type field to filter on.
+        requested = [t.lower().replace(" ", "_") for t in location_types]
+        unknown = [t for t in requested if t not in _LOCATION_MODELS]
         if unknown:
             logger.debug("No NetBox model for location type(s) %r; skipping", unknown)
 
-        seen: set[tuple[str, str]] = set()
-        found: list[dict[str, Any]] = []
-        for kind in wanted:
-            model = _LOCATION_MODELS.get(kind)
-            if model is None:
-                continue
-            list_field = model[0]
-            data = await self.graphql_query(f"query {{ {list_field} {{ id name }} }}")
-            for item in data.get(list_field) or []:
-                key = (str(item["id"]), item["name"])
-                if key not in seen:
-                    seen.add(key)
-                    found.append(item)
-        return _selections(found)
+        # Distinct models, in the order asked for. "sitegroup" and "site_group" are
+        # accepted spellings of one model, so a caller passing both must not make it
+        # be queried twice.
+        kinds: list[str] = []
+        for name in requested or _DEFAULT_LOCATION_MODELS:
+            model = _LOCATION_MODELS.get(name)
+            if model is not None and model not in [_LOCATION_MODELS[k] for k in kinds]:
+                kinds.append(name)
+
+        seen: dict[str, str] = {}
+        rows: list[dict[str, Any]] = []
+        for kind in kinds:
+            for item in await self._locations_of(kind):
+                key = str(item["id"])
+                if key in seen:
+                    # Two levels holding the same PK. Only one can be offered: the
+                    # id is all NVCM sends back, and get_location_metadata resolves
+                    # it to exactly one object.
+                    logger.debug(
+                        "NetBox %s id %s collides with the %s of that id; keeping the %s",
+                        kind,
+                        key,
+                        seen[key],
+                        seen[key],
+                    )
+                    continue
+                seen[key] = kind
+                rows.append(item)
+        return _selections(rows)
 
     async def get_location_metadata(self, location_id: str) -> DCIMSelection | None:
         """Return normalized metadata for one NetBox location PK, or ``None``.
@@ -120,8 +147,15 @@ class NetBoxReferenceMixin:
         NetBox does not have resolves to ``None`` — which NetBox reports as a
         GraphQL error on the singular query, classified by the transport as
         ``DCIMNotFoundError``.
+
+        Every level is tried, in :data:`_LOCATION_RESOLUTION_ORDER`, so an id from
+        an explicitly-typed ``list_locations(("region",))`` resolves at all rather
+        than coming back ``None``. PKs are per-model, so an id held by more than one
+        level resolves to the first — unavoidable while NVCM stores location ids as
+        bare NetBox PKs, which is why ``list_locations`` never offers two entries
+        under the same id.
         """
-        for kind in _DEFAULT_LOCATION_MODELS:
+        for kind in _LOCATION_RESOLUTION_ORDER:
             field = _LOCATION_MODELS[kind][1]
             try:
                 data = await self.graphql_query(

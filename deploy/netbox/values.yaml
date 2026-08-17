@@ -12,11 +12,20 @@ nvcm:
   natsService: nv-config-manager-nats
   natsUser: nv-config-manager
 
-  # NATS password, read from NVCM's `nats-nv-config-manager` secret. Empty until
-  # NVCM has been deployed -- and while it is empty the publisher stays in `log`
-  # mode rather than failing, which is what lets NetBox come up FIRST and hand
-  # NVCM its API token. `nvcm-netbox up` sets this on a second helm pass once
-  # NVCM exists. Set it yourself if you are driving helm directly.
+  # NATS password, shared with NVCM's `nats-nv-config-manager` secret. While it is
+  # empty the publisher stays in `log` mode rather than failing, which is what
+  # lets NetBox be installed standalone.
+  #
+  # `nvcm-netbox up` sets it on the FIRST install: it either reads an
+  # already-deployed NATS secret or mints the value it will hand NVCM in the
+  # install config, so the release never has to be upgraded just to switch the
+  # publisher on. The cost is that NetBox is pointed at nv-config-manager-nats
+  # before that Service exists; the publisher connects synchronously when it
+  # publishes, so a UI/API write during the NVCM deploy blocks on connection
+  # retries before it logs. `nvcm_init` and the topology load both suppress
+  # events, so the documented bring-up never hits it.
+  #
+  # Set it yourself if you are driving helm directly.
   natsPassword: ""
 
   # Must equal NVCM's `[nats] dcim_change_subject`, which the NVCM chart renders

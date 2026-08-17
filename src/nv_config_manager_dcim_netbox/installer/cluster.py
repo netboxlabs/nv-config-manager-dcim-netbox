@@ -245,6 +245,67 @@ def wait_for_netbox(namespace: str, timeout: str = "10m", runner: Runner | None 
     )
 
 
+NETBOX_ROUTE = "netbox"
+
+
+def publish_netbox_route(
+    chart_ref: str,
+    *,
+    release: str,
+    namespace: str,
+    timeout: str = "5m",
+    runner: Runner | None = None,
+) -> None:
+    """Upgrade the NetBox release again, for the sole purpose of creating its HTTPRoute.
+
+    ``templates/httproute.yaml`` is gated on the Gateway API being registered,
+    because rendering an HTTPRoute before the CRDs exist fails the whole release.
+    Those CRDs arrive with NVCM's deploy (``--install-envoy-gateway``), which runs
+    *after* NetBox -- NetBox has to exist first to own the API token NVCM
+    authenticates with. So on a first install the route is skipped, and without
+    this second pass nothing ever renders it: browser access to NetBox silently
+    does not work until someone happens to upgrade the release again.
+
+    ``--reuse-values`` replays the values the install used (token, image, NATS
+    password), so the caller does not have to know them to re-render.
+    """
+    (runner or LocalRunner()).stream(
+        [
+            "helm",
+            "upgrade",
+            release,
+            chart_ref,
+            "--namespace",
+            namespace,
+            "--reuse-values",
+            "--wait",
+            "--timeout",
+            timeout,
+        ]
+    )
+
+
+def netbox_route_exists(namespace: str, runner: Runner | None = None) -> bool:
+    """Return whether the NetBox HTTPRoute is present.
+
+    Checked after :func:`publish_netbox_route` rather than assumed: a successful
+    upgrade still renders nothing if the Gateway API is missing or
+    ``nvcm.gateway.enabled`` is false, and the failure mode is a hostname that
+    does not resolve much later.
+    """
+    try:
+        kubectl(
+            "get",
+            "httproute.gateway.networking.k8s.io",
+            NETBOX_ROUTE,
+            namespace=namespace,
+            runner=runner,
+        )
+    except CommandError:
+        return False
+    return True
+
+
 def load_topology(
     blueprint: str,
     namespace: str,

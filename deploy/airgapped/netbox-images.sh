@@ -59,7 +59,14 @@ print(d.get("Descriptor", {}).get("digest", ""))' 2>/dev/null || true)"
         echo "Most often Docker Hub's anonymous pull-rate limit: \`docker login\` and retry." >&2
         exit 1
     fi
-    echo "${image%%:*}@${digest}"
+    # Strip the tag, not the first colon: `myreg.example.com:5000/foo:bar` would
+    # otherwise become `myreg.example.com@sha256:...`. Only the last path
+    # component can carry a tag, and it may legitimately carry none.
+    local base="$image"
+    case "${image##*/}" in
+        *:*) base="${image%:*}" ;;
+    esac
+    echo "${base}@${digest}"
 }
 
 # The provider wheelhouse is in neither chart: NVCM's pods install it from
@@ -94,4 +101,17 @@ done <<< "$images"
 
 [[ -n "$provider_image" ]] && out+=("$provider_image")
 
-printf '%s\n' "${out[@]}" | sort -u | { [[ -n "$OUTPUT" ]] && tee "$OUTPUT" || cat; }
+[[ ${#out[@]} -gt 0 ]] || { echo "The chart rendered no images at all" >&2; exit 1; }
+
+# Written with a redirect rather than piped through `tee`: in a pipeline a `tee`
+# that cannot open its file exits 1, the `|| cat` fallback then drains an already
+# consumed stdin, and the pipeline still reports success -- so a missing output
+# directory looked like a bundle with no images in it. The directory is created
+# here because the Makefile target writes into gitignored generated/.
+if [[ -n "$OUTPUT" ]]; then
+    mkdir -p "$(dirname "$OUTPUT")"
+    printf '%s\n' "${out[@]}" | sort -u > "$OUTPUT"
+    cat "$OUTPUT"
+else
+    printf '%s\n' "${out[@]}" | sort -u
+fi

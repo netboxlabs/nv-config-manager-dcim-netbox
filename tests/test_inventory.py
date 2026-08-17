@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from nv_config_manager_dcim import (
     DCIMConflictError,
@@ -239,3 +241,24 @@ def test_slug_or_id_covers_the_name_and_id_forms():
     assert slug_or_id("tenant", "Acme Corp") == ("tenant", "acme-corp")
     # Idempotent for a value that is already a slug.
     assert slug_or_id("role", "tan-hleaf") == ("role", "tan-hleaf")
+
+
+def test_slug_or_id_slugifies_punctuation_the_way_netbox_does():
+    """NetBox's own slugify collapses every run of non-alphanumerics to one hyphen.
+
+    Only whitespace and underscores were collapsed, so a site displayed as
+    `DSX Air (DC1)` asked for `site=dsx-air-(dc1)`. NetBox answers that with 200
+    and an empty list rather than rejecting it, so Multi-Deploy silently
+    discovered no devices instead of failing loudly.
+    """
+    from nv_config_manager_dcim_netbox._mappers import slug_or_id
+
+    assert slug_or_id("site", "DSX Air (DC1)") == ("site", "dsx-air-dc1")
+    assert slug_or_id("site", "TRIAL01 - demo") == ("site", "trial01-demo")
+    assert slug_or_id("tenant", "Acme, Inc.") == ("tenant", "acme-inc")
+    assert slug_or_id("role", "spine/leaf") == ("role", "spine-leaf")
+    # Every derived slug is one NetBox would accept: [-a-zA-Z0-9_]+ with no
+    # leading or trailing separator.
+    for name in ("DSX Air (DC1)", "  padded  ", "Acme, Inc.", "a--b"):
+        key, value = slug_or_id("site", name)
+        assert re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", value), (name, value)
