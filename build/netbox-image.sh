@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
-# Build the NetBox base image from a pinned `feature`-branch commit.
+# Build the NetBox base image from the commit pinned in build/versions.env
+# (4.7.0-beta1 at the time of writing).
 #
-# TEMPORARY -- see build/versions.env. Delete this script once the NetBox 4.7
-# beta is pip-installable and build/netbox.Dockerfile can just FROM a published
-# image.
+# TEMPORARY -- see build/versions.env. Delete once a 4.7 image is published and
+# build/netbox.Dockerfile can FROM it.
 #
 # Why netbox-docker rather than overlaying source onto a released image: its
 # Dockerfile takes ARG NETBOX_PATH and installs ${NETBOX_PATH}/requirements.txt,
-# so the interpreter and every dependency come from the ref we pin. The feature
-# branch is well ahead of the released images (it runs Python 3.14 / Django 6),
-# so overlaying source onto a v4.6.x image would leave the base interpreter
-# wrong in a way pip cannot fix.
+# so the interpreter and every dependency come from the ref we pin. 4.7 runs
+# Python 3.14 / Django 6, so overlaying source onto a v4.6.x image would leave
+# the base interpreter wrong in a way pip cannot fix.
 #
 # Usage: build/netbox-image.sh [workdir]   (default workdir: .build)
 set -euo pipefail
@@ -93,14 +92,14 @@ echo "==> building ${base_name}:${base_tag} for ${BUILDX_PLATFORM}"
   # build.sh composes ${IMAGE_NAMES}:${DOCKER_TAG}, so the two halves are passed
   # separately; handing it a full "name:tag" as DOCKER_TAG yields an image
   # reference with two colons, which docker rejects. It also always emits a
-  # second, version-suffixed tag (…:feature-5.0.2) that we simply ignore.
+  # second, version-suffixed tag (…:<tag>-5.0.2) that we simply ignore.
   #
-  # SKIP_GIT: use the tree we pinned above. The branch argument is only used to
-  # derive a default tag, which DOCKER_TAG overrides.
+  # SKIP_GIT: use the tree we pinned above. The ref argument then only supplies
+  # a default TAG, which DOCKER_TAG overrides.
   SKIP_GIT=1 NETBOX_PATH="${netbox_rel}" \
     IMAGE_NAMES="${base_name}" \
     DOCKER_TAG="${base_tag}" \
-    ./build.sh feature
+    ./build.sh "${NETBOX_REF}"
 )
 
 echo "==> built ${NETBOX_BASE_IMAGE} (netbox ${NETBOX_REF:0:9})"

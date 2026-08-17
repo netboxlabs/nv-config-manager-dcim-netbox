@@ -56,9 +56,9 @@ netbox:
   fullnameOverride: netbox
 
   image:
-    # Built by `make netbox-image`: NetBox at a pinned `feature` commit plus the
-    # NV Config Manager plugin and netbox-bgp. Not a published image -- 4.7 is
-    # unreleased and the plugin needs its GraphQL type extensions.
+    # Built by `make netbox-image`: NetBox 4.7.0-beta1 plus the NV Config Manager
+    # plugin and netbox-bgp. Not a published image -- no 4.7 image exists yet and
+    # the plugin needs its GraphQL type extensions.
     registry: ""
     repository: nv-config-manager-netbox
     tag: "0.1.0"

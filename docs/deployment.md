@@ -70,14 +70,20 @@ with.
 
 ## NetBox image
 
-`make netbox-image` builds NetBox from a pinned commit on the `feature` branch and
-layers on the plugin and `netbox-bgp`. The pins are in
-[`build/versions.env`](../build/versions.env).
+`make netbox-image` builds NetBox 4.7.0-beta1 and layers on the plugin and
+`netbox-bgp`. The pins are in [`build/versions.env`](../build/versions.env).
 
 This is temporary. The plugin needs a GraphQL feature that ships in NetBox 4.7,
-which is not released yet. Once the 4.7 beta is out, delete
+and no 4.7 image is published on ghcr.io or Docker Hub yet. Once one is, delete
 `build/netbox-image.sh` and `build/versions.env` and change the first line of
 `build/netbox.Dockerfile` to `FROM ghcr.io/netbox-community/netbox:v4.7.x`.
+
+NetBox is also on PyPI now (`netbox`, `4.7.0b1`). It is not used here;
+netbox-docker installs a source tree.
+
+`make version-check` asserts that the pinned ref's version sits inside the
+plugin's `min_version`/`max_version`, so bumping one without the other fails
+before a build starts rather than at the image's plugin-import assert.
 
 ## Doing it by hand
 

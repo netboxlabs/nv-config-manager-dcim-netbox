@@ -80,13 +80,24 @@ lint:
 	$(RUFF) check src/ tests/
 	$(RUFF) format --check src/ tests/
 
-# The chart ships its own netbox.image.tag and `nvcm-netbox up` leaves it alone,
-# so it has to match the version `make netbox-image` builds.
+# Two pairings that silently rot:
+#   chart netbox.image.tag == pyproject version (`nvcm-netbox up` leaves the tag
+#   alone), and NETBOX_VERSION within the plugin's min/max_version. The second is
+#   skipped when there is no plugin checkout at PLUGIN.
 version-check:
 	@chart_tag=$$(sed -n 's/^ *tag: "\(.*\)"/\1/p' deploy/netbox/values.yaml | head -1); \
 	if [ "$$chart_tag" != "$(VERSION)" ]; then \
 	  echo "deploy/netbox/values.yaml tag ($$chart_tag) != pyproject version ($(VERSION))"; \
 	  exit 1; \
+	fi
+	@init=$(PLUGIN)/netbox_nv_config_manager/__init__.py; \
+	if [ ! -f "$$init" ]; then \
+	  echo "version-check: no plugin checkout at $(PLUGIN), skipping the min_version pairing"; \
+	else \
+	  floor=$$(sed -n "s/^ *min_version *= *'\(.*\)'/\1/p" "$$init" | head -1); \
+	  ceil=$$(sed -n "s/^ *max_version *= *'\(.*\)'/\1/p" "$$init" | head -1); \
+	  NETBOX_VERSION='$(NETBOX_VERSION)' FLOOR="$$floor" CEIL="$$ceil" \
+	    $(PY) build/check-netbox-version.py; \
 	fi
 
 test test-netbox:
@@ -109,7 +120,7 @@ netbox-base:
 netbox-image: netbox-base
 	docker build $(PLATFORM_ARG) -f build/netbox.Dockerfile \
 	  --build-arg NETBOX_BASE_IMAGE=$(NETBOX_BASE_IMAGE) \
-	  --build-arg NETBOX_BGP_VERSION=$(NETBOX_BGP_VERSION) \
+	  --build-arg NETBOX_BGP_REF=$(NETBOX_BGP_REF) \
 	  --build-context plugin=$(PLUGIN) \
 	  -t $(NETBOX_IMAGE) .
 
