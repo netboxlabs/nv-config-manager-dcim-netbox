@@ -92,4 +92,5 @@ markers = [
     "events: change-event integration",
     "installer: deployment orchestration (nvcm-netbox)",
     "air: DSX Air simulation path (needs the `air` extra)",
+    "live: runs against a real NetBox (NVCM_LIVE_SERVER/TOKEN; scripts/live-netbox.sh)",
 ]

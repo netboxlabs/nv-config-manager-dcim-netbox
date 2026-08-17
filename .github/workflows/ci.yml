@@ -43,6 +43,25 @@ jobs:
             exit 1
           fi
 
+  # NVCM installs the provider by copying /plugin-wheels out of this image and
+  # running `pip install --no-index --find-links` in an init container. Nothing
+  # on that path fails loudly, so assert the contract here.
+  provider-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch DCIM SDK
+        run: |
+          git clone --depth 1 --branch zb/pluggable-dcim \
+            https://github.com/NVIDIA/nv-config-manager.git ../nv-config-manager
+      - name: Build
+        run: |
+          docker build --platform linux/amd64 \
+            --build-context sdk=../nv-config-manager/components/dcim \
+            -t nv-config-manager-dcim-netbox:ci .
+      - name: Offline /plugin-wheels contract
+        run: build/check-provider-image.sh nv-config-manager-dcim-netbox:ci linux/amd64
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -71,3 +90,101 @@ jobs:
           uv pip install pytest pytest-asyncio
       - name: Tests
         run: .venv/bin/pytest
+
+  # The provider against a real NetBox, which is the only place upstream schema
+  # drift shows up: the fixture suites cannot see a renamed GraphQL field or a
+  # changed custom-field shape. The 4.7 upgrade produced two such breaks.
+  #
+  # Needs the plugin, which lives in a private sibling repo, so this job is
+  # skipped unless PLUGIN_REPO_TOKEN is set (a token with read access to
+  # netboxlabs/netbox_nv_config_manager). GITHUB_TOKEN is scoped to this repo and
+  # cannot check it out.
+  live-netbox:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: netbox
+          POSTGRES_PASSWORD: netbox
+          POSTGRES_DB: netbox
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for the plugin-repo token
+        id: gate
+        run: |
+          if [ -n "${{ secrets.PLUGIN_REPO_TOKEN }}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::PLUGIN_REPO_TOKEN not set; skipping the live NetBox suite."
+          fi
+
+      - name: Checkout plugin
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: netboxlabs/netbox_nv_config_manager
+          token: ${{ secrets.PLUGIN_REPO_TOKEN }}
+          # actions/checkout refuses a path outside the workspace.
+          path: _plugin
+
+      # SDK and the topology blueprint both come from here.
+      - name: Fetch NVCM
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          git clone --depth 1 --branch zb/pluggable-dcim \
+            https://github.com/NVIDIA/nv-config-manager.git ../nv-config-manager
+
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.enabled == 'true'
+        with:
+          python-version: '3.13'
+
+      # NetBox from PyPI rather than a source build: it is the whole reason this
+      # job is cheap enough to run per-PR. Keep the pin in step with
+      # build/versions.env's NETBOX_VERSION.
+      - name: Install NetBox, plugin and provider
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          pip install 'netbox==4.7.0b1'
+          pip install "https://github.com/netbox-community/netbox-bgp/archive/refs/heads/0.20.0.tar.gz"
+          pip install -e _plugin
+          pip install ../nv-config-manager/components/dcim
+          pip install -e '.[installer]'
+          pip install pytest pytest-asyncio
+
+      - name: Stand up NetBox with the air_trial topology
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          scripts/live-netbox.sh "${RUNNER_TEMP}/netbox" \
+            ../nv-config-manager/development/mock_topology/context/air_trial
+
+      - name: Live suite
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          NVCM_LIVE_SERVER: http://localhost:8000
+          NVCM_LIVE_TOKEN: nbt_liveCItoken1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        run: pytest tests/live -v
+
+      - name: NetBox log
+        if: failure() && steps.gate.outputs.enabled == 'true'
+        run: tail -100 "${RUNNER_TEMP}/netbox/netbox.log" || true

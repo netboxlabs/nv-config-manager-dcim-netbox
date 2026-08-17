@@ -32,7 +32,7 @@ RUFF     := $(VENV)/bin/ruff
 TEMPLATE := $(VENV)/bin/template-cli
 
 .PHONY: help setup lint version-check test test-netbox discovery probe provider-config \
-        cache-query render-cli test-sdk test-templates check clean image \
+        cache-query render-cli test-sdk test-templates check clean image check-image \
         netbox-base netbox-image images kind-up kind-down topology airgapped airgapped-images \
         inventory reference ipam hosts dhcp ztp firmware state secrets render \
         spectrumx ib infiniband spx lifecycle events
@@ -110,6 +110,11 @@ check: lint version-check test
 # Requires Docker Buildx (bundled with modern Docker). Override IMAGE / NVCM.
 image:
 	docker build $(PLATFORM_ARG) --build-context sdk=$(NVCM)/components/dcim -t $(IMAGE) .
+
+# The offline /plugin-wheels contract NVCM's init container relies on. Defaults
+# to this host's architecture, matching what `make image` just built.
+check-image:
+	build/check-provider-image.sh $(IMAGE) $(if $(PLATFORM),$(PLATFORM),linux/$(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'))
 
 # NetBox + our plugin. netbox-base is a TEMPORARY step: it builds NetBox from a
 # pinned `feature` commit because 4.7 (which the plugin's GraphQL extensions
