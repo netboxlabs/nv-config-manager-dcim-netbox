@@ -183,8 +183,13 @@ jobs:
         env:
           NVCM_LIVE_SERVER: http://localhost:8000
           NVCM_LIVE_TOKEN: nbt_liveCItoken1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          # Where the `log` publisher writes envelopes; the mutation tests read
+          # them back from here instead of standing up a NATS broker.
+          NVCM_LIVE_EVENT_LOG: ${{ runner.temp }}/netbox/events.log
         run: pytest tests/live -v
 
-      - name: NetBox log
+      - name: Logs on failure
         if: failure() && steps.gate.outputs.enabled == 'true'
-        run: tail -100 "${RUNNER_TEMP}/netbox/netbox.log" || true
+        run: |
+          tail -100 "${RUNNER_TEMP}/netbox/netbox.log" || true
+          tail -50 "${RUNNER_TEMP}/netbox/events.log" || true

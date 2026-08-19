@@ -50,6 +50,28 @@ DATABASE = {
     'HOST': '${DB_HOST}', 'PORT': '${DB_PORT}', 'CONN_MAX_AGE': 300,
 }
 PLUGINS = ['netbox_nv_config_manager', 'netbox_bgp']
+# The `log` publisher writes each envelope as `nvcm-change <json>`, which is how
+# the mutation tests read them back without a NATS broker.
+PLUGINS_CONFIG = {'netbox_nv_config_manager': {'event_publisher': 'log'}}
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'nvcm_events': {
+            'class': 'logging.FileHandler',
+            'filename': '${instance}/events.log',
+            'formatter': 'plain',
+        },
+    },
+    'formatters': {'plain': {'format': '%(message)s'}},
+    'loggers': {
+        'netbox_nv_config_manager.events': {
+            'handlers': ['nvcm_events'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
+}
 REDIS = {
     'tasks': {'HOST': '${REDIS_HOST}', 'PORT': ${REDIS_PORT}, 'PASSWORD': '', 'DATABASE': 0, 'SSL': False},
     'caching': {'HOST': '${REDIS_HOST}', 'PORT': ${REDIS_PORT}, 'PASSWORD': '', 'DATABASE': 1, 'SSL': False},
@@ -83,6 +105,7 @@ for _ in $(seq 1 60); do
        -H "Authorization: Token ${NVCM_LIVE_TOKEN}"; then
     echo "==> ready: http://localhost:${NETBOX_PORT}"
     echo "    token: ${NVCM_LIVE_TOKEN}"
+    echo "    events: ${instance}/events.log"
     exit 0
   fi
   sleep 2
