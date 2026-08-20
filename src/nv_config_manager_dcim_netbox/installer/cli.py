@@ -109,7 +109,7 @@ def _config_options(
 
 
 def _existing_nats_password(config: dict) -> str:
-    """Return a natsPassword already in the config, so re-runs keep it.
+    """Return a NATS password already in the config, so re-runs keep it.
 
     Regenerating it would leave NVCM's NATS users and the deployed NetBox
     disagreeing until both are rolled.
@@ -118,8 +118,16 @@ def _existing_nats_password(config: dict) -> str:
     profile never carries a natsPassword, so passing it here always reads "" and
     every run mints a new one.
     """
-    k8s = ((config.get("secrets") or {}).get("k8s") or {}).get("nautobot") or {}
-    return (k8s.get("values") or {}).get("natsPassword") or ""
+    k8s = (config.get("secrets") or {}).get("k8s") or {}
+    nats_values = (k8s.get("nats") or {}).get("values") or {}
+    if password := nats_values.get("password"):
+        return password
+
+    # Configs written before NVCM separated NATS from the built-in provider use
+    # the legacy location. Keep reading it so an upgrade does not rotate a live
+    # broker password unexpectedly.
+    legacy_values = (k8s.get("nautobot") or {}).get("values") or {}
+    return legacy_values.get("natsPassword") or ""
 
 
 def _nats_password(config: dict, namespace: str) -> str:

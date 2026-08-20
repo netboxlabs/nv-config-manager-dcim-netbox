@@ -37,31 +37,39 @@ air_cli = pytest.importorskip(
     reason="the `air` extra is not installed",
     exc_type=ImportError,
 )
+air_installer_config = pytest.importorskip(
+    "nv_config_manager_installer.air_sim.installer_config",
+    reason="the `air` extra is not installed",
+    exc_type=ImportError,
+)
+air_orchestrator = pytest.importorskip(
+    "nv_config_manager_installer.air_sim.orchestrator",
+    reason="the `air` extra is not installed",
+    exc_type=ImportError,
+)
+netbox_air_orchestrator = pytest.importorskip(
+    "nv_config_manager_dcim_netbox.installer.air.orchestrator",
+    reason="the `air` extra is not installed",
+    exc_type=ImportError,
+)
 NetBoxSimConfig = air_config.NetBoxSimConfig
 NetBoxAirCallback = air_callback.NetBoxAirCallback
+build_content_jobs = air_installer_config.build_content_jobs
+build_template_plugins = air_installer_config.build_template_plugins
+SimOrchestrator = air_orchestrator.SimOrchestrator
+NetBoxSimOrchestrator = netbox_air_orchestrator.NetBoxSimOrchestrator
 
 
-# -- the mock-topology flag ----------------------------------------------------
+# -- independent fabric generation and DCIM population ------------------------
 
 
 def test_blueprint_still_builds_the_fabric_and_templates_without_the_dcim_job():
-    """`run_mock_topology_job` drives three things; only one is unwanted.
-
-    Clearing it outright left the orchestrator with no topology at all
-    ("topology_path is required when run_mock_topology_job is disabled") and
-    silently dropped the demo template plugin.
-    """
-    from nv_config_manager_installer.air_sim.installer_config import (
-        build_content_jobs,
-        build_template_plugins,
-    )
-
+    """NetBox uses the blueprint without registering Nautobot's population job."""
     cfg = NetBoxSimConfig(mock_blueprint="air_trial", deployment_name="demo")
-    air_cli._use_blueprint_without_the_dcim_job(cfg)
 
     # 1. The sim still gets a fabric to boot.
-    assert cfg.topology_path
-    design = yaml.safe_load(Path(cfg.topology_path).read_text())
+    topology_path = SimOrchestrator(cfg, _Recorder())._resolve_topology_path(cfg)
+    design = yaml.safe_load(Path(topology_path).read_text())
     assert design["devices"], "the generated site design has no devices"
 
     # 2. The job that would load it into a DCIM we do not deploy is gone.
@@ -76,16 +84,7 @@ def test_an_explicit_topology_is_not_overwritten():
     cfg = NetBoxSimConfig(
         mock_blueprint="air_trial", deployment_name="demo", topology_path="/my/topology.yaml"
     )
-    air_cli._use_blueprint_without_the_dcim_job(cfg)
-    assert cfg.topology_path == "/my/topology.yaml"
-
-
-def test_nothing_to_preserve_when_the_job_is_already_off():
-    cfg = NetBoxSimConfig(mock_blueprint="air_trial", deployment_name="demo")
-    cfg.run_mock_topology_job = False
-    air_cli._use_blueprint_without_the_dcim_job(cfg)
-    assert cfg.topology_path == ""
-    assert cfg.template_plugin_paths == []
+    assert SimOrchestrator(cfg, _Recorder())._resolve_topology_path(cfg) == "/my/topology.yaml"
 
 
 # -- config -------------------------------------------------------------------
@@ -167,6 +166,61 @@ def test_apply_dcim_leaves_the_generators_own_fields_alone():
     assert patched["cluster"] == {"namespace": "nv-config-manager", "size": "medium"}
     assert patched["sites"] == [{"name": "air-trial"}]
     assert patched["services"]["render"] is True
+
+
+class _FakeProviderDeployment:
+    api_token = "nbt_SECRETKEY123." + "B" * 40
+    nats_password = "NatsProbePassword123"
+
+    def __init__(self) -> None:
+        self._manager = None
+        self.calls: list[tuple] = []
+
+    def bring_up_netbox(self, host, port, *, patch_install_config=True):
+        self.calls.append(("pre", host, port, patch_install_config))
+
+    def wait_for_intended_configs(self, host, port, expected_total):
+        self.calls.append(("wait", host, port, expected_total))
+
+    def publish_route(self, host, port):
+        self.calls.append(("post", host, port))
+
+
+def test_netbox_orchestrator_configures_provider_before_upload():
+    provider = _FakeProviderDeployment()
+    cfg = NetBoxSimConfig(mock_blueprint="air_trial")
+    orchestrator = NetBoxSimOrchestrator(
+        cfg,
+        _Recorder(),
+        provider_deployment=provider,
+    )
+
+    generated = yaml.safe_load(
+        orchestrator._generate_install_yaml(cfg, "air-trial", ["192.0.2.0/24"])
+    )
+
+    assert generated["dcim"]["provider"] == "netbox"
+    assert generated["dcim"]["provider_packages"][0]["image"] == (cfg.dcim_provider_package_image)
+    assert generated["secrets"]["k8s"]["nats"]["values"]["password"] == (provider.nats_password)
+    assert generated["services"]["nautobot"] is False
+
+
+def test_netbox_orchestrator_owns_provider_lifecycle():
+    provider = _FakeProviderDeployment()
+    cfg = NetBoxSimConfig()
+    orchestrator = NetBoxSimOrchestrator(cfg, _Recorder(), provider_deployment=provider)
+    manager = object()
+
+    orchestrator._run_provider_pre_deploy(manager, "worker.example", 17117)
+    orchestrator._wait_for_provider_configs(manager, "worker.example", 17117, 7)
+    orchestrator._run_provider_post_deploy(manager, "worker.example", 17117)
+
+    assert provider.calls == [
+        ("pre", "worker.example", 17117, False),
+        ("wait", "worker.example", 17117, 7),
+        ("post", "worker.example", 17117),
+    ]
+    assert orchestrator._provider_gateway_hostnames(cfg) == (cfg.netbox_hostname(),)
 
 
 # -- the bring-up sequence -----------------------------------------------------

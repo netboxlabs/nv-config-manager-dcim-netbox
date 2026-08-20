@@ -8,6 +8,7 @@ covered by the end-to-end steps in docs/deployment.md instead.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -25,7 +26,9 @@ from nv_config_manager_dcim_netbox.installer.tokens import (
     TOKEN_KEY_LENGTH,
     TOKEN_SECRET_LENGTH,
     generate_api_token,
+    generate_nats_password,
     is_valid_api_token,
+    is_valid_nats_password,
 )
 
 pytestmark = pytest.mark.installer
@@ -1135,43 +1138,32 @@ def test_the_shipped_profile_agrees_with_apply_dcim():
 
 
 def test_nats_password_is_seeded_where_nvcm_reads_it():
-    """NVCM generates a NATS password unless the config supplies one, at
-    `secrets.k8s.nautobot.values.natsPassword` (installer/secrets.py:125).
+    """NVCM generates a NATS password unless the config supplies one.
 
     Supplying it is what lets NetBox be installed once, with the password
-    already set, instead of upgraded a second time to switch its publisher on.
-    The key lives under `nautobot` even for an external DCIM, and that group
-    must be enabled or their `_k8s_val` returns empty and silently generates.
+    already set, instead of upgraded to switch its publisher on. NATS has its
+    own secret group independently of the selected DCIM provider.
     """
-    from nv_config_manager_dcim_netbox.installer.tokens import (
-        generate_nats_password,
-        is_valid_nats_password,
-    )
-
     password = generate_nats_password()
     assert is_valid_nats_password(password)
 
     patched = cfg.apply_dcim(
         {}, cfg.ConfigOptions(api_token=generate_api_token(), nats_password=password)
     )
-    group = patched["secrets"]["k8s"]["nautobot"]
+    group = patched["secrets"]["k8s"]["nats"]
     assert group["enabled"] is True
-    assert group["values"]["natsPassword"] == password
+    assert group["values"]["password"] == password
 
 
 def test_nats_password_matches_the_alphabet_nvcm_enforces():
     # It is interpolated unquoted into NVCM's NATS config, so their validator
     # requires [A-Za-z][A-Za-z0-9]* and at least 16 characters.
-    import re
-
-    from nv_config_manager_dcim_netbox.installer.tokens import generate_nats_password
-
     for _ in range(20):
         assert re.fullmatch(r"[A-Za-z][A-Za-z0-9]{15,}", generate_nats_password())
 
 
 def _written_nats_password(path: Path) -> str:
-    return yaml.safe_load(path.read_text())["secrets"]["k8s"]["nautobot"]["values"]["natsPassword"]
+    return yaml.safe_load(path.read_text())["secrets"]["k8s"]["nats"]["values"]["password"]
 
 
 def test_config_command_keeps_a_nats_password_already_present(tmp_path):
@@ -1217,8 +1209,8 @@ def test_a_deployed_nats_password_beats_the_one_in_the_config(tmp_path, monkeypa
     result = CliRunner().invoke(main, ["config", "-o", str(out)])
     assert result.exit_code == 0, result.output
 
-    values = yaml.safe_load(out.read_text())["secrets"]["k8s"]["nautobot"]["values"]
-    assert values["natsPassword"] == "DeployedPassword123456"
+    values = yaml.safe_load(out.read_text())["secrets"]["k8s"]["nats"]["values"]
+    assert values["password"] == "DeployedPassword123456"
 
 
 def test_a_deployed_nats_password_nvcm_would_reject_fails_loudly(tmp_path, monkeypatch):

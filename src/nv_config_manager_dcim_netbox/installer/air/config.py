@@ -29,6 +29,12 @@ class NetBoxSimConfig(SimConfig):
     # SimConfig's `main` default the box gets a tree with no DCIM support at all.
     config_manager_ref: str = base_config.NVCM_BRANCH
 
+    # Build the simulated fabric from the shared blueprint, but do not register
+    # the bundled Nautobot population job. NetBox loads the blueprint through
+    # its own management command during provider deployment.
+    generate_fabric_from_mock_context: bool | None = True
+    run_mock_topology_job: bool = False
+
     dcim_provider: str = base_config.PROVIDER_NAME
 
     # Built by `make images`; neither image exists in a registry, so both are

@@ -121,7 +121,7 @@ release changes, and `nvcm-netbox up` does this for you.
 
 `$PW` is a NATS password you choose, at least 16 characters matching
 `[A-Za-z][A-Za-z0-9]*`. It goes into the install config at
-`secrets.k8s.nautobot.values.natsPassword`, which `nvcm-netbox config` fills in,
+`secrets.k8s.nats.values.password`, which `nvcm-netbox config` fills in,
 and NVCM uses it rather than generating its own. That is what lets NetBox be
 installed once with the publisher already configured.
 
