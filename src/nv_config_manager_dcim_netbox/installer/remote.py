@@ -133,9 +133,28 @@ class SshRunner:
                 return run(remote, stdin=stdin)
             except CommandError as exc:
                 if exc.returncode != _SSH_FAILURE or attempt == _SSH_ATTEMPTS:
-                    raise
+                    # `from None` so the unredacted original is not printed as
+                    # this exception's context.
+                    raise self._redacted(exc) from None
                 time.sleep(_SSH_BACKOFF * attempt)
         raise AssertionError("unreachable")
+
+    def _redacted(self, exc: CommandError) -> CommandError:
+        """Return *exc* with the box's SSH password removed.
+
+        NVCM's ``_ssh_cmd`` builds ``sshpass -p <password> ssh ...``, and
+        ``CommandError`` renders argv into its message -- which callers log. So
+        every failed remote command printed the sim box's password to the
+        terminal, and into any CI output capturing it.
+        """
+        secret = getattr(self._manager, "ssh_password", "") or ""
+        if not secret:
+            return exc
+
+        def scrub(text: str) -> str:
+            return text.replace(secret, "<redacted>")
+
+        return CommandError([scrub(a) for a in exc.argv], exc.returncode, scrub(exc.output))
 
     def run(self, argv: list[str], *, stdin: str | None = None) -> str:
         return self._run_retrying(argv, stdin)

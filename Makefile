@@ -33,7 +33,7 @@ TEMPLATE := $(VENV)/bin/template-cli
 
 .PHONY: help setup lint version-check test test-netbox discovery probe provider-config \
         cache-query render-cli test-sdk test-templates check clean image check-image \
-        netbox-base netbox-image images kind-up kind-down topology airgapped airgapped-images \
+        netbox-base netbox-image images kind-up kind-down topology tunnel airgapped airgapped-images \
         inventory reference ipam hosts dhcp ztp firmware state secrets render \
         spectrumx ib infiniband spx lifecycle events
 
@@ -54,6 +54,7 @@ help:
 	@echo "kind-up         create the Kind cluster and deploy NetBox + NVCM"
 	@echo "kind-down       delete the Kind cluster"
 	@echo "topology        load mock topology data into NetBox (BLUEPRINT=air_trial)"
+	@echo "tunnel          SOCKS tunnel to a DSX Air sim (PRINT=1, BROWSER=1)"
 	@echo "airgapped       build an offline bundle carrying NVCM + NetBox"
 	@echo "clean           remove venv and caches"
 	@echo ""
@@ -150,6 +151,16 @@ BLUEPRINT ?= air_trial
 
 topology:
 	NVCM_REPO=$(NVCM) $(VENV)/bin/nvcm-netbox netbox load-topology --blueprint $(BLUEPRINT)
+
+# --- DSX Air ---
+# A SOCKS tunnel to the running sim, which is the only way to reach its
+# `*.nvcm.air` hostnames: they resolve on the box, not here. Takes no arguments --
+# the sim's SSH endpoint is looked up from simulation_name in the sim config, and
+# the password comes from the same file. `make tunnel PRINT=1` shows the command
+# instead, `BROWSER=1` also opens one.
+tunnel:
+	$(VENV)/bin/nvcm-netbox air tunnel $(if $(PRINT),--print,) $(if $(BROWSER),--browser,) \
+	  $(if $(SOCKS_PORT),--socks-port $(SOCKS_PORT),)
 
 # --- air-gapped ---
 airgapped-images:

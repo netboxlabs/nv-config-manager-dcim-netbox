@@ -93,11 +93,45 @@ on the NVCM box.
 
 ## Accessing it
 
-Exactly as in NVIDIA's
+Everything on the sim is reached through **one SOCKS tunnel** — not one per
+service. Open it with:
+
+```bash
+make tunnel                    # or: .venv/bin/nvcm-netbox air tunnel
+```
+
+It takes no arguments and needs no secrets on the command line. AIR allocates the
+box's SSH host and port per simulation, so they change every run and cannot be
+written down — but the sim config already names the simulation, which AIR can be
+asked about, and already holds `oob_ssh_password`. The password is handed to ssh
+down a pipe, so it never reaches a command line, a file, or the terminal.
+
+| Flag | `make` | Effect |
+| --- | --- | --- |
+| `--print` | `PRINT=1` | Print the command instead of opening the tunnel (prompting form, no password in it) |
+| `--browser` | `BROWSER=1` | Also launch a Chromium-family browser through the tunnel |
+| `--socks-port` | `SOCKS_PORT=` | Move it off 8080, which is a busy port locally |
+| `--url` | — | What `--browser` opens. Defaults to NetBox's |
+
+Three things about the tunnel are worth knowing, because they are what goes wrong:
+
+- **DNS must resolve remotely.** `nvcm.air` and `netbox.nvcm.air` exist only in
+  the *box's* `/etc/hosts` — NVCM writes its own services there and `air up` adds
+  NetBox. A SOCKS proxy resolves names at the far end, which is why this works at
+  all. Chrome does that for `socks5://` by default; in Firefox you must enable
+  `network.proxy.socks_remote_dns`, or the names will not resolve.
+- **The certificate is internal.** The Gateway's cert is issued by the sim's own
+  CA, so a browser will refuse it until told not to (`--browser` passes
+  `--ignore-certificate-errors`, scoped to a throwaway profile).
+- **`make port-forward` in NVCM's repo is a different thing.** It is
+  `kubectl port-forward` against your *current kubeconfig* — a local Kind
+  cluster — and it forwards `svc/nautobot`, which this deployment does not have
+  (NetBox replaces the bundled DCIM). It cannot reach a sim.
+
+With the tunnel up, the service URLs work as in NVIDIA's
 [DSX Air simulation user guide](https://docs.nvidia.com/switch-infrastructure/config-manager/getting-started/dsx-air-simulation-user-guide),
-because the sim is theirs: open the SOCKS tunnel printed on the Access panel,
-point a browser at it, then use the service URLs. NetBox takes the place of the
-bundled DCIM and sits alongside the rest:
+because the sim is theirs. NetBox takes the place of the bundled DCIM and sits
+alongside the rest:
 
 | | |
 | --- | --- |
@@ -110,6 +144,14 @@ bundled DCIM and sits alongside the rest:
 `air up` publishes NetBox on the sim's Gateway and adds `netbox.nvcm.air` to the
 box's `/etc/hosts`, alongside the entries NVCM writes for its own services, so
 the name resolves through the same tunnel with nothing extra to configure.
+
+The tunnel also works for the API, which is handy for the checks below — `socks5h`
+rather than `socks5`, so curl resolves the name remotely too:
+
+```bash
+curl -k --proxy socks5h://localhost:8080 \
+  -H "Authorization: Token $TOKEN" https://netbox.nvcm.air/api/dcim/devices/?limit=1
+```
 
 The NetBox admin password and API token are in the `netbox-superuser` secret:
 

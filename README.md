@@ -220,15 +220,23 @@ make setup-air         # the above plus the DSX Air extra
 make images            # build both local images
 make image             # the provider wheelhouse only
 make netbox-image      # NetBox with the plugin only
+make check-image       # assert the provider image's offline /plugin-wheels contract
 make kind-up           # create a Kind cluster and deploy NetBox + NVCM
 make kind-down         # delete the Kind cluster
+make topology          # load mock topology data into NetBox (BLUEPRINT=air_trial)
+make tunnel            # SOCKS tunnel to a DSX Air sim (PRINT=1, BROWSER=1)
 make airgapped         # build an offline bundle carrying NVCM + NetBox
 make airgapped-images  # list the images that bundle needs
-make check             # lint + unit tests
+make check             # lint + version-check + unit tests
 make lint              # ruff check + format check
+make version-check     # chart tag == package version, NetBox pin within the plugin's range
 make test              # unit tests
 make clean             # remove venv and caches
 ```
+
+`make setup` and `make setup-air` create the virtualenv, so they only run on a
+clean checkout — `uv venv` refuses an existing `.venv`. Delete it first to
+re-run them.
 
 `make help` lists these plus the per-area test suites.
 
