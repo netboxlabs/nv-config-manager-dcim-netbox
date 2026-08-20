@@ -62,7 +62,7 @@ class ConfigOptions:
     size: str = "small"
     provider_image: str = PROVIDER_IMAGE
     netbox_server: str = "http://netbox"
-    netbox_public_url: str = "http://127.0.0.1:8080"
+    netbox_public_url: str = "https://netbox.config-manager.local"
     # Supplied rather than left to NVCM's deployer to generate, so NetBox can be
     # installed once with it instead of rolled again afterwards.
     nats_password: str = ""

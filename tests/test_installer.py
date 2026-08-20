@@ -99,9 +99,12 @@ def test_profile_is_a_valid_external_netbox_config():
     # The whole point of the profile: NetBox as the provider, plus a
     # provider_packages block (which the NVCM TUI has no widget for, so it cannot
     # be authored there).
+    assert profile["cluster"]["mock_devices"] is True
     assert profile["services"]["nautobot"] is False
     assert profile["dcim"]["provider_packages"][0]["name"] == "netbox"
+    assert profile["dcim"]["public_url"] == "https://netbox.config-manager.local"
     assert profile["secrets"]["k8s"]["dcim"]["values"]["token"] == cfg.TOKEN_PLACEHOLDER
+    assert profile["sites"] == [{"name": "TRIAL01 - air_trial"}]
     assert profile["content"]["template_plugins"] == [
         {"path": "development/air_sim/template_plugins/superpod-template-plugin"}
     ]
@@ -137,6 +140,14 @@ def test_event_subject_must_match_the_plugins_publisher():
     # if these two drift, NetBox publishes and nothing consumes.
     chart_values = yaml.safe_load((_CHART / "values.yaml").read_text())
     assert cfg.event_subject(cfg.load_profile()) == chart_values["nvcm"]["eventSubject"]
+
+
+def test_local_postgresql_has_render_batch_headroom():
+    chart_values = yaml.safe_load((_CHART / "values.yaml").read_text())
+
+    resources = chart_values["netbox"]["postgresql"]["primary"]["resources"]
+    assert resources["requests"]["memory"] == "256Mi"
+    assert resources["limits"]["memory"] == "1Gi"
 
 
 def test_written_config_is_owner_only(tmp_path):
@@ -668,6 +679,10 @@ def test_provider_image_tag_tracks_the_package_version():
     # Hardcoded, a version bump left the installer asking for an unbuilt tag.
     assert cfg.PROVIDER_IMAGE.endswith(f":{cfg.IMAGE_TAG}")
     assert cfg.ConfigOptions(api_token="nbt_x.y").provider_image == cfg.PROVIDER_IMAGE
+    assert (
+        cfg.ConfigOptions(api_token="nbt_x.y").netbox_public_url
+        == "https://netbox.config-manager.local"
+    )
 
 
 # -- locating the NVCM checkout ------------------------------------------------

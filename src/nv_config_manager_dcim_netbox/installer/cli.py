@@ -121,7 +121,7 @@ def _config_options(
     """Resolve the installer config options `config` and `up` both write.
 
     Shared so the two cannot drift: `up` had its own copy and omitted the
-    public_url fallback, resetting a profile's value to the default port-forward.
+    public_url fallback, resetting a profile's value to the default gateway route.
     """
     dcim = base.get("dcim", {})
     defaults = cfg.ConfigOptions(api_token=api_token)
