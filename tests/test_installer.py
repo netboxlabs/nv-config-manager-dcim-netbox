@@ -102,6 +102,9 @@ def test_profile_is_a_valid_external_netbox_config():
     assert profile["services"]["nautobot"] is False
     assert profile["dcim"]["provider_packages"][0]["name"] == "netbox"
     assert profile["secrets"]["k8s"]["dcim"]["values"]["token"] == cfg.TOKEN_PLACEHOLDER
+    assert profile["content"]["template_plugins"] == [
+        {"path": "development/air_sim/template_plugins/superpod-template-plugin"}
+    ]
 
 
 def test_apply_options_sets_every_computed_field():

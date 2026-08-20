@@ -98,7 +98,8 @@ dcim:
 
 content:
   jobs: []
-  template_plugins: []
+  template_plugins:
+    - path: development/air_sim/template_plugins/superpod-template-plugin
 
 services:
   render: true

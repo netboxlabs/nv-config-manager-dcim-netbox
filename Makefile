@@ -31,7 +31,7 @@ PYTEST   := $(VENV)/bin/pytest
 RUFF     := $(VENV)/bin/ruff
 TEMPLATE := $(VENV)/bin/template-cli
 
-.PHONY: help setup setup-air lint version-check test test-netbox discovery probe provider-config \
+.PHONY: help setup setup-air lint version-check test test-netbox test-integration discovery probe provider-config \
         cache-query render-cli test-sdk test-templates check clean image check-image \
         netbox-base netbox-image images kind-up kind-down topology airgapped airgapped-images \
         inventory reference ipam hosts dhcp ztp firmware state secrets render \
@@ -41,6 +41,7 @@ help:
 	@echo "setup           create venv + install SDK, templates, provider, dev tools"
 	@echo "lint            ruff check + format check"
 	@echo "test            run this provider's unit tests (alias: test-netbox)"
+	@echo "test-integration run NVCM's shared cluster suite with the NetBox adapter"
 	@echo "discovery       confirm the 'netbox' provider is discovered"
 	@echo "probe           call get_device_metadata against SERVER/TOKEN/DEVICE_ID"
 	@echo "cache-query     template-cli: query provider for render data -> rd.json"
@@ -102,6 +103,21 @@ version-check:
 
 test test-netbox:
 	$(PYTEST) -q
+
+# The common suite remains owned by NVCM. This provider contributes only its
+# lifecycle-inspection adapter and selects it through the public pytest option.
+# INTEGRATION_ARGS can add --use-port-forward, -k, or environment-specific flags.
+INTEGRATION_ARGS ?=
+INTEGRATION_TESTS ?= $(NVCM)/src/tests/integration/
+
+test-integration:
+	uv run --project $(NVCM) \
+	  --with-editable $(NVCM)/components/dcim --with-editable . pytest \
+	  $(INTEGRATION_TESTS) -v --timeout=900 \
+	  --dcim-provider netbox \
+	  --dcim-integration-adapter \
+	  nv_config_manager_dcim_netbox.integration_adapter:NetBoxIntegrationAdapter \
+	  $(INTEGRATION_ARGS)
 
 check: lint version-check test
 

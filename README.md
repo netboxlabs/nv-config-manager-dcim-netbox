@@ -302,6 +302,29 @@ That publishes a synthetic change event and confirms the DCIM consumer
 dispatches a render. It reports `1 queued, 0 failed` on a deployment with
 topology loaded; without one, NetBox rejects the device and it says so.
 
+The provider also runs NVCM's shared live-cluster integration suite through its
+NetBox lifecycle adapter. The common assertions remain in the NVCM repository;
+only provider-owned inspection of device flags, intended configuration, status,
+and backup records lives here:
+
+```bash
+make test-integration INTEGRATION_ARGS=--use-port-forward
+```
+
+Use `INTEGRATION_TESTS` to select a module or node while developing, for example:
+
+```bash
+make test-integration \
+  INTEGRATION_TESTS=../nv-config-manager/src/tests/integration/test_render.py \
+  INTEGRATION_ARGS=--use-port-forward
+```
+
+Run `make topology` after `make kind-up` before the shared suite. The local
+installer profile includes the matching reference template plugin so render,
+ZTP, backup, and diagnostics assertions exercise the same mock fabric.
+Nautobot-only event and RBAC modules are marked and skipped automatically during
+a NetBox run.
+
 The DSX Air tests are skipped unless the `air` extra is installed, since it
 pulls NVCM's installer from your checkout:
 
