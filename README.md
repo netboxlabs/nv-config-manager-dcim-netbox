@@ -212,6 +212,10 @@ kubectl get secret netbox-superuser -n nv-config-manager -o jsonpath='{.data.api
 The API token is the one NVCM authenticates with, so both sides hold the same
 value. Pass `--token` to `up` to choose it yourself.
 
+A login is required to reach anything: the chart sets `netbox.loginRequired: true`
+rather than taking the upstream default of unauthenticated read-only access, which
+NetBox 5.0 removes anyway.
+
 ## Makefile Commands
 
 ```bash

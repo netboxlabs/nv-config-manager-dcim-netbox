@@ -202,6 +202,10 @@ class BaseNetBoxClient:
         self._extra_headers = headers
         self._timeout = timeout
         self._session_obj: aiohttp.ClientSession | None = None
+        # Reference data read at most once per client. See
+        # NetBoxInventoryMixin._known_platform_slugs for why platforms in
+        # particular have to be checked before they are used as a filter.
+        self._platform_slugs: set[str] | None = None
 
     @classmethod
     def from_settings(cls, settings: ProviderSettings) -> Self:

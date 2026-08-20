@@ -95,6 +95,25 @@ netbox:
         secretName: nvcm-netbox-publisher
         optional: false
 
+  # Require a login for the UI and API. The upstream chart defaults this to false
+  # (unauthenticated read-only access), which NetBox 4.7 warns about at startup and
+  # NetBox 5.0 removes outright -- unauthenticated access stops being supported, so
+  # true is the setting this deployment ends up on either way.
+  #
+  # It does NOT silence the deprecation warning, and flipping it back will not
+  # either: NetBox warns both ways, and the chart renders LOGIN_REQUIRED
+  # unconditionally (templates/configmap.yaml, unlike MAINTENANCE_MODE two lines
+  # below it), so `hasattr(configuration, 'LOGIN_REQUIRED')` is always true.
+  #
+  #     if not LOGIN_REQUIRED:  warn("Unauthenticated access ... no longer supported")
+  #     elif hasattr(...):      warn("This parameter can be removed ...")
+  #
+  # We take the second, benign warning. Removing it needs an upstream chart change.
+  #
+  # Safe for everything this deployment does: NVCM authenticates with the API
+  # token, and the readiness and startup probes hit /login/, which stays public.
+  loginRequired: true
+
   superuser:
     name: admin
     email: admin@example.com

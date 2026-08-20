@@ -578,6 +578,15 @@ def test_chart_renders_and_wires_the_publisher():
     # Stable names the CLI and the installer profile both hardcode.
     assert "\n  name: netbox\n" in rendered
 
+    # Authentication required. The upstream chart defaults this off, NetBox 4.7
+    # warns about it and 5.0 drops unauthenticated access entirely.
+    #
+    # Pinned because the obvious reason to flip it back -- silencing the startup
+    # FutureWarning -- does not work: NetBox warns either way, since the chart
+    # renders LOGIN_REQUIRED unconditionally. Turning it off buys the *louder*
+    # warning and an open instance. See deploy/netbox/values.yaml.
+    assert "LOGIN_REQUIRED: true" in rendered
+
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
 @pytest.mark.skipif(not (_CHART / "charts").is_dir(), reason="chart deps not fetched")
