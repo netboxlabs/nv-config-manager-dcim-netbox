@@ -31,7 +31,7 @@ PYTEST   := $(VENV)/bin/pytest
 RUFF     := $(VENV)/bin/ruff
 TEMPLATE := $(VENV)/bin/template-cli
 
-.PHONY: help setup lint version-check test test-netbox discovery probe provider-config \
+.PHONY: help setup setup-air lint version-check test test-netbox discovery probe provider-config \
         cache-query render-cli test-sdk test-templates check clean image check-image \
         netbox-base netbox-image images kind-up kind-down topology airgapped airgapped-images \
         inventory reference ipam hosts dhcp ztp firmware state secrets render \
@@ -67,13 +67,13 @@ setup:
 	uv pip install --python $(PY) \
 	  $(NVCM)/components/dcim \
 	  $(NVCM)/components/network-templates \
+	  -e $(NVCM)/installer \
 	  -e ".[installer]" pytest pytest-asyncio ruff
 
-# Adds the DSX Air path. The installer is installed from the NVCM checkout
-# (which `nvcm-netbox air` needs regardless, for the chart and the blueprints)
-# rather than from a git ref, so a force-push cannot orphan the pin.
+# Compatibility alias retained for the documented DSX Air setup command. The
+# common setup now installs NVCM's installer because both deployment paths derive
+# from it.
 setup-air: setup
-	uv pip install --python $(PY) -e $(NVCM)/installer
 
 # --- Tier 0: lint + unit tests ---
 lint:

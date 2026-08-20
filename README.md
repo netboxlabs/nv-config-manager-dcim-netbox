@@ -21,7 +21,7 @@ with `nvcm-netbox`, which:
 
 - deploys NetBox, with the plugin and the fabric models, into the same cluster
 - creates the API token NetBox and NVCM must share
-- runs NVCM's installer with NetBox set as the DCIM provider
+- extends NVCM's installer lifecycle to deploy both NVCM and NetBox in one pipeline
 - connects NetBox's change events to NVCM's event bus
 - checks that a change in NetBox reaches the render service
 
@@ -216,7 +216,7 @@ value. Pass `--token` to `up` to choose it yourself.
 
 ```bash
 make setup             # venv + SDK, templates, provider, dev tools
-make setup-air         # the above plus the DSX Air extra
+make setup-air         # compatibility alias for setup, used by the Air docs
 make images            # build both local images
 make image             # the provider wheelhouse only
 make netbox-image      # NetBox with the plugin only

@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import click
@@ -197,33 +198,6 @@ def test_nvcm_installer_runs_from_their_checkout_not_ours():
     assert argv[argv.index("--directory") + 1] == "/tmp/nvcm"
 
 
-def test_up_passes_an_absolute_config_path_to_their_installer(monkeypatch, tmp_path):
-    # The path is relative by default and the subprocess now runs from a
-    # different directory, so a relative one would resolve inside their tree.
-    seen: list[list[str]] = []
-    monkeypatch.setattr(cluster, "kind_cluster_exists", lambda name: True)
-    monkeypatch.setattr(cluster, "helm_dependency_build", lambda chart: None)
-    monkeypatch.setattr(cluster, "pending_release_status", lambda r, ns, runner=None: None)
-    monkeypatch.setattr(cluster, "orphaned_data_volumes", lambda r, ns, runner=None: [])
-    monkeypatch.setattr(cluster, "install_netbox", lambda *a, **k: None)
-    monkeypatch.setattr(cluster, "wait_for_netbox", lambda *a, **k: None)
-    monkeypatch.setattr(cluster, "run_nvcm_init", lambda *a, **k: "")
-    monkeypatch.setattr(cluster, "read_nats_password", lambda *a, **k: "")
-    monkeypatch.setattr(cli, "stream", lambda argv, cwd=None: seen.append(list(argv)))
-
-    with CliRunner().isolated_filesystem(temp_dir=tmp_path):
-        result = CliRunner().invoke(
-            cli.main,
-            ["up", "--nvcm-repo", str(_nvcm_stub()), "--no-kind-load"],
-        )
-    # The run stops at the last step (nothing published a NATS secret), which is
-    # past both calls this test is about.
-    assert len(seen) == 2, result.output
-    for argv in seen:
-        cfg_arg = argv[-1] if argv[-2] == "validate" else argv[argv.index("deploy") + 1]
-        assert Path(cfg_arg).is_absolute(), cfg_arg
-
-
 # -- parity with NVCM's own command surface -----------------------------------
 
 
@@ -382,39 +356,56 @@ def test_netbox_up_stops_before_nvcm(monkeypatch, tmp_path):
 
 
 def _up_with_cluster_mocked(monkeypatch, *, kind_exists=True):
-    """Stub every cluster call `up` makes. Returns the list NVCM's argv lands in."""
-    seen: list[list[str]] = []
+    """Stub the cluster calls made before the combined deployer takes over."""
     monkeypatch.setattr(cluster, "kind_cluster_exists", lambda name: kind_exists)
     monkeypatch.setattr(cluster, "helm_dependency_build", lambda chart: None)
-    monkeypatch.setattr(cluster, "pending_release_status", lambda r, ns, runner=None: None)
-    monkeypatch.setattr(cluster, "orphaned_data_volumes", lambda r, ns, runner=None: [])
-    monkeypatch.setattr(cluster, "install_netbox", lambda *a, **k: None)
-    monkeypatch.setattr(cluster, "wait_for_netbox", lambda *a, **k: None)
-    monkeypatch.setattr(cluster, "run_nvcm_init", lambda *a, **k: "")
-    monkeypatch.setattr(cli, "stream", lambda argv, cwd=None: seen.append(list(argv)))
-    return seen
+    monkeypatch.setattr(cluster, "pending_release_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cluster, "orphaned_data_volumes", lambda *args, **kwargs: [])
+    monkeypatch.setattr(cluster, "install_netbox", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cluster, "wait_for_netbox", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cluster, "run_nvcm_init", lambda *args, **kwargs: "")
+    monkeypatch.setattr(cli.NetBoxDeployer, "run", lambda self: True)
 
 
-def test_up_publishes_the_route_only_after_nvcm_has_deployed(monkeypatch, tmp_path):
-    """The HTTPRoute cannot render until the Gateway API CRDs exist, and those
-    arrive with NVCM's deploy -- which runs after NetBox, because NetBox owns the
-    API token NVCM authenticates with.
+def test_up_uses_the_inherited_deployer_with_provider_settings(monkeypatch, tmp_path):
+    captured = {}
+    _up_with_cluster_mocked(monkeypatch)
+    repo = _nvcm_stub()
 
-    So `up` has to upgrade the release once more at the end. Without it the route
-    is skipped on a first install and nothing ever re-renders it: NetBox's
-    hostname silently does not resolve until someone upgrades the release by hand.
-    """
-    order: list[str] = []
-    seen = _up_with_cluster_mocked(monkeypatch)
-    monkeypatch.setattr(
-        cli, "stream", lambda argv, cwd=None: (seen.append(list(argv)), order.append("nvcm"))
+    class RecordingDeployer:
+        def __init__(self, config, options, netbox, callback):
+            captured.update(config=config, options=options, netbox=netbox, callback=callback)
+
+        def run(self):
+            return True
+
+    monkeypatch.setattr(cli, "NetBoxDeployer", RecordingDeployer)
+
+    result = CliRunner().invoke(
+        cli.main,
+        [
+            "up",
+            "--no-kind-load",
+            "--skip-verify",
+            "--config-out",
+            str(tmp_path / "install.yaml"),
+            "--nvcm-repo",
+            str(repo),
+        ],
     )
-    monkeypatch.setattr(
-        cluster,
-        "publish_netbox_route",
-        lambda chart, **k: order.append("route"),
-    )
-    monkeypatch.setattr(cluster, "netbox_route_exists", lambda ns, runner=None: True)
+    assert result.exit_code == 0, result.output
+    assert captured["config"].dcim.provider == "netbox"
+    assert captured["config"].images.source.value == "local"
+    assert captured["options"].project_root == repo
+    assert captured["options"].load_kind is False
+    assert captured["netbox"].chart == _CHART.resolve()
+    assert captured["netbox"].image_repository == "nv-config-manager-netbox"
+    assert "[4/4]" in result.output
+
+
+def test_up_reports_an_inherited_deployer_failure(monkeypatch, tmp_path):
+    _up_with_cluster_mocked(monkeypatch)
+    monkeypatch.setattr(cli.NetBoxDeployer, "run", lambda self: False)
 
     result = CliRunner().invoke(
         cli.main,
@@ -428,37 +419,8 @@ def test_up_publishes_the_route_only_after_nvcm_has_deployed(monkeypatch, tmp_pa
             str(_nvcm_stub()),
         ],
     )
-    assert result.exit_code == 0, result.output
-    # Deploy (validate + deploy) first, then the route -- the other way round
-    # renders nothing, which is the bug this guards.
-    assert order == ["nvcm", "nvcm", "route"], order
-    assert "[10/10]" in result.output
-
-
-def test_up_warns_when_the_route_did_not_appear(monkeypatch, tmp_path):
-    # A successful upgrade still renders nothing if the Gateway API is missing or
-    # nvcm.gateway.enabled is false, and the symptom is a hostname that does not
-    # resolve much later. Not fatal: NVCM and NetBox are both up by this point.
-    seen = _up_with_cluster_mocked(monkeypatch)
-    assert seen is not None
-    monkeypatch.setattr(cluster, "publish_netbox_route", lambda chart, **k: None)
-    monkeypatch.setattr(cluster, "netbox_route_exists", lambda ns, runner=None: False)
-
-    result = CliRunner().invoke(
-        cli.main,
-        [
-            "up",
-            "--no-kind-load",
-            "--skip-verify",
-            "--config-out",
-            str(tmp_path / "install.yaml"),
-            "--nvcm-repo",
-            str(_nvcm_stub()),
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    assert "no netbox httproute" in result.output.lower()
-    assert "port-forward" in result.output
+    assert result.exit_code != 0
+    assert "deployment failed" in result.output.lower()
 
 
 def test_up_deploys_to_a_cluster_kind_did_not_create(monkeypatch, tmp_path):
@@ -799,8 +761,6 @@ def test_orphaned_volumes_are_reported_with_the_command_that_clears_them(monkeyp
 def _nvcm_stub():
     """A directory shaped like an NVCM checkout, for tests that must get past
     repo validation."""
-    import tempfile
-
     root = Path(tempfile.mkdtemp())
     (root / "installer").mkdir()
     (root / "installer" / "pyproject.toml").write_text("")

@@ -2,12 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Deployment orchestration for NVCM + NetBox on Kubernetes.
 
-Brings up NetBox in-cluster as NVIDIA Config Manager's DCIM provider and hands
-the rest of the deployment to NVCM's own installer.
-
-Deliberately imports nothing from ``nv_config_manager_installer``: the coupling
-is their CLI surface and their config file schema, both of which are far more
-stable than their Python internals on a force-pushed branch.
+Brings up NetBox in-cluster as NVIDIA Config Manager's DCIM provider. The
+combined path derives from NVCM's deployer and fills its provider lifecycle
+hooks; provider-only and pass-through installer commands remain available.
 
 Installed as an extra, so the provider wheelhouse that ships into NVCM's pods
 does not carry click or the deployment code::

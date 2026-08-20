@@ -12,16 +12,15 @@ NetBox as its DCIM provider.
    `kind create cluster` leaves the Gateway unreachable.
 2. Loads the two locally-built images into the kind node. Neither is in a
    registry and both are pulled `IfNotPresent`, so the node needs them up front.
-3. Deploys NetBox into the cluster from `deploy/netbox`, with this provider's
-   plugin and `netbox_bgp` enabled and its own PostgreSQL and Valkey.
-4. Initialises NetBox by running the plugin's `nvcm_init` (migrations, superuser,
-   API token, custom fields, bootstrap data).
-5. Writes NVCM's installer config from `deploy/configs/local-netbox.yaml`, filling
+3. Writes NVCM's installer config from `deploy/configs/local-netbox.yaml`, filling
    in the API token, image refs and cluster size.
-6. Runs NVCM's installer against your checkout.
-7. Rolls NetBox again so it picks up the NATS password NVCM created, which
-   switches the change-event publisher on.
-8. Publishes a test event and checks NVCM's render consumer handles it.
+4. Runs a `NetBoxDeployer` derived from NVCM's deployer. Its pre-Helm hook
+   deploys NetBox with this provider's plugin, PostgreSQL, Valkey, and the same
+   NATS password the common installer provisions.
+5. Installs NVCM through the common deployment pipeline.
+6. Uses the provider post-Helm hook to run `nvcm_init` (API token, custom fields,
+   bootstrap data) and publish NetBox through NVCM's Gateway.
+7. Publishes a test event and checks NVCM's render consumer handles it.
 
 Re-running it is safe.
 
@@ -65,8 +64,8 @@ kubectl -n nv-config-manager port-forward svc/netbox 8080:80
 ```
 
 The generated config holds a live API token, so it is written `0600` into
-`generated/`, which is gitignored. Keep it: it is what you re-run NVCM's installer
-with.
+`generated/`, which is gitignored. Keep it: it can be used with the standalone
+installer commands.
 
 ## NetBox image
 
