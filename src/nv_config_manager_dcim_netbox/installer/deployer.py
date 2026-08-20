@@ -50,7 +50,7 @@ class NetBoxDeployer(Deployer):
         steps = super().create_steps()
         helm_index = next(i for i, step in enumerate(steps) if step.id == "helm-install")
         steps.insert(helm_index, DeployStep("install-netbox", "Install NetBox"))
-        steps.insert(helm_index + 2, DeployStep("bootstrap-netbox", "Bootstrap NetBox"))
+        steps.insert(helm_index + 1, DeployStep("bootstrap-netbox", "Bootstrap NetBox"))
         steps.insert(helm_index + 3, DeployStep("publish-netbox", "Publish NetBox route"))
         return steps
 
@@ -58,6 +58,7 @@ class NetBoxDeployer(Deployer):
         step = self._start_step("install-netbox")
         if self.options.dry_run:
             self._finish_step(step, StepStatus.SKIPPED)
+            self._skip_step("bootstrap-netbox", "Dry run")
             return
 
         stuck = cluster.pending_release_status(self.netbox.release, self.config.cluster.namespace)
@@ -92,18 +93,17 @@ class NetBoxDeployer(Deployer):
         )
         self._finish_step(step)
 
+        bootstrap = self._start_step("bootstrap-netbox")
+        cluster.wait_for_netbox(self.config.cluster.namespace, timeout=self.options.helm_timeout)
+        output = cluster.run_nvcm_init(
+            self.config.cluster.namespace, self._secrets_state["dcim_token"]
+        )
+        if output.strip():
+            bootstrap.output.extend(output.strip().splitlines())
+        self._finish_step(bootstrap)
+
     def _run_provider_post_helm_install(self) -> None:
         namespace = self.config.cluster.namespace
-
-        bootstrap = self._start_step("bootstrap-netbox")
-        if self.options.dry_run:
-            self._finish_step(bootstrap, StepStatus.SKIPPED)
-        else:
-            cluster.wait_for_netbox(namespace, timeout=self.options.helm_timeout)
-            output = cluster.run_nvcm_init(namespace, self._secrets_state["dcim_token"])
-            if output.strip():
-                bootstrap.output.extend(output.strip().splitlines())
-            self._finish_step(bootstrap)
 
         publish = self._start_step("publish-netbox")
         if self.options.dry_run:

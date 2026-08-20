@@ -30,6 +30,8 @@ NATS_BOX_DEPLOYMENT = "nv-config-manager-nats-box"
 # uninstall so they stay in step with the data on the PVCs.
 # See deploy/netbox/templates/datastore-credentials.yaml.
 DATASTORE_SECRET = "netbox-datastores"
+NETBOX_CHART_REPOSITORY = "netbox"
+NETBOX_CHART_REPOSITORY_URL = "https://charts.netbox.oss.netboxlabs.com/"
 
 
 def kubectl(
@@ -53,6 +55,16 @@ def helm_dependency_build(chart_dir: Path) -> None:
     """Fetch the upstream netbox chart if it is not already vendored."""
     if (chart_dir / "charts").is_dir() and any((chart_dir / "charts").glob("netbox-*.tgz")):
         return
+    stream(
+        [
+            "helm",
+            "repo",
+            "add",
+            NETBOX_CHART_REPOSITORY,
+            NETBOX_CHART_REPOSITORY_URL,
+            "--force-update",
+        ]
+    )
     stream(["helm", "dependency", "build", str(chart_dir)])
 
 

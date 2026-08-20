@@ -64,8 +64,8 @@ def _deployer(tmp_path, *, dry_run=False):
 def test_provider_steps_surround_the_umbrella_helm_step():
     ids = [step.id for step in NetBoxDeployer.create_steps()]
     helm = ids.index("helm-install")
-    assert ids[helm - 1] == "install-netbox"
-    assert ids[helm + 1 : helm + 3] == ["bootstrap-netbox", "publish-netbox"]
+    assert ids[helm - 2 : helm] == ["install-netbox", "bootstrap-netbox"]
+    assert ids[helm + 1] == "publish-netbox"
 
 
 def test_pre_helm_hook_installs_netbox_with_common_secrets(monkeypatch, tmp_path):
@@ -79,22 +79,6 @@ def test_pre_helm_hook_installs_netbox_with_common_secrets(monkeypatch, tmp_path
     monkeypatch.setattr(
         cluster, "install_netbox", lambda chart, **kwargs: calls.append(("install", chart, kwargs))
     )
-
-    deployer._run_provider_pre_helm_install()
-
-    assert calls[0] == ("deps", tmp_path / "chart")
-    _, chart, kwargs = calls[1]
-    assert chart == str(tmp_path / "chart")
-    assert kwargs["api_token"] == token
-    assert kwargs["nats_password"] == "nats-secret"
-    assert kwargs["extra_set"] == ["feature.enabled=true"]
-    assert kwargs["timeout"] == "7m"
-    assert callback.updates[-1] == ("install-netbox", StepStatus.SUCCESS)
-
-
-def test_post_helm_hook_bootstraps_then_publishes(monkeypatch, tmp_path):
-    deployer, callback, token = _deployer(tmp_path)
-    calls = []
     monkeypatch.setattr(
         cluster,
         "wait_for_netbox",
@@ -105,6 +89,23 @@ def test_post_helm_hook_bootstraps_then_publishes(monkeypatch, tmp_path):
         "run_nvcm_init",
         lambda namespace, api_token: calls.append(("init", namespace, api_token)) or "ready",
     )
+
+    deployer._run_provider_pre_helm_install()
+
+    assert calls[0] == ("deps", tmp_path / "chart")
+    _, chart, kwargs = calls[1]
+    assert chart == str(tmp_path / "chart")
+    assert kwargs["api_token"] == token
+    assert kwargs["nats_password"] == "nats-secret"
+    assert kwargs["extra_set"] == ["feature.enabled=true"]
+    assert kwargs["timeout"] == "7m"
+    assert [call[0] for call in calls] == ["deps", "install", "wait", "init"]
+    assert callback.updates[-1] == ("bootstrap-netbox", StepStatus.SUCCESS)
+
+
+def test_post_helm_hook_publishes_route(monkeypatch, tmp_path):
+    deployer, callback, _ = _deployer(tmp_path)
+    calls = []
     monkeypatch.setattr(
         cluster,
         "publish_netbox_route",
@@ -114,16 +115,12 @@ def test_post_helm_hook_bootstraps_then_publishes(monkeypatch, tmp_path):
 
     deployer._run_provider_post_helm_install()
 
-    assert [call[0] for call in calls] == ["wait", "init", "route"]
-    assert calls[0][1:] == ("nv-config-manager", "7m")
-    assert calls[1][2] == token
+    assert [call[0] for call in calls] == ["route"]
     assert callback.updates[-1] == ("publish-netbox", StepStatus.SUCCESS)
 
 
 def test_missing_route_is_a_visible_nonfatal_warning(monkeypatch, tmp_path):
     deployer, callback, _ = _deployer(tmp_path)
-    monkeypatch.setattr(cluster, "wait_for_netbox", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cluster, "run_nvcm_init", lambda *args: "")
     monkeypatch.setattr(cluster, "publish_netbox_route", lambda *args, **kwargs: None)
     monkeypatch.setattr(cluster, "netbox_route_exists", lambda namespace: False)
 
@@ -135,8 +132,6 @@ def test_missing_route_is_a_visible_nonfatal_warning(monkeypatch, tmp_path):
 
 def test_route_upgrade_failure_is_a_visible_nonfatal_warning(monkeypatch, tmp_path):
     deployer, callback, _ = _deployer(tmp_path)
-    monkeypatch.setattr(cluster, "wait_for_netbox", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cluster, "run_nvcm_init", lambda *args: "")
     monkeypatch.setattr(
         cluster,
         "publish_netbox_route",

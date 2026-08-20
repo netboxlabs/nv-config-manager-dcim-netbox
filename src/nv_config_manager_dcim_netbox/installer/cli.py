@@ -159,6 +159,17 @@ def _existing_nats_password(config: dict) -> str:
     return legacy_values.get("natsPassword") or ""
 
 
+def _existing_api_token(config_path: Path) -> str:
+    """Reuse the generated API token so an interrupted deployment can resume."""
+    try:
+        config = yaml.safe_load(config_path.read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        return ""
+    values = (((config.get("secrets") or {}).get("k8s") or {}).get("dcim") or {}).get("values")
+    token = (values or {}).get("token") or ""
+    return token if is_valid_api_token(token) else ""
+
+
 def _nats_password(config: dict, namespace: str) -> str:
     """The password NetBox must publish with: deployed, then configured, then new.
 
@@ -623,7 +634,7 @@ def up(
 
     repo = None if skip_nvcm else _resolve_nvcm_repo(nvcm_repo)
 
-    token = token or generate_api_token()
+    token = token or _existing_api_token(config_out) or generate_api_token()
     if not is_valid_api_token(token):
         raise click.ClickException("--token must be a NetBox v2 token: nbt_<12>.<40>.")
 

@@ -172,6 +172,32 @@ def test_config_command_rejects_a_malformed_token(tmp_path):
     assert "v2 token" in result.output
 
 
+def test_up_reuses_the_generated_token_when_resuming(monkeypatch, tmp_path):
+    token = generate_api_token()
+    out = tmp_path / "install.yaml"
+    out.write_text(yaml.safe_dump({"secrets": {"k8s": {"dcim": {"values": {"token": token}}}}}))
+    monkeypatch.setattr(cluster, "kind_cluster_exists", lambda name: True)
+    monkeypatch.setattr(cluster, "helm_dependency_build", lambda chart: None)
+    monkeypatch.setattr(cluster, "pending_release_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cluster, "orphaned_data_volumes", lambda *args, **kwargs: [])
+    seen = {}
+    monkeypatch.setattr(
+        cluster,
+        "install_netbox",
+        lambda *args, **kwargs: seen.update(token=kwargs["api_token"]),
+    )
+    monkeypatch.setattr(cluster, "wait_for_netbox", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cluster, "run_nvcm_init", lambda *args, **kwargs: "")
+
+    result = CliRunner().invoke(
+        cli.main, ["netbox", "up", "--no-kind-load", "--config-out", str(out)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen["token"] == token
+    assert yaml.safe_load(out.read_text())["secrets"]["k8s"]["dcim"]["values"]["token"] == token
+
+
 def test_up_rejects_a_path_that_is_not_an_nvcm_checkout(tmp_path):
     result = CliRunner().invoke(main, ["up", "--nvcm-repo", str(tmp_path)])
     assert result.exit_code != 0
@@ -464,6 +490,25 @@ def test_require_tools_names_everything_missing():
 
 
 # -- helm invocation ----------------------------------------------------------
+
+
+def test_chart_dependency_build_registers_the_upstream_repository(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(cluster, "stream", lambda argv: calls.append(argv))
+
+    cluster.helm_dependency_build(tmp_path)
+
+    assert calls == [
+        [
+            "helm",
+            "repo",
+            "add",
+            cluster.NETBOX_CHART_REPOSITORY,
+            cluster.NETBOX_CHART_REPOSITORY_URL,
+            "--force-update",
+        ],
+        ["helm", "dependency", "build", str(tmp_path)],
+    ]
 
 
 class _RecordingRunner:
