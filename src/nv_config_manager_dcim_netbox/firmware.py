@@ -13,6 +13,7 @@ from nv_config_manager_dcim import (
     DCIMInvalidDataError,
     DCIMNotFoundError,
     FirmwareBundle,
+    OSImageVersions,
 )
 from nv_config_manager_dcim.models import FirmwareComponent
 
@@ -38,7 +39,7 @@ def _deep_merge(base: dict, updates: dict) -> None:
 class NetBoxFirmwareMixin:
     """OS image version reads and firmware-intent writes."""
 
-    async def get_os_image_versions(self, device_id: str) -> tuple[str, str, str]:
+    async def get_os_image_versions(self, device_id: str) -> OSImageVersions:
         device = await self.rest_request("GET", f"dcim/devices/{device_id}/")
         cc = (device or {}).get("config_context") or {}
         intended = (cc.get("intended-firmware") or {}).get("version") or ""
@@ -55,7 +56,14 @@ class NetBoxFirmwareMixin:
         if role and platform:
             targets = await self._firmware_targets(site)
             desired = (targets.get(role) or {}).get(platform) or ""
-        return intended, desired, ztp_ipv4
+        # The SDK's OSImageVersions, not a bare tuple: it is a NamedTuple and
+        # NVCM reads it by attribute (`versions.intended_firmware` in
+        # temporal/ngc/activities/os.py). A plain tuple carries the same three
+        # values in the same order and fails only at that attribute access,
+        # inside the activity, as an AttributeError with no mention of the DCIM.
+        return OSImageVersions(
+            intended_firmware=intended, desired_firmware=desired, ztp_address=ztp_ipv4
+        )
 
     async def set_intended_os_image(self, device_id: str, desired_firmware: str) -> None:
         await self._merge_local_context(

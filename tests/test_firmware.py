@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import pytest
+from nv_config_manager_dcim import OSImageVersions
 
 from tests._fake import fake_client
 
@@ -30,7 +31,17 @@ async def test_get_os_image_versions():
     client = fake_client(
         rest_get={_DEVICE_PATH: device}, patch={"config_contexts_for_profile": targets}
     )
-    assert await client.get_os_image_versions("1") == ("5.1.0", "5.2.0", "10.0.0.9")
+    versions = await client.get_os_image_versions("1")
+
+    # By attribute, not by tuple equality. NVCM reads
+    # `versions.intended_firmware` (temporal/ngc/activities/os.py), and a bare
+    # tuple compares equal to the NamedTuple while having no such attribute --
+    # so an `== (...)` assertion passes against a return type that fails in
+    # production with `'tuple' object has no attribute 'intended_firmware'`.
+    assert isinstance(versions, OSImageVersions)
+    assert versions.intended_firmware == "5.1.0"
+    assert versions.desired_firmware == "5.2.0"
+    assert versions.ztp_address == "10.0.0.9"
 
 
 async def test_get_firmware_bundle():

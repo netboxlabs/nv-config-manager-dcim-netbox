@@ -344,3 +344,39 @@ def test_register_render_event_handlers_registers() -> None:
     NetBoxProvider().register_render_event_handlers(registry)
     assert "dcim.device" in registry.registered
     assert "dcim.interface" in registry.registered
+
+
+def test_return_annotations_match_the_sdk_protocol():
+    """Every method must declare the SDK's own return type.
+
+    NVCM consumes these by attribute, so a structurally similar substitute
+    passes our tests and fails in a Temporal activity. `get_os_image_versions`
+    returned `tuple[str, str, str]` where the contract is `OSImageVersions`, a
+    NamedTuple: same three values, same order, equal under `==`, and no
+    `.intended_firmware`. The workflow died with
+
+        AttributeError: 'tuple' object has no attribute 'intended_firmware'
+
+    naming neither the provider nor the method.
+    """
+    import inspect
+
+    from nv_config_manager_dcim import api as sdk_api
+
+    from nv_config_manager_dcim_netbox.provider import NetBoxDCIMClient
+
+    mismatched = []
+    for name, protocol_method in inspect.getmembers(sdk_api.DCIMClient, inspect.isfunction):
+        if name.startswith("_"):
+            continue
+        ours = getattr(NetBoxDCIMClient, name, None)
+        if ours is None:
+            continue
+        expected = str(inspect.signature(protocol_method).return_annotation)
+        actual = str(inspect.signature(ours).return_annotation)
+        if expected != actual:
+            mismatched.append(f"{name}: SDK says {expected}, we say {actual}")
+
+    assert not mismatched, "return types diverge from the DCIM contract:\n  " + "\n  ".join(
+        mismatched
+    )
