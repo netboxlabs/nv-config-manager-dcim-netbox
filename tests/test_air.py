@@ -54,6 +54,7 @@ netbox_air_orchestrator = pytest.importorskip(
 )
 NetBoxSimConfig = air_config.NetBoxSimConfig
 NetBoxAirCallback = air_callback.NetBoxAirCallback
+BRING_UP_MARKER = air_callback.BRING_UP_MARKER
 build_content_jobs = air_installer_config.build_content_jobs
 build_template_plugins = air_installer_config.build_template_plugins
 SimOrchestrator = air_orchestrator.SimOrchestrator
@@ -920,3 +921,77 @@ def test_a_refused_session_says_what_it_means(monkeypatch):
     assert "oob_ssh_password" in message, "does not point at the likely cause"
     # And it still must not leak the password it was given.
     assert "<redacted>" in message
+
+
+def test_the_bring_up_is_bounded_on_the_box_and_never_runs_silent():
+    """A hung step must end as a reported failure, not an indefinite wait.
+
+    NVCM's `_ssh_run_and_tail` checks its deadline only inside
+    `for line in proc.stdout`, so a step that produces no output never reaches
+    the check, and its ssh sets no ServerAliveInterval. A NetBox bring-up once
+    sat for an hour that way with nothing after `helm ... Installing it now.`
+
+    Two guards, both on the box: `timeout` so the script always exits (the tail
+    returns cleanly once remote stdout closes), and a heartbeat so their
+    deadline has lines to tick on.
+    """
+    command = NetBoxAirCallback._bring_up_command("/home/nvcm/bring-up.sh", 3540)
+
+    assert "timeout 3540 bash /home/nvcm/bring-up.sh" in command
+    assert "NVCM_NETBOX_STILL_RUNNING" in command
+    # `a && { b; } &` backgrounds the whole list, chmod included.
+    assert "chmod 600 /home/nvcm/bring-up.sh || exit $?;" in command
+    # Exit 124 is `timeout`'s, and says something more useful than "did not finish".
+    assert 'if [ "$rc" -eq 124 ]' in command
+    # Still only claims success on a zero exit.
+    assert f'if [ "$rc" -eq 0 ]; then echo {BRING_UP_MARKER}' in command
+
+
+def test_the_box_timeout_is_tighter_than_the_tails():
+    """So an overrun surfaces as the script's own error, not the tail giving up."""
+    cb = _callback_for_script()
+    cb.cfg.deploy_timeout = 1800
+    seen = {}
+
+    class _Manager:
+        def _ssh_run_and_tail(self, host, port, command, *, marker, label, timeout):
+            seen["command"] = command
+            seen["timeout"] = timeout
+            return True
+
+    cb._manager = _Manager()
+    cb.runner = lambda host, port: _Uploads()
+    cb.run_script("box", 22, "#!/usr/bin/env bash\necho hi\n")
+
+    assert seen["timeout"] == 1800
+    assert "timeout 1740 bash" in seen["command"]
+
+
+def test_the_air_netbox_install_gets_longer_than_the_kind_default():
+    """A sim box's first NetBox boot does not fit in cluster.install_netbox's 10m.
+
+    Measured 7m58s to Ready on a `small` box with images already loaded --
+    the whole 4.7 migration set against a cold database. Overrunning leaves the
+    release `pending-install`, which needs a manual `helm uninstall` before a
+    retry, so the margin matters more than the wait.
+    """
+    script = _callback_for_script().bring_up_script("/home/nvcm/i.tar", "/home/nvcm/c.tgz")
+    assert "--timeout 20m" in script, script
+    # The kind path is untouched: that default still lives on install_netbox.
+    assert air_callback.NETBOX_INSTALL_TIMEOUT == "20m"
+
+
+def test_the_heartbeat_reports_pod_status():
+    """A bare tick cannot distinguish a slow bootstrap from a stall.
+
+    `0/1 Running` while migrations run is the difference between waiting and
+    opening an SSH session to find out.
+    """
+    command = NetBoxAirCallback._bring_up_command("/home/nvcm/bring-up.sh", 600)
+
+    assert "nbstat()" in command
+    assert "app.kubernetes.io/name=netbox" in command
+    # Interpolated per beat, not once when the wrapper is built.
+    assert "$(nbstat)" in command
+    # Best effort: a heartbeat must never be what fails the run.
+    assert "2>/dev/null" in command

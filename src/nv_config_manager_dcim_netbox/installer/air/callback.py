@@ -43,6 +43,16 @@ KIND_CLUSTER = "nvcm"
 # remote command and watches for a marker like this to tell completion from a
 # dropped connection.
 BRING_UP_MARKER = "NVCM_NETBOX_BRING_UP_COMPLETE"
+# Printed every 30s while the script runs. Keeps NVCM's tail reading, and its
+# deadline evaluating, through steps that produce no output of their own.
+HEARTBEAT_PREFIX = "NVCM_NETBOX_STILL_RUNNING"
+
+# Longer than cluster.install_netbox's 10m default, which is sized for kind on a
+# workstation. A sim box's first NetBox boot runs the whole 4.7 migration set
+# against a cold database: measured 7m58s to Ready on a `small` box, against a
+# 10m budget. Overrunning leaves the release in `pending-install`, which then
+# has to be `helm uninstall`ed by hand before a retry.
+NETBOX_INSTALL_TIMEOUT = "20m"
 
 # Echoed by the script body itself, and watched for by nothing. `_ssh_run_and_tail`
 # terminates the SSH process the moment it sees the marker it was given, so any
@@ -261,6 +271,7 @@ class NetBoxAirCallback:
             image_tag=self.cfg.netbox_image_tag,
             nats_password=self.nats_password,
             extra_set=[*self.cfg.gateway_overrides(), *self.cfg.netbox_helm_set],
+            timeout=NETBOX_INSTALL_TIMEOUT,
             runner=script,
         )
         cluster.wait_for_netbox(NAMESPACE, runner=script)
@@ -314,20 +325,71 @@ class NetBoxAirCallback:
                 "matches oob_ssh_password in the sim config."
             ) from exc
 
+        tail_timeout = self.cfg.deploy_timeout or 3600
+        # Bounded on the box, and slightly tighter than the tail, so an
+        # overrunning step ends as `timeout`'s exit 124 with the failing command
+        # still on screen rather than as the tail's generic give-up.
+        script_timeout = max(60, tail_timeout - 60)
+
         ok = self._manager._ssh_run_and_tail(
             host,
             port,
-            f"chmod 600 {quoted} && bash {quoted}; rc=$?; rm -f {quoted}; "
-            f'if [ "$rc" -eq 0 ]; then echo {BRING_UP_MARKER}; fi; exit "$rc"',
+            self._bring_up_command(quoted, script_timeout),
             marker=BRING_UP_MARKER,
             label="netbox",
-            timeout=self.cfg.deploy_timeout or 3600,
+            timeout=tail_timeout,
         )
         if not ok:
             raise RuntimeError(
                 "The NetBox bring-up did not finish. Its output is above; the failing "
-                "command is the last one echoed."
+                "command is the last one echoed.\n"
+                "A run that ends with no output at all is usually the SSH session "
+                "dying rather than a slow step: NVCM's tail blocks on a read and its "
+                "own timeout is only checked when a line arrives, and its ssh has no "
+                "ServerAliveInterval. Re-run, and if it recurs check the box directly "
+                "with `kubectl -n nv-config-manager get pods`."
             )
+
+    @staticmethod
+    def _bring_up_command(quoted_script: str, script_timeout: int) -> str:
+        """Wrap the uploaded script for the tail.
+
+        Two things beyond running it, both working around how NVCM's
+        `_ssh_run_and_tail` behaves (sim_manager.py):
+
+        * `timeout` bounds the script on the box. The tail returns cleanly when
+          the remote stdout closes, so guaranteeing the script exits is what
+          turns a hung step into a reported failure.
+        * A heartbeat keeps output flowing. The tail evaluates its deadline only
+          inside `for line in proc.stdout`, so a silent run never reaches the
+          check and waits forever; a periodic line makes that timeout real.
+
+        Neither helps if the connection itself dies -- that needs a keepalive on
+        their side, which is why the failure message says so.
+        """
+        # Pod READY/STATUS on every beat, so a first boot grinding through
+        # migrations is distinguishable from a stall without opening a session.
+        # Best effort: before the pods exist it says so rather than failing.
+        status_fn = (
+            "nbstat() { "
+            f"kubectl -n {NAMESPACE} get pods -l app.kubernetes.io/name=netbox "
+            "--no-headers 2>/dev/null "
+            "| awk '{printf \"%s %s %s; \", $1,$2,$3}'; }; "
+        )
+        return (
+            # `;` not `&&` before the heartbeat: `a && { b; } &` backgrounds the
+            # whole list, chmod included.
+            f"chmod 600 {quoted_script} || exit $?; " + status_fn + "{ while true; do sleep 30; "
+            f'echo "{HEARTBEAT_PREFIX} $(date -u +%H:%M:%S) $(nbstat)"; done; }} & '
+            "hb=$!; "
+            f"timeout {script_timeout} bash {quoted_script}; rc=$?; "
+            'kill "$hb" 2>/dev/null || true; '
+            f"rm -f {quoted_script}; "
+            'if [ "$rc" -eq 124 ]; then '
+            f'echo "The NetBox bring-up exceeded {script_timeout}s and was stopped; '
+            'the last command echoed above is where it stalled."; fi; '
+            f'if [ "$rc" -eq 0 ]; then echo {BRING_UP_MARKER}; fi; exit "$rc"'
+        )
 
     def publish_route(self, host: str, port: int) -> None:
         """Create NetBox's HTTPRoute, now that the Gateway API CRDs are registered.
