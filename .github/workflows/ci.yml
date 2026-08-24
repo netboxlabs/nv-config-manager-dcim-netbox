@@ -82,12 +82,19 @@ jobs:
       - name: Install
         run: |
           uv venv --clear --python 3.13
-          uv pip install ../nv-config-manager/components/dcim
-          # The `installer` extra (click + PyYAML) is needed to *collect* the suite:
-          # test_installer.py and test_air.py import both at module scope. The `air`
+          # One resolution, mirroring `make setup`. The `installer` extra needs
+          # nv-config-manager-installer, which is unpublished, so its checkout
+          # path has to be in the same command -- resolving the extra on its own
+          # sends uv to the registry, where the package does not exist.
+          #
+          # That extra is needed just to *collect* the suite: test_installer.py
+          # and test_air.py import click and PyYAML at module scope. The `air`
           # extra is not installed; those imports are guarded with importorskip.
-          uv pip install -e '.[installer]'
-          uv pip install pytest pytest-asyncio
+          uv pip install \
+            ../nv-config-manager/components/dcim \
+            -e ../nv-config-manager/installer \
+            -e '.[installer]' \
+            pytest pytest-asyncio
       - name: Tests
         run: .venv/bin/pytest
 
