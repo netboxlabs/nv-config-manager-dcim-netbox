@@ -18,17 +18,18 @@ dependencies = [
 [project.optional-dependencies]
 installer = [
     "click>=8.1.7",
+    "nv-config-manager-installer",
     "pyyaml>=6.0.2",
 ]
 # DSX Air simulations. `nv-config-manager-installer` is not published, and a
 # checkout of nv-config-manager is required anyway (its Helm chart and the
-# topology blueprints live there), so it is installed from that checkout by
-# `make setup-air` rather than pinned to a git ref that a force-push can orphan.
+# topology blueprints live there), so `make setup` installs it from that checkout
+# rather than pinning a git ref that a force-push can orphan.
 # Listed here by bare name for the same reason nv-config-manager-dcim is.
 air = [
     "click>=8.1.7",
-    "pyyaml>=6.0.2",
     "nv-config-manager-installer",
+    "pyyaml>=6.0.2",
 ]
 
 [project.scripts]

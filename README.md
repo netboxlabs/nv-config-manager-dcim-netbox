@@ -21,7 +21,7 @@ with `nvcm-netbox`, which:
 
 - deploys NetBox, with the plugin and the fabric models, into the same cluster
 - creates the API token NetBox and NVCM must share
-- runs NVCM's installer with NetBox set as the DCIM provider
+- extends NVCM's installer lifecycle to deploy both NVCM and NetBox in one pipeline
 - connects NetBox's change events to NVCM's event bus
 - checks that a change in NetBox reaches the render service
 
@@ -220,7 +220,7 @@ NetBox 5.0 removes anyway.
 
 ```bash
 make setup             # venv + SDK, templates, provider, dev tools
-make setup-air         # the above plus the DSX Air extra
+make setup-air         # compatibility alias for setup, used by the Air docs
 make images            # build both local images
 make image             # the provider wheelhouse only
 make netbox-image      # NetBox with the plugin only
@@ -313,6 +313,29 @@ Against a live deployment, the event loop is checked end to end by:
 That publishes a synthetic change event and confirms the DCIM consumer
 dispatches a render. It reports `1 queued, 0 failed` on a deployment with
 topology loaded; without one, NetBox rejects the device and it says so.
+
+The provider also runs NVCM's shared live-cluster integration suite through its
+NetBox lifecycle adapter. The common assertions remain in the NVCM repository;
+only provider-owned inspection of device flags, intended configuration, status,
+and backup records lives here:
+
+```bash
+make test-integration INTEGRATION_ARGS=--use-port-forward
+```
+
+Use `INTEGRATION_TESTS` to select a module or node while developing, for example:
+
+```bash
+make test-integration \
+  INTEGRATION_TESTS=../nv-config-manager/src/tests/integration/test_render.py \
+  INTEGRATION_ARGS=--use-port-forward
+```
+
+Run `make topology` after `make kind-up` before the shared suite. The local
+installer profile includes the matching reference template plugin so render,
+ZTP, backup, and diagnostics assertions exercise the same mock fabric.
+Nautobot-only event and RBAC modules are marked and skipped automatically during
+a NetBox run.
 
 The DSX Air tests are skipped unless the `air` extra is installed, since it
 pulls NVCM's installer from your checkout:

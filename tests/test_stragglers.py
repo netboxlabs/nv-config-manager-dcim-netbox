@@ -30,6 +30,17 @@ async def test_assign_vrf_to_interface_patches_vrf():
     assert calls == [("PATCH", "dcim/interfaces/11/", {"vrf": 8})]
 
 
+async def test_assign_vrf_to_interface_clears_vrf():
+    calls = []
+    await fake_client(record=calls).assign_vrf_to_interface("11", None)
+    assert calls == [("PATCH", "dcim/interfaces/11/", {"vrf": None})]
+
+
+async def test_remove_unmapped_device_vrfs_is_noop_without_device_vrf_relations():
+    client = fake_client()
+    assert await client.remove_unmapped_device_vrfs("7", ["8", "9"]) == []
+
+
 async def test_get_device_password_mapping_users():
     async def context(device_id):
         return {"password_mappings": {"admin": {}, "api_user": {}}}

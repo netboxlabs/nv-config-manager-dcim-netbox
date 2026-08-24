@@ -55,6 +55,7 @@ _IMPLEMENTED = {
     "get_device_vrfs",
     "assign_vrf_to_interface",
     "assign_vrf_to_device",
+    "remove_unmapped_device_vrfs",
     "get_namespace_route_distinguishers",
     # reference (namespace zone = VRF grouped by tag)
     "list_namespace_tags",
@@ -157,6 +158,7 @@ CATEGORIES: dict[str, tuple[str, ...]] = {
         "get_device_vrfs",
         "assign_vrf_to_device",
         "assign_vrf_to_interface",
+        "remove_unmapped_device_vrfs",
         "get_namespace_route_distinguishers",
     ),
     "hosts": (

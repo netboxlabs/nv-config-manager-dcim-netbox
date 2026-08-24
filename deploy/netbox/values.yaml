@@ -139,6 +139,16 @@ netbox:
     enabled: true
     auth:
       existingSecret: netbox-datastores
+    # The upstream nano preset (192Mi limit) is OOM-killed when concurrent
+    # renders query and persist lifecycle state through NetBox.
+    primary:
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 1Gi
   valkey:
     enabled: true
     auth:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import shlex
 import tempfile
+import time
 from pathlib import Path
 
 import yaml
@@ -19,7 +20,7 @@ from nv_config_manager_dcim_netbox.installer import config as base_config
 from nv_config_manager_dcim_netbox.installer.air import AirSupportUnavailable
 from nv_config_manager_dcim_netbox.installer.air.config import NetBoxSimConfig
 from nv_config_manager_dcim_netbox.installer.remote import ScriptRunner, SshRunner
-from nv_config_manager_dcim_netbox.installer.shell import run
+from nv_config_manager_dcim_netbox.installer.shell import CommandError, run
 from nv_config_manager_dcim_netbox.installer.tokens import (
     generate_api_token,
     generate_nats_password,
@@ -146,7 +147,13 @@ class NetBoxAirCallback:
     def runner(self, host: str, port: int) -> SshRunner:
         return SshRunner(self._manager, host, port)
 
-    def bring_up_netbox(self, host: str, port: int) -> None:
+    def bring_up_netbox(
+        self,
+        host: str,
+        port: int,
+        *,
+        patch_install_config: bool = True,
+    ) -> None:
         """Ship the images and chart, then run the whole bring-up in one session.
 
         Modelled on NVCM's own deploy, which uploads what it needs and then runs a
@@ -165,8 +172,64 @@ class NetBoxAirCallback:
         self.on_log("Deploying NetBox...")
         self.run_script(host, port, self.bring_up_script(images_tar, chart_tar))
 
-        self.on_log("Pointing NVCM's install config at NetBox...")
-        self.patch_install_config(host, port)
+        if patch_install_config:
+            self.on_log("Pointing NVCM's install config at NetBox...")
+            self.patch_install_config(host, port)
+
+    def wait_for_intended_configs(
+        self,
+        host: str,
+        port: int,
+        expected_total: int,
+        *,
+        timeout: int = 180,
+        interval: int = 10,
+    ) -> bool:
+        """Wait until NetBox has intended-config records for render-enabled devices."""
+        if expected_total <= 0:
+            return True
+
+        python_code = (
+            "from netbox_nv_config_manager.models import DeviceConfigStatus, IntendedConfig;"
+            "ready=IntendedConfig.objects.filter("
+            "device__nvcm_config_status__render_enabled=True).count();"
+            "total=DeviceConfigStatus.objects.filter(render_enabled=True).count();"
+            "print(f'{ready}/{total}')"
+        )
+        command = [
+            "kubectl",
+            "exec",
+            "-n",
+            NAMESPACE,
+            "deployment/netbox",
+            "-c",
+            "netbox",
+            "--",
+            "/opt/netbox/venv/bin/python",
+            "/opt/netbox/netbox/manage.py",
+            "shell",
+            "-c",
+            python_code,
+        ]
+        deadline = time.monotonic() + timeout
+        last_counts = "0/0"
+        while time.monotonic() < deadline:
+            try:
+                output = self.runner(host, port).run(command).strip()
+                ready_text, separator, total_text = output.rpartition("\n")[-1].partition("/")
+                if separator:
+                    ready = int(ready_text)
+                    total = int(total_text)
+                    last_counts = f"{ready}/{total}"
+                    if ready >= expected_total:
+                        self.on_log(f"NetBox intended configs ready: {last_counts}")
+                        return True
+            except (CommandError, TypeError, ValueError):
+                pass
+            time.sleep(interval)
+
+        self.on_log(f"Timed out waiting for NetBox intended configs; last count: {last_counts}")
+        return False
 
     def bring_up_script(self, images_tar: str, chart_tar: str) -> str:
         """Render every on-box step as one script.

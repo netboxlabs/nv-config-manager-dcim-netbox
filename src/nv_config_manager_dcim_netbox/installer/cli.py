@@ -11,10 +11,16 @@ from pathlib import Path
 
 import click
 import yaml
+from nv_config_manager_installer.deployer import DeployOptions, DeployStep, StepStatus
+from nv_config_manager_installer.schema import ImageSource, NVConfigManagerInstallConfig
 
 from nv_config_manager_dcim_netbox.installer import cluster
 from nv_config_manager_dcim_netbox.installer import config as cfg
 from nv_config_manager_dcim_netbox.installer.air import cli as air_cli
+from nv_config_manager_dcim_netbox.installer.deployer import (
+    NetBoxDeployer,
+    NetBoxDeploymentSettings,
+)
 from nv_config_manager_dcim_netbox.installer.shell import CommandError, require_tools, stream
 from nv_config_manager_dcim_netbox.installer.tokens import (
     generate_api_token,
@@ -51,6 +57,29 @@ def _ok(message: str) -> None:
 
 def _warn(message: str) -> None:
     click.secho(f"      {message}", fg="yellow")
+
+
+class _ClickDeployCallback:
+    """Render the inherited deployer's progress in the provider CLI."""
+
+    def on_step_update(self, step: DeployStep) -> None:
+        colour = {
+            StepStatus.RUNNING: "cyan",
+            StepStatus.SUCCESS: "green",
+            StepStatus.FAILED: "red",
+            StepStatus.SKIPPED: "yellow",
+        }.get(step.status)
+        click.secho(f"[{step.status.value:7}] {step.label}", fg=colour)
+        if step.error:
+            click.echo(f"          {step.error}")
+
+    def on_log(self, message: str) -> None:
+        click.echo(f"          {message}")
+
+    def on_complete(self, success: bool, endpoints: list[str]) -> None:
+        if success:
+            for endpoint in endpoints:
+                click.echo(f"          {endpoint}")
 
 
 def _nvcm_installer_argv(nvcm_repo: Path, *args: str) -> list[str]:
@@ -92,7 +121,7 @@ def _config_options(
     """Resolve the installer config options `config` and `up` both write.
 
     Shared so the two cannot drift: `up` had its own copy and omitted the
-    public_url fallback, resetting a profile's value to the default port-forward.
+    public_url fallback, resetting a profile's value to the default gateway route.
     """
     dcim = base.get("dcim", {})
     defaults = cfg.ConfigOptions(api_token=api_token)
@@ -109,7 +138,7 @@ def _config_options(
 
 
 def _existing_nats_password(config: dict) -> str:
-    """Return a natsPassword already in the config, so re-runs keep it.
+    """Return a NATS password already in the config, so re-runs keep it.
 
     Regenerating it would leave NVCM's NATS users and the deployed NetBox
     disagreeing until both are rolled.
@@ -118,8 +147,27 @@ def _existing_nats_password(config: dict) -> str:
     profile never carries a natsPassword, so passing it here always reads "" and
     every run mints a new one.
     """
-    k8s = ((config.get("secrets") or {}).get("k8s") or {}).get("nautobot") or {}
-    return (k8s.get("values") or {}).get("natsPassword") or ""
+    k8s = (config.get("secrets") or {}).get("k8s") or {}
+    nats_values = (k8s.get("nats") or {}).get("values") or {}
+    if password := nats_values.get("password"):
+        return password
+
+    # Configs written before NVCM separated NATS from the built-in provider use
+    # the legacy location. Keep reading it so an upgrade does not rotate a live
+    # broker password unexpectedly.
+    legacy_values = (k8s.get("nautobot") or {}).get("values") or {}
+    return legacy_values.get("natsPassword") or ""
+
+
+def _existing_api_token(config_path: Path) -> str:
+    """Reuse the generated API token so an interrupted deployment can resume."""
+    try:
+        config = yaml.safe_load(config_path.read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        return ""
+    values = (((config.get("secrets") or {}).get("k8s") or {}).get("dcim") or {}).get("values")
+    token = (values or {}).get("token") or ""
+    return token if is_valid_api_token(token) else ""
 
 
 def _nats_password(config: dict, namespace: str) -> str:
@@ -581,14 +629,12 @@ def up(
     render until NVCM's deploy has put the Gateway API CRDs on the cluster.
     """
     require_tools("kubectl", "helm")
-    total = 7 if skip_nvcm else 10
+    total = 7 if skip_nvcm else 4
     step = 0
 
     repo = None if skip_nvcm else _resolve_nvcm_repo(nvcm_repo)
-    if not skip_nvcm:
-        require_tools("uv")
 
-    token = token or generate_api_token()
+    token = token or _existing_api_token(config_out) or generate_api_token()
     if not is_valid_api_token(token):
         raise click.ClickException("--token must be a NetBox v2 token: nbt_<12>.<40>.")
 
@@ -628,9 +674,10 @@ def up(
     # just to switch its publisher from `log` to NATS.
     nats_password = _nats_password(profile, namespace)
 
-    step += 1
-    _step(step, total, "Fetching chart dependencies")
-    cluster.helm_dependency_build(chart)
+    if skip_nvcm:
+        step += 1
+        _step(step, total, "Fetching chart dependencies")
+        cluster.helm_dependency_build(chart)
 
     step += 1
     if kind_load:
@@ -642,43 +689,41 @@ def up(
     else:
         _step(step, total, "Skipping kind image load (--no-kind-load)")
 
-    step += 1
-    _step(step, total, f"Deploying NetBox to namespace {namespace}")
-    stuck = cluster.pending_release_status(release, namespace)
-    if stuck:
-        raise click.ClickException(
-            f"The {release!r} release is stuck in {stuck}, usually because an earlier run was "
-            f"interrupted mid-install. helm refuses to proceed until it is cleared:\n"
-            f"    helm uninstall {release} -n {namespace}\n"
-            "(or `helm rollback` if there is a completed revision to return to)."
+    if skip_nvcm:
+        step += 1
+        _step(step, total, f"Deploying NetBox to namespace {namespace}")
+        stuck = cluster.pending_release_status(release, namespace)
+        if stuck:
+            raise click.ClickException(
+                f"The {release!r} release is stuck in {stuck}, usually because an earlier run "
+                f"was interrupted mid-install. Clear it with:\n"
+                f"    helm uninstall {release} -n {namespace}\n"
+                "(or `helm rollback` if there is a completed revision to return to)."
+            )
+        stale = cluster.orphaned_data_volumes(release, namespace)
+        if stale:
+            raise click.ClickException(
+                "These volumes hold databases whose passwords are gone, so NetBox would not "
+                f"be able to log in to them:\n    {' '.join(stale)}\n"
+                "Delete them and run this again (the data on them is not recoverable):\n"
+                f"    kubectl delete pvc -n {namespace} {' '.join(stale)}"
+            )
+        cluster.install_netbox(
+            str(chart),
+            release=release,
+            namespace=namespace,
+            api_token=token,
+            image_repository=netbox_image,
+            image_tag=netbox_tag or DEFAULT_NETBOX_TAG,
+            nats_password=nats_password,
         )
-    stale = cluster.orphaned_data_volumes(release, namespace)
-    if stale:
-        raise click.ClickException(
-            "These volumes hold databases whose passwords are gone, so NetBox would not be "
-            f"able to log in to them:\n    {' '.join(stale)}\n"
-            "Delete them and run this again (the data on them is not recoverable):\n"
-            f"    kubectl delete pvc -n {namespace} {' '.join(stale)}"
-        )
-    # Installed with the NATS password already set. NVCM does not exist yet, so
-    # the publisher cannot connect until it does, but the plugin only reads the
-    # password when it publishes -- no second install needed.
-    cluster.install_netbox(
-        str(chart),
-        release=release,
-        namespace=namespace,
-        api_token=token,
-        image_repository=netbox_image,
-        image_tag=netbox_tag or DEFAULT_NETBOX_TAG,
-        nats_password=nats_password,
-    )
-    cluster.wait_for_netbox(namespace)
-    _ok("NetBox rolled out")
+        cluster.wait_for_netbox(namespace)
+        _ok("NetBox rolled out")
 
-    step += 1
-    _step(step, total, "Initialising NetBox (token, custom fields, bootstrap data)")
-    output = cluster.run_nvcm_init(namespace, token)
-    _ok(output.strip().splitlines()[-1] if output.strip() else "nvcm_init complete")
+        step += 1
+        _step(step, total, "Initialising NetBox (token, custom fields, bootstrap data)")
+        output = cluster.run_nvcm_init(namespace, token)
+        _ok(output.strip().splitlines()[-1] if output.strip() else "nvcm_init complete")
 
     step += 1
     _step(step, total, "Generating the NVCM installer config")
@@ -691,7 +736,7 @@ def up(
         nats_password=nats_password,
     )
     config = cfg.apply_options(profile, options)
-    # Absolute: the installer subprocess runs from the NVCM checkout, not here.
+    # Keep the generated file usable by later standalone installer commands.
     written = cfg.write_config(config, config_out).resolve()
     _ok(f"{written}")
 
@@ -709,49 +754,30 @@ def up(
         return
 
     assert repo is not None
-    step += 1
-    _step(step, total, "Validating the config against NVCM's installer")
-    stream(_nvcm_installer_argv(repo, "validate", str(written)))
-
-    step += 1
-    _step(step, total, "Deploying NVCM (this takes a while)")
-    stream(
-        _nvcm_installer_argv(
-            repo,
-            "deploy",
-            str(written),
-            "--image-source",
-            "local",
-            "--build-images",
-            "--load-kind",
-            "--kind-cluster",
-            kind_cluster,
-            "--install-envoy-gateway",
-            "--install-cnpg-operator",
-            "--install-cert-manager",
-        )
+    install_config = NVConfigManagerInstallConfig.model_validate(config)
+    install_config.images.source = ImageSource.LOCAL
+    deployer = NetBoxDeployer(
+        install_config,
+        DeployOptions(
+            project_root=repo,
+            chart_dir=str(repo / "deploy" / "helm"),
+            build_images=True,
+            load_kind=kind_load,
+            kind_cluster=kind_cluster,
+            install_envoy_gateway=True,
+            install_cnpg_operator=True,
+            install_cert_manager=True,
+        ),
+        NetBoxDeploymentSettings(
+            chart=chart.resolve(),
+            release=release,
+            image_repository=netbox_image,
+            image_tag=netbox_tag or DEFAULT_NETBOX_TAG,
+        ),
+        _ClickDeployCallback(),
     )
-
-    step += 1
-    _step(step, total, "Publishing NetBox through NVCM's Gateway")
-    # Only possible now: the HTTPRoute needs the Gateway API CRDs that the deploy
-    # above installs. Not fatal -- NVCM and NetBox are both up and working at this
-    # point, and the only thing missing is browser access by hostname.
-    try:
-        cluster.publish_netbox_route(str(chart), release=release, namespace=namespace)
-    except CommandError as exc:
-        _warn(
-            f"Could not re-render the NetBox route:\n{exc.output}\n"
-            f"      Retry with: helm upgrade {release} {chart} -n {namespace} --reuse-values"
-        )
-    if cluster.netbox_route_exists(namespace):
-        _ok(f"HTTPRoute {cluster.NETBOX_ROUTE} created")
-    else:
-        _warn(
-            "No NetBox HTTPRoute after the upgrade, so the hostname below will not\n"
-            "      resolve. Use the port-forward instead, and check that NVCM's Gateway\n"
-            "      exists (kubectl get gateway -n " + namespace + ")."
-        )
+    if not deployer.run():
+        raise click.ClickException("NVCM + NetBox deployment failed; see the step output above.")
 
     step += 1
     if skip_verify:

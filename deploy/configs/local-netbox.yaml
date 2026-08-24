@@ -24,7 +24,7 @@ cluster:
   namespace: nv-config-manager
   release_name: nv-config-manager
   airgapped: false
-  mock_devices: false
+  mock_devices: true
   # small = single-replica dev profile (8 vCPU / 24GB). medium and large raise
   # replica counts and resource requests; override with `nvcm-netbox up --size`.
   size: small
@@ -67,7 +67,8 @@ network_secrets:
     required: true
 
 sites:
-  - name: test-site
+  # Matches the default air_trial blueprint and its deployment-name fallback.
+  - name: TRIAL01 - air_trial
 
 sso:
   enabled: false
@@ -81,9 +82,8 @@ dcim:
   # In-cluster Service created by deploy/netbox (fullnameOverride: netbox), in
   # the same namespace as NVCM. No host networking, no port-forward.
   server: http://netbox
-  # Browser-facing URL used for device links in the NVCM UI. Defaults to the
-  # port-forward documented in docs/deployment.md.
-  public_url: http://127.0.0.1:8080
+  # Browser-facing route published by the provider installer.
+  public_url: https://netbox.config-manager.local
   display_name: NetBox
   # Provisions the JetStream stream and sets [nats] dcim_change_stream /
   # dcim_change_subject. `subject` must equal the NetBox plugin's nats_subject
@@ -98,7 +98,8 @@ dcim:
 
 content:
   jobs: []
-  template_plugins: []
+  template_plugins:
+    - path: development/air_sim/template_plugins/superpod-template-plugin
 
 services:
   render: true

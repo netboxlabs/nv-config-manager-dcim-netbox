@@ -63,10 +63,24 @@ class NetBoxIPAMMixin:
             )
         )
 
-    async def assign_vrf_to_interface(self, interface_id: str, vrf_id: str) -> None:
+    async def assign_vrf_to_interface(self, interface_id: str, vrf_id: str | None) -> None:
         await self.rest_request(
-            "PATCH", f"{INTERFACES_PATH}{interface_id}/", json={"vrf": int(vrf_id)}
+            "PATCH",
+            f"{INTERFACES_PATH}{interface_id}/",
+            json={"vrf": int(vrf_id) if vrf_id is not None else None},
         )
+
+    async def remove_unmapped_device_vrfs(
+        self,
+        device_id: str,
+        vrf_ids: list[str],
+    ) -> list[str]:
+        """Return no removals because NetBox has no separate device/VRF relation.
+
+        Interface VRF changes are the complete source of truth in NetBox, so
+        there is no device-level association left to reconcile afterward.
+        """
+        return []
 
     async def get_namespace_route_distinguishers(
         self, site: str, namespace_tag: str

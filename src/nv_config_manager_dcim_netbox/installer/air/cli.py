@@ -123,7 +123,7 @@ def _render_example(blueprint: str, name: str) -> str:
         "# keys that must be chosen are set, because everything NetBox needs already",
         "# defaults correctly. Do not replace it with NVCM's own",
         "# development/air_sim/configs/air_trial.yaml: that sets config_manager_ref",
-        "# explicitly, and run_mock_topology_job, which `air up` forces off anyway.",
+        "# explicitly and enables the bundled Nautobot population job.",
         "",
     ]
     for key in _REQUIRED_KEYS:
@@ -147,53 +147,6 @@ def _render_example(blueprint: str, name: str) -> str:
 @click.group()
 def air() -> None:
     """Create a DSX Air simulation using NetBox as the DCIM provider."""
-
-
-def _use_blueprint_without_the_dcim_job(cfg) -> None:
-    """Keep everything `run_mock_topology_job` gives except the DCIM job.
-
-    That one flag drives three separate things:
-
-    1. generating the simulation's fabric from the blueprint (orchestrator)
-    2. registering a post-deploy job that loads the blueprint into the *bundled*
-       DCIM, which this deployment does not have
-    3. adding the demo template plugin, which is what renders configs for the
-       demo fabrics
-
-    Only 2 is unwanted, so clearing the flag outright is wrong: it left the
-    orchestrator with no topology at all ("topology_path is required when
-    run_mock_topology_job is disabled") and silently dropped the templates.
-
-    So 1 and 3 are done here using NVCM's own helpers, then the flag is cleared
-    to suppress only 2. nvcm_load_dcim loads the same blueprint into NetBox
-    afterwards.
-    """
-    from nv_config_manager_installer.air_sim.constants import (
-        DEFAULT_AIR_DEMO_TEMPLATE_PLUGIN_PATH,
-    )
-    from nv_config_manager_installer.air_sim.context_topology import (
-        write_site_design_from_mock_context,
-    )
-    from nv_config_manager_installer.air_sim.installer_config import _DEMO_TEMPLATE_BLUEPRINTS
-
-    if not cfg.run_mock_topology_job:
-        # Already off, or the caller supplied a topology of their own. Nothing to
-        # preserve, and overriding an explicit topology_path would be wrong.
-        return
-
-    # 1. The fabric the sim boots.
-    if not cfg.topology_path:
-        cfg.topology_path = write_site_design_from_mock_context(
-            cfg.mock_blueprint, cfg.deployment_name
-        )
-
-    # 3. The templates that render it.
-    if cfg.mock_blueprint in _DEMO_TEMPLATE_BLUEPRINTS:
-        demo_plugin = DEFAULT_AIR_DEMO_TEMPLATE_PLUGIN_PATH.as_posix()
-        if demo_plugin not in cfg.template_plugin_paths:
-            cfg.template_plugin_paths = [*cfg.template_plugin_paths, demo_plugin]
-
-    cfg.run_mock_topology_job = False
 
 
 @air.command("config")
@@ -270,10 +223,10 @@ def air_up(
     points NVCM's install config at it.
     """
     try:
-        from nv_config_manager_installer.air_sim.orchestrator import SimOrchestrator
-
-        from nv_config_manager_dcim_netbox.installer.air.callback import NetBoxAirCallback
         from nv_config_manager_dcim_netbox.installer.air.config import NetBoxSimConfig
+        from nv_config_manager_dcim_netbox.installer.air.orchestrator import (
+            NetBoxSimOrchestrator,
+        )
     except AirSupportUnavailable as exc:
         raise click.ClickException(str(exc)) from exc
     except ImportError as exc:
@@ -291,12 +244,10 @@ def air_up(
     if blueprint is not None:
         cfg.load_blueprint = blueprint
 
-    _use_blueprint_without_the_dcim_job(cfg)
+    orchestrator = NetBoxSimOrchestrator(cfg, ConsoleCallback(), chart=chart)
+    click.secho(f"NetBox API token: {orchestrator.api_token}", fg="yellow")
 
-    callback = NetBoxAirCallback(ConsoleCallback(), cfg, chart=chart)
-    click.secho(f"NetBox API token: {callback.api_token}", fg="yellow")
-
-    SimOrchestrator(cfg, callback).run()
+    orchestrator.run()
 
 
 # The sim's own hostnames, which resolve only through the tunnel: they live in
