@@ -143,9 +143,7 @@ class SshRunner:
         """Return *exc* with the box's SSH password removed.
 
         NVCM's ``_ssh_cmd`` builds ``sshpass -p <password> ssh ...``, and
-        ``CommandError`` renders argv into its message -- which callers log. So
-        every failed remote command printed the sim box's password to the
-        terminal, and into any CI output capturing it.
+        ``CommandError`` renders argv into its message, which callers log.
         """
         secret = getattr(self._manager, "ssh_password", "") or ""
         if not secret:

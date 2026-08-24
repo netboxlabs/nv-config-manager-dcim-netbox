@@ -25,14 +25,24 @@ _VRFS = [
 ]
 
 
-def _client_with_vrfs(vrfs):
+def _client_with_vrfs(vrfs, sites=None):
+    """A client whose VRF reads return *vrfs*.
+
+    ``sites`` answers the Site lookup that normalizes a site selection to the slug
+    ``cf_nvcm_site`` holds; left empty, the value is filtered on unchanged.
+    """
     client = create_dcim_client("netbox", _SETTINGS)
+    seen: list[tuple[str, dict]] = []
 
     async def fake_rest_list(path, params=None):
+        seen.append((path, dict(params or [])))
+        if path == "dcim/sites/":
+            return list(sites or [])
         assert path == "ipam/vrfs/"
         return vrfs
 
     client.rest_list = fake_rest_list
+    client._seen = seen
     return client
 
 

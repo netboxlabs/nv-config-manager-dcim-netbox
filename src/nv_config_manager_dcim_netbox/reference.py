@@ -217,10 +217,13 @@ class NetBoxReferenceMixin:
         field (NetBox VRFs have no native site link). This is guarded on that
         field: when ``location`` is omitted no scoping is applied, and where the
         field is undefined the query is simply unconstrained.
+
+        Resolved to the Site slug first, which is what that field holds. See
+        :meth:`_site_field_value`.
         """
         params: list[tuple[str, str]] = []
         if location:
-            params.append(("cf_nvcm_site", location))
+            params.append(("cf_nvcm_site", await self._site_field_value(location)))
         vrfs = await self.rest_list(VRFS_PATH, params)
         # Names only — deliberately not ``_mappers.tag_names``, which also returns
         # slugs. These are offered to operators as choices, so a tag must appear
@@ -240,13 +243,16 @@ class NetBoxReferenceMixin:
         if isolation_type:
             params.append(("isolation_type", isolation_type))
         if location:
-            # Callers pass a site/location name/slug; the overlay is scoped to a
-            # Site or Location (CachedScopeMixin), filtered here by scope_id.
-            _scope_type, scope_id = await self._resolve_scope(location)
-            if scope_id is None:
-                # No NetBox Site/Location by that name -> nothing can match it.
+            # The only caller that cannot say which model it means: this lists both
+            # kinds of overlay, and SpectrumX anchors at a Site while InfiniBand
+            # anchors at a Location. Whichever resolves is filtered on, with its
+            # scope_type -- pks are per-model, so scope_id alone would also match
+            # the other model's overlays.
+            scope_type, row = await self._resolve_any_scope(location)
+            if row is None:
                 return []
-            params.append(("scope_id", str(scope_id)))
+            params.append(("scope_id", str(row["id"])))
+            params.append(("scope_type", str(scope_type)))
         overlays = await self.rest_list(self.OVERLAYS_PATH, params)
         return _selections(overlays)
 

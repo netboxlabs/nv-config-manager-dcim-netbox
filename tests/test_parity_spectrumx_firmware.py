@@ -33,7 +33,7 @@ def _spx_client(*, gql=None, rest_list=None, record=None, overlay="unset", tenan
     patch = {}
     if overlay != "unset":
 
-        async def fake_find_overlay(name, scope=None):
+        async def fake_find_overlay(name, scope=None, *, scope_type=None):
             return overlay
 
         patch["_find_overlay"] = fake_find_overlay
@@ -41,9 +41,16 @@ def _spx_client(*, gql=None, rest_list=None, record=None, overlay="unset", tenan
     async def fake_tenant(name):
         return tenant
 
-    async def fake_resolve_scope(value):
-        # ``location`` here is the resolved scope PK; anchor as a Site scope.
-        return "dcim.site", location
+    async def fake_resolve_scope(value, *, scope_type):
+        # ``location`` is the scope pk. The slug is derived from the value the
+        # way NetBox relates the two, so the round-trip these tests check --
+        # what provision writes to cf_nvcm_site is what the RD allocator
+        # filters on -- is exercised rather than hidden behind a constant.
+        return {
+            "id": location,
+            "name": str(value),
+            "slug": str(value).lower().replace(" ", "-"),
+        }
 
     patch["_resolve_tenant_id"] = fake_tenant
     patch["_resolve_scope"] = fake_resolve_scope

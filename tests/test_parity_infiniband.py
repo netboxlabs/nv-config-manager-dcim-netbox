@@ -249,7 +249,7 @@ async def test_adopt_orphan_creates_overlay_with_tenant_and_links():
         record=record,
     )
 
-    async def find_overlay(name, location=None):
+    async def find_overlay(name, location=None, *, scope_type=None):
         return None
 
     client._find_overlay = find_overlay

@@ -80,10 +80,15 @@ class NetBoxIPAMMixin:
         do not draw RD candidates from an unrelated site's namespaces. This is
         guarded on that field being defined; the ``namespace_tag`` (matched by
         VRF tag name or slug) still defines the zone within the site.
+
+        ``site`` is resolved to the Site slug before filtering, because that is what
+        ``cf_nvcm_site`` holds — both from the plugin's loader and from
+        ``provision_spectrum_x_vrf``. NVCM sends the pk it got from
+        ``list_locations``, which would match no zone.
         """
         params: list[tuple[str, str]] = []
         if site:
-            params.append(("cf_nvcm_site", site))
+            params.append(("cf_nvcm_site", await self._site_field_value(site)))
         vrfs = await self.rest_list(VRFS_PATH, params)
         out: list[NamespaceRouteDistinguisher] = []
         for vrf in vrfs:

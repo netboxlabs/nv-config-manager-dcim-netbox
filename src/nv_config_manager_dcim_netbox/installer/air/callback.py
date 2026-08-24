@@ -131,13 +131,10 @@ class NetBoxAirCallback:
     def _netbox_is_deployed(self, host: str, port: int) -> bool:
         """Whether NetBox actually reached the sim's cluster.
 
-        ``success`` does not answer this. NVCM's orchestrator reports the run as
+        ``success`` does not answer this: NVCM's orchestrator reports the run as
         successful even when `wait-setup` failed and it therefore skipped
         `upload-files` and `run-deploy` (``orchestrator.run`` sets ``success =
-        True`` whenever ``_run_impl`` returns, and it returns the host/port it
-        already had). Publishing then failed twice, confusingly -- once on a chart
-        directory that was never uploaded, once with "no NVCM hosts entry yet" --
-        when the real story was that nothing had been deployed at all.
+        True`` whenever ``_run_impl`` returns).
         """
         try:
             return cluster.netbox_service_exists(NAMESPACE, runner=self.runner(host, port))
@@ -272,15 +269,14 @@ class NetBoxAirCallback:
     def publish_route(self, host: str, port: int) -> None:
         """Create NetBox's HTTPRoute, now that the Gateway API CRDs are registered.
 
-        The bring-up installs the chart before NVCM deploys, so at that point the
-        Gateway API does not exist on the box and templates/httproute.yaml is
-        skipped -- rendering an HTTPRoute without its CRDs fails the whole release.
-        Nothing else upgrades the release afterwards, so without this the sim's
-        `https://netbox.<hostname>` never routes, even though publish_hostname
-        resolves the name.
+        The bring-up installs the chart before NVCM deploys, so the Gateway API does
+        not exist on the box yet and templates/httproute.yaml is skipped --
+        rendering an HTTPRoute without its CRDs fails the whole release. Nothing
+        else upgrades the release afterwards, so without this pass the sim's
+        `https://netbox.<hostname>` never routes.
 
-        The chart is still unpacked at the path the bring-up put it, and
-        --reuse-values replays the install's own values.
+        The chart is still unpacked where the bring-up put it, and --reuse-values
+        replays the install's own values.
         """
         runner = self.runner(host, port)
         remote_chart = f"/home/{NVCM_BOX_USER}/charts/{self.chart.name}"

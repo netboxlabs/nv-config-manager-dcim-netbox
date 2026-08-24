@@ -261,10 +261,9 @@ def publish_netbox_route(
     ``templates/httproute.yaml`` is gated on the Gateway API being registered,
     because rendering an HTTPRoute before the CRDs exist fails the whole release.
     Those CRDs arrive with NVCM's deploy (``--install-envoy-gateway``), which runs
-    *after* NetBox -- NetBox has to exist first to own the API token NVCM
-    authenticates with. So on a first install the route is skipped, and without
-    this second pass nothing ever renders it: browser access to NetBox silently
-    does not work until someone happens to upgrade the release again.
+    after NetBox -- NetBox has to exist first to own the API token NVCM
+    authenticates with. Nothing else upgrades the release afterwards, so without
+    this pass the route is never created.
 
     ``--reuse-values`` replays the values the install used (token, image, NATS
     password), so the caller does not have to know them to re-render.
@@ -290,8 +289,7 @@ def netbox_route_exists(namespace: str, runner: Runner | None = None) -> bool:
 
     Checked after :func:`publish_netbox_route` rather than assumed: a successful
     upgrade still renders nothing if the Gateway API is missing or
-    ``nvcm.gateway.enabled`` is false, and the failure mode is a hostname that
-    does not resolve much later.
+    ``nvcm.gateway.enabled`` is false.
     """
     try:
         kubectl(

@@ -239,13 +239,12 @@ class NetBoxInventoryMixin:
     async def _platform_params(self, platforms) -> list[tuple[str, str]] | None:
         """Query params for a platform filter, dropping platforms NetBox lacks.
 
-        ``None`` means every requested platform is absent, so nothing can match --
-        which callers must turn into an empty result rather than an unfiltered
-        query, or a backup scoped to one platform would sweep the whole fleet.
+        ``None`` means every requested platform is absent, so nothing can match;
+        callers must turn that into an empty result, never an unfiltered query.
 
-        NetBox ORs a repeated param, so the platforms that *do* exist still select
+        NetBox ORs a repeated param, so the platforms that do exist still select
         exactly the devices they should. See :meth:`_known_platform_slugs` for why
-        this check is needed for platforms and not for site/tenant/role.
+        the check is needed for platforms and not for site/tenant/role.
         """
         pairs = [slug_or_id("platform", getattr(p, "value", p)) for p in platforms or ()]
         if not pairs:
@@ -273,19 +272,16 @@ class NetBoxInventoryMixin:
 
         NetBox's ``platform`` filter is a choice field over existing slugs, so a
         value it does not have is rejected with HTTP 400 ("Select a valid choice")
-        and the *whole* device query fails.
+        and the whole device query fails.
 
-        Platforms are the one selection filter where that is reachable in normal
-        use. Site, tenant and role values reach us from NVCM forms that our own
+        Platforms are the only selection filter where that is reachable. Site,
+        tenant and role values come from NVCM forms that our own
         ``list_locations``/``list_tenants``/``list_roles`` populated, so they exist
-        by construction. ``Platform`` is a fixed enum in the SDK
-        (``arista-eos``, ``cumulus-linux``, ``nv-os``, ``mlnx-os``,
-        ``juniper-junos``, ``ufm``), and a workflow sends whichever members it
-        supports regardless of what the DCIM holds — so a Cumulus-only fabric made
-        Site Configuration Backup fail outright on ``juniper-junos``.
+        by construction; ``Platform`` is a fixed enum in the SDK and a workflow
+        sends whichever members it supports regardless of what the DCIM holds.
 
-        Cached for the client's lifetime: platforms are reference data, and the
-        alternative is this lookup on every device selection.
+        Cached for the client's lifetime — reference data, on the path of every
+        device selection.
         """
         if self._platform_slugs is None:
             data = await self.graphql_query("query { platform_list { slug } }")
