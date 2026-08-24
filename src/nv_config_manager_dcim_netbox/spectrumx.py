@@ -23,7 +23,11 @@ import logging
 from nv_config_manager_dcim import DCIMConflictError, DCIMInvalidDataError, SpectrumXVRF
 
 from nv_config_manager_dcim_netbox._mappers import tag_names
-from nv_config_manager_dcim_netbox.fabric_common import FABRIC_STATUS, VRFS_PATH
+from nv_config_manager_dcim_netbox.fabric_common import (
+    FABRIC_STATUS,
+    SITE_SCOPE_TYPE,
+    VRFS_PATH,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +60,7 @@ class NetBoxSpectrumXMixin:
     async def get_spectrum_x_vrfs(
         self, overlay_name: str, site: str, namespace: str | None = None
     ) -> list[SpectrumXVRF]:
-        overlay = await self._find_overlay(overlay_name, site)
+        overlay = await self._find_overlay(overlay_name, site, scope_type=SITE_SCOPE_TYPE)
         if not overlay:
             return []
         vxlans = await self.rest_list(self.VXLANS_PATH, [("overlay_id", str(overlay["id"]))])
@@ -115,7 +119,16 @@ class NetBoxSpectrumXMixin:
         # Track every object created across all namespaces for reverse-order rollback.
         created: list[tuple[str, int]] = []
 
-        overlay = await self._find_overlay(overlay_name, site)
+        # Resolved once, and before the overlay lookup so an unknown site is
+        # reported whether or not the overlay already exists. The row carries both
+        # things needed below: the pk for the overlay's scope, and the slug for the
+        # VRFs' cf_nvcm_site.
+        site_row = await self._resolve_scope(site, scope_type=SITE_SCOPE_TYPE)
+        if site_row is None:
+            raise DCIMInvalidDataError(f"NetBox has no Site {site!r} for the Spectrum-X overlay")
+        site_slug = site_row["slug"]
+
+        overlay = await self._find_overlay(overlay_name, site, scope_type=SITE_SCOPE_TYPE)
         if overlay:
             # Guard against cross-tenant contamination: reusing an existing
             # overlay is only safe when it already belongs to this tenant.
@@ -127,18 +140,13 @@ class NetBoxSpectrumXMixin:
                 )
             overlay_id = overlay["id"]
         else:
-            scope_type, scope_id = await self._resolve_scope(site)
-            if scope_id is None:
-                raise DCIMInvalidDataError(
-                    f"NetBox has no Site or Location named {site!r} for the Spectrum-X overlay"
-                )
             row = await self.rest_request(
                 "POST",
                 self.OVERLAYS_PATH,
                 json={
                     "name": overlay_name,
-                    "scope_type": scope_type,
-                    "scope_id": scope_id,
+                    "scope_type": SITE_SCOPE_TYPE,
+                    "scope_id": site_row["id"],
                     "tenant": tenant_id,
                     "isolation_type": _SPECTRUMX_ISOLATION,
                     "status": FABRIC_STATUS,
@@ -158,9 +166,11 @@ class NetBoxSpectrumXMixin:
                         "name": vrf_name,
                         "rd": route_distinguisher,
                         "tenant": tenant_id,
-                        # Scopes the VRF to its site for get_namespace_route_distinguishers,
-                        # which filters on cf_nvcm_site.
-                        "custom_fields": {_SITE_FIELD: site},
+                        # The Site *slug*, which is what the plugin's loader seeds on
+                        # namespace zones and what get_namespace_route_distinguishers
+                        # filters cf_nvcm_site by. Writing the raw incoming value
+                        # would store a pk here and never match those zones.
+                        "custom_fields": {_SITE_FIELD: site_slug},
                     },
                 )
                 created.append((VRFS_PATH, vrf["id"]))
@@ -225,7 +235,7 @@ class NetBoxSpectrumXMixin:
         await self._safe_delete(f"{VRFS_PATH}{vrf_id}/")
 
     async def delete_spectrum_x_overlay_if_unused(self, overlay_name: str, site: str) -> bool:
-        overlay = await self._find_overlay(overlay_name, site)
+        overlay = await self._find_overlay(overlay_name, site, scope_type=SITE_SCOPE_TYPE)
         if not overlay:
             return False
         vxlans = await self.rest_list(self.VXLANS_PATH, [("overlay_id", str(overlay["id"]))])
@@ -237,7 +247,7 @@ class NetBoxSpectrumXMixin:
     async def reconcile_spectrum_x_overlay_assignments(
         self, overlay_name: str, site: str, device_id: str, interface_ids: list[str]
     ) -> tuple[int, int]:
-        overlay = await self._find_overlay(overlay_name, site)
+        overlay = await self._find_overlay(overlay_name, site, scope_type=SITE_SCOPE_TYPE)
         if not overlay:
             raise DCIMInvalidDataError(f"Spectrum-X overlay {overlay_name!r} not found")
         if overlay.get("isolation_type") != _SPECTRUMX_ISOLATION:

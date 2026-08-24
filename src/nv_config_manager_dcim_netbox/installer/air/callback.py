@@ -112,16 +112,35 @@ class NetBoxAirCallback:
         # needs nothing here. Its HTTPRoute does: that could not render during
         # bring-up because NVCM's deploy had not yet registered the Gateway API
         # CRDs, and this is the first point at which it has.
-        if success:
+        box, box_port = host or self.host, port or self.port
+        if success and self._netbox_is_deployed(box, box_port):
             for label, action in (
                 ("publish the NetBox route", self.publish_route),
                 (f"add {self.cfg.netbox_hostname()} to /etc/hosts", self.publish_hostname),
             ):
                 try:
-                    action(host or self.host, port or self.port)
+                    action(box, box_port)
                 except Exception as exc:  # noqa: BLE001 - cosmetic, never fail the deploy
                     self.on_log(f"Could not {label}: {exc}")
+        elif success:
+            self.on_log(
+                "NetBox is not on the sim's cluster, so its route and /etc/hosts entry "
+                "were skipped. Nothing was deployed — see the failed step above."
+            )
         self._inner.on_complete(success, host, port)
+
+    def _netbox_is_deployed(self, host: str, port: int) -> bool:
+        """Whether NetBox actually reached the sim's cluster.
+
+        ``success`` does not answer this: NVCM's orchestrator reports the run as
+        successful even when `wait-setup` failed and it therefore skipped
+        `upload-files` and `run-deploy` (``orchestrator.run`` sets ``success =
+        True`` whenever ``_run_impl`` returns).
+        """
+        try:
+            return cluster.netbox_service_exists(NAMESPACE, runner=self.runner(host, port))
+        except Exception:  # noqa: BLE001 - an unreachable box is "not deployed" too
+            return False
 
     # -- the work ------------------------------------------------------------
 
@@ -275,6 +294,26 @@ class NetBoxAirCallback:
             self.runner(host, port).upload(local, remote)
 
         quoted = shlex.quote(remote)
+
+        # The uploads just above prove the box was reachable, but the bring-up
+        # opens a *fresh* connection and a still-settling sshd refuses the odd one
+        # with exit 255. `SshRunner` retries precisely that; NVCM's
+        # `_ssh_run_and_tail` does not, and it cannot tell a refused connection
+        # from a script that failed -- both surface as "did not finish".
+        #
+        # So the session is established through the retrying runner first. The
+        # script itself is expensive and not worth re-running blindly, so it is
+        # still handed to the tail exactly once.
+        try:
+            self.runner(host, port).run(["true"])
+        except Exception as exc:  # noqa: BLE001 - re-raised with what it means
+            raise RuntimeError(
+                "Could not open a session on the sim box to run the NetBox bring-up, "
+                f"though the uploads just before it succeeded:\n  {exc}\n"
+                "If that says 'Permission denied', the box's nvcm password no longer "
+                "matches oob_ssh_password in the sim config."
+            ) from exc
+
         ok = self._manager._ssh_run_and_tail(
             host,
             port,
@@ -293,15 +332,14 @@ class NetBoxAirCallback:
     def publish_route(self, host: str, port: int) -> None:
         """Create NetBox's HTTPRoute, now that the Gateway API CRDs are registered.
 
-        The bring-up installs the chart before NVCM deploys, so at that point the
-        Gateway API does not exist on the box and templates/httproute.yaml is
-        skipped -- rendering an HTTPRoute without its CRDs fails the whole release.
-        Nothing else upgrades the release afterwards, so without this the sim's
-        `https://netbox.<hostname>` never routes, even though publish_hostname
-        resolves the name.
+        The bring-up installs the chart before NVCM deploys, so the Gateway API does
+        not exist on the box yet and templates/httproute.yaml is skipped --
+        rendering an HTTPRoute without its CRDs fails the whole release. Nothing
+        else upgrades the release afterwards, so without this pass the sim's
+        `https://netbox.<hostname>` never routes.
 
-        The chart is still unpacked at the path the bring-up put it, and
-        --reuse-values replays the install's own values.
+        The chart is still unpacked where the bring-up put it, and --reuse-values
+        replays the install's own values.
         """
         runner = self.runner(host, port)
         remote_chart = f"/home/{NVCM_BOX_USER}/charts/{self.chart.name}"

@@ -25,7 +25,7 @@ def _client(gql=None, rest_list=None, record=None, overlay="unset"):
     patch = {}
     if overlay != "unset":
 
-        async def fake_find_overlay(name, location=None):
+        async def fake_find_overlay(name, location=None, *, scope_type=None):
             return overlay
 
         patch["_find_overlay"] = fake_find_overlay
@@ -60,14 +60,15 @@ async def test_provision_spectrum_x_vrf_creates_overlay_vrf_assignment_vxlan():
     location-unresolved error branch was covered."""
     record = []
 
-    async def no_overlay(name, scope=None):
+    async def no_overlay(name, scope=None, *, scope_type=None):
         return None
 
     async def tenant_id(name):
         return 7
 
-    async def resolve_scope(value):
-        return "dcim.site", 3
+    async def resolve_scope(value, *, scope_type):
+        assert scope_type == "dcim.site", scope_type
+        return {"id": 3, "name": "SPO01", "slug": "spo01"}
 
     client = fake_client(
         record=record,
@@ -89,11 +90,14 @@ async def test_provision_spectrum_x_vrf_creates_overlay_vrf_assignment_vxlan():
     assert posts[_OVERLAYS]["name"] == "SpX"
     assert posts[_OVERLAYS]["scope_type"] == "dcim.site" and posts[_OVERLAYS]["scope_id"] == 3
     assert posts[_OVERLAYS]["tenant"] == 7
+    # nvcm_site is the *resolved* Site slug, not the value NVCM passed in: that is
+    # what the plugin's loader seeds on namespace zones, and what the RD allocator
+    # filters on. Here `site="rack-1"` resolves to the stub Site slugged "spo01".
     assert posts["ipam/vrfs/"] == {
         "name": "SpXTenant1500",
         "rd": "65001:1500",
         "tenant": 7,
-        "custom_fields": {"nvcm_site": "rack-1"},
+        "custom_fields": {"nvcm_site": "spo01"},
     }
     assert posts[_ASSIGN]["assigned_object_type"] == "ipam.vrf"
     assert posts[_VXLANS]["vnid"] == 1500 and posts[_VXLANS]["name"] == "SpXTenant1500"
@@ -152,14 +156,15 @@ async def test_provision_rollback_does_not_mask_the_original_failure():
     the rollback — not the cleanup error, which hides the real cause."""
     record = []
 
-    async def no_overlay(name, scope=None):
+    async def no_overlay(name, scope=None, *, scope_type=None):
         return None
 
     async def tenant_id(name):
         return 7
 
-    async def resolve_scope(value):
-        return "dcim.site", 3
+    async def resolve_scope(value, *, scope_type):
+        assert scope_type == "dcim.site", scope_type
+        return {"id": 3, "name": "SPO01", "slug": "spo01"}
 
     client = fake_client(
         record=record,
@@ -220,12 +225,12 @@ async def test_find_overlay_scopes_by_type_as_well_as_id():
             seen.append(list(params or []))
         return []
 
-    async def resolve_scope(value):
-        return "dcim.site", 5
+    async def resolve_scope(value, *, scope_type):
+        return {"id": 5, "name": "Site A", "slug": "site-a"}
 
     client.rest_list = rest_list
     client._resolve_scope = resolve_scope
-    assert await client._find_overlay("nvcm-spx", "site-a") is None
+    assert await client._find_overlay("nvcm-spx", "site-a", scope_type="dcim.site") is None
     assert ("scope_id", "5") in seen[0]
     assert ("scope_type", "dcim.site") in seen[0]
 

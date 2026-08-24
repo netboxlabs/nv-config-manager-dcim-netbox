@@ -262,3 +262,131 @@ def test_slug_or_id_slugifies_punctuation_the_way_netbox_does():
     for name in ("DSX Air (DC1)", "  padded  ", "Acme, Inc.", "a--b"):
         key, value = slug_or_id("site", name)
         assert re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", value), (name, value)
+
+
+async def test_a_platform_netbox_does_not_have_is_dropped_not_sent():
+    """`Platform` is a fixed enum in the SDK, so a workflow sends whichever members
+    it supports regardless of what the DCIM holds.
+
+    NetBox's `platform` filter is a choice field over existing slugs, so an absent
+    one fails the *whole* query with HTTP 400 ("Select a valid choice.
+    juniper-junos is not one of the available choices") — which killed Site
+    Configuration Backup outright on a Cumulus-only fabric.
+
+    NetBox ORs a repeated param, so the platforms that do exist still select
+    exactly the devices they should.
+    """
+    from nv_config_manager_dcim import DCIMDeviceSelectionFilter, Platform
+
+    from tests._fake import params_for
+
+    queries: list = []
+    client = _client(
+        rest_list={"dcim/devices/": [_REST_DEVICE]},
+        gql={"platform_list": [{"slug": "cumulus-linux"}]},
+        queries=queries,
+    )
+    await client.list_devices(
+        DCIMDeviceSelectionFilter(platforms=[Platform.CUMULUS_LINUX, Platform.JUNIPER_JUNOS])
+    )
+
+    sent = [v for k, v in params_for(queries, "dcim/devices/") if k == "platform"]
+    assert sent == ["cumulus-linux"], sent
+
+
+async def test_no_matching_platform_selects_nothing_rather_than_everything():
+    # Dropping the filter entirely would back up the whole fleet instead of the
+    # nothing the caller actually asked for.
+    from nv_config_manager_dcim import DCIMDeviceSelectionFilter, Platform
+
+    from tests._fake import params_for
+
+    queries: list = []
+    client = _client(
+        rest_list={"dcim/devices/": [_REST_DEVICE]},
+        gql={"platform_list": [{"slug": "cumulus-linux"}]},
+        queries=queries,
+    )
+    result = await client.list_devices(
+        DCIMDeviceSelectionFilter(platforms=[Platform.JUNIPER_JUNOS])
+    )
+
+    assert result == []
+    assert not params_for(queries, "dcim/devices/"), "queried NetBox with no usable filter"
+
+
+async def test_the_platform_list_is_read_once_per_client():
+    # Reference data on the hot path of every device selection.
+    from nv_config_manager_dcim import DCIMDeviceSelectionFilter, Platform
+
+    client = _client(
+        rest_list={"dcim/devices/": [_REST_DEVICE]},
+        gql={"platform_list": [{"slug": "cumulus-linux"}]},
+    )
+    calls = []
+    inner = client.graphql_query
+
+    async def _counting(query, variables=None):
+        calls.append(query)
+        return await inner(query, variables)
+
+    client.graphql_query = _counting
+    for _ in range(3):
+        await client.list_devices(DCIMDeviceSelectionFilter(platforms=[Platform.CUMULUS_LINUX]))
+
+    assert len([q for q in calls if "platform_list" in q]) == 1, calls
+
+
+async def test_site_backup_survives_a_platform_the_fabric_does_not_have():
+    """The failure reported from Site Configuration Backup.
+
+    `site_backup.py` calls get_network_devices, which builds its params through a
+    different path than list_devices. NetBox answered the whole query with
+    HTTP 400 — {"platform":["Select a valid choice. juniper-junos is not one of
+    the available choices."]} — so the workflow died instead of backing up the
+    Cumulus devices it could see.
+    """
+    from nv_config_manager_dcim import DeviceInventoryFilter, Platform
+
+    from tests._fake import params_for
+
+    queries: list = []
+    client = _client(
+        rest_list={"dcim/devices/": [_REST_DEVICE]},
+        gql={"platform_list": [{"slug": "cumulus-linux"}]},
+        queries=queries,
+    )
+    result = await client.get_network_devices(
+        DeviceInventoryFilter(
+            sites=["1"], platforms=[Platform.CUMULUS_LINUX, Platform.JUNIPER_JUNOS]
+        )
+    )
+
+    assert [d.name for d in result] == ["leaf-01"]
+    sent = [v for k, v in params_for(queries, "dcim/devices/") if k == "platform"]
+    assert sent == ["cumulus-linux"], sent
+
+
+async def test_an_unreadable_platform_list_forwards_the_filter_unchecked():
+    """Fail open, not closed.
+
+    An empty platform list means either a NetBox with no platforms — where a
+    platform filter cannot match anyway — or a `platform_list` read that came back
+    empty. Treating the second as "nothing matches" would silently empty the
+    result of every platform-scoped workflow, which is worse than the 400 this
+    check exists to prevent.
+    """
+    from nv_config_manager_dcim import DCIMDeviceSelectionFilter, Platform
+
+    from tests._fake import params_for
+
+    queries: list = []
+    client = _client(
+        rest_list={"dcim/devices/": [_REST_DEVICE]}, gql={"platform_list": []}, queries=queries
+    )
+    result = await client.list_devices(
+        DCIMDeviceSelectionFilter(platforms=[Platform.CUMULUS_LINUX])
+    )
+
+    assert [d.name for d in result] == ["leaf-01"]
+    assert ("platform", "cumulus-linux") in params_for(queries, "dcim/devices/")

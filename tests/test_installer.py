@@ -436,7 +436,9 @@ def test_up_uses_the_inherited_deployer_with_provider_settings(monkeypatch, tmp_
     assert result.exit_code == 0, result.output
     assert captured["config"].dcim.provider == "netbox"
     assert captured["config"].images.source.value == "local"
-    assert captured["options"].project_root == repo
+    # .resolve(), as _resolve_nvcm_repo does: on macOS tmp_path is under
+    # /var/folders, a symlink to /private/var/folders, so the bare paths differ.
+    assert captured["options"].project_root == repo.resolve()
     assert captured["options"].load_kind is False
     assert captured["netbox"].chart == _CHART.resolve()
     assert captured["netbox"].image_repository == "nv-config-manager-netbox"
@@ -601,6 +603,15 @@ def test_chart_renders_and_wires_the_publisher():
     assert "event_publisher: nats" in rendered
     # Stable names the CLI and the installer profile both hardcode.
     assert "\n  name: netbox\n" in rendered
+
+    # Authentication required. The upstream chart defaults this off, NetBox 4.7
+    # warns about it and 5.0 drops unauthenticated access entirely.
+    #
+    # Pinned because the obvious reason to flip it back -- silencing the startup
+    # FutureWarning -- does not work: NetBox warns either way, since the chart
+    # renders LOGIN_REQUIRED unconditionally. Turning it off buys the *louder*
+    # warning and an open instance. See deploy/netbox/values.yaml.
+    assert "LOGIN_REQUIRED: true" in rendered
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")

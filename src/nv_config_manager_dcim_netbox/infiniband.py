@@ -31,12 +31,11 @@ from nv_config_manager_dcim_netbox.fabric_common import (
     FABRIC_STATUS,
     INTERFACES_PATH,
     IP_ADDRESSES_PATH,
+    LOCATION_SCOPE_TYPE,
     normalize_pkey,
 )
 
 _IB_PKEY_ISOLATION = "ib_pkey"
-# IB overlays anchor at a sub-Site Location, so their scope GFK is always a Location.
-_LOCATION_SCOPE_TYPE = "dcim.location"
 _IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
 
 
@@ -230,19 +229,21 @@ class NetBoxInfiniBandMixin:
         # Normalized on write as well as on compare, so the stored value cannot
         # differ from what ensure_/sync_ib_pkey_assignments later compare against.
         membership_type = _normalize_membership(membership_type)
-        scope_type, scope_id = await self._resolve_scope(location_name)
-        if scope_id is None:
-            raise DCIMInvalidDataError(f"NetBox Site/Location {location_name!r} not found")
+        location_row = await self._resolve_scope(location_name, scope_type=LOCATION_SCOPE_TYPE)
+        if location_row is None:
+            raise DCIMInvalidDataError(f"NetBox Location {location_name!r} not found")
         tenant_id = await self._resolve_tenant_id(tenant_name)
 
-        overlay = await self._find_overlay(partition_name, location_name)
+        overlay = await self._find_overlay(
+            partition_name, location_name, scope_type=LOCATION_SCOPE_TYPE
+        )
         if overlay:
             overlay_id = overlay["id"]
         else:
             body = {
                 "name": partition_name,
-                "scope_type": scope_type,
-                "scope_id": scope_id,
+                "scope_type": LOCATION_SCOPE_TYPE,
+                "scope_id": location_row["id"],
                 "isolation_type": _IB_PKEY_ISOLATION,
                 "status": FABRIC_STATUS,
             }
@@ -535,7 +536,7 @@ class NetBoxInfiniBandMixin:
         # sibling locations' overlays.
         location_chain = self._ib_location_chain(device.get("location"))
         location_id = self._fk_id(device.get("location") or {})
-        params = [("isolation_type", _IB_PKEY_ISOLATION), ("scope_type", _LOCATION_SCOPE_TYPE)]
+        params = [("isolation_type", _IB_PKEY_ISOLATION), ("scope_type", LOCATION_SCOPE_TYPE)]
         for chain_location in location_chain:
             chain_id = self._fk_id(chain_location)
             if chain_id is not None:
@@ -600,13 +601,18 @@ class NetBoxInfiniBandMixin:
         # ``location_id`` is the device's Location PK; scope the overlay to that
         # Location directly (no name resolution needed since we already have the id).
         existing = await self.rest_list(
-            self.OVERLAYS_PATH, [("name", overlay_name), ("scope_id", str(location_id))]
+            self.OVERLAYS_PATH,
+            [
+                ("name", overlay_name),
+                ("scope_id", str(location_id)),
+                ("scope_type", LOCATION_SCOPE_TYPE),
+            ],
         )
         overlay = existing[0] if existing else None
         if not overlay:
             body = {
                 "name": overlay_name,
-                "scope_type": _LOCATION_SCOPE_TYPE,
+                "scope_type": LOCATION_SCOPE_TYPE,
                 "scope_id": location_id,
                 "isolation_type": _IB_PKEY_ISOLATION,
                 "status": FABRIC_STATUS,

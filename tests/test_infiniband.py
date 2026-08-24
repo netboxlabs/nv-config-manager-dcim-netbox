@@ -151,13 +151,14 @@ async def test_ensure_ib_pkey_partition_creates_overlay_and_pkey():
         record=record,
     )
 
-    async def resolve_scope(value):
-        return "dcim.location", 5
+    async def resolve_scope(value, *, scope_type):
+        assert scope_type == "dcim.location", scope_type
+        return {"id": 5, "name": "Row 1", "slug": "row-1"}
 
     async def resolve_tenant(name):
         return None
 
-    async def find_overlay(name, scope=None):
+    async def find_overlay(name, scope=None, *, scope_type=None):
         return None  # no existing overlay -> create
 
     client._resolve_scope = resolve_scope

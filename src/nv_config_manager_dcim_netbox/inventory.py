@@ -158,7 +158,6 @@ class NetBoxInventoryMixin:
             ("tenant", filters.tenants),
             ("device_type_id", filters.device_type_ids),
             ("manufacturer", filters.manufacturers),
-            ("platform", filters.platforms),
         ):
             for value in values or ():
                 if key == "status":
@@ -170,6 +169,11 @@ class NetBoxInventoryMixin:
                     # Name-or-id: NetBox keys these by slug, with the id under
                     # `<key>_id`. Workflows send either. See ``slug_or_id``.
                     params.append(slug_or_id(key, value))
+        platform_params = await self._platform_params(filters.platforms)
+        if platform_params is None:
+            # No device can carry a platform NetBox does not define.
+            return []
+        params.extend(platform_params)
         if filters.managed_only:
             # render_enabled ids, ANDed with the rest of the filter.
             managed_ids = await self.status_flag_device_ids(render_enabled=True)
@@ -231,6 +235,60 @@ class NetBoxInventoryMixin:
         return [interface_from_rest(i) for i in interfaces]
 
     # -- shared helpers ------------------------------------------------------
+
+    async def _platform_params(self, platforms) -> list[tuple[str, str]] | None:
+        """Query params for a platform filter, dropping platforms NetBox lacks.
+
+        ``None`` means every requested platform is absent, so nothing can match;
+        callers must turn that into an empty result, never an unfiltered query.
+
+        NetBox ORs a repeated param, so the platforms that do exist still select
+        exactly the devices they should. See :meth:`_known_platform_slugs` for why
+        the check is needed for platforms and not for site/tenant/role.
+        """
+        pairs = [slug_or_id("platform", getattr(p, "value", p)) for p in platforms or ()]
+        if not pairs:
+            return []
+        known = await self._known_platform_slugs()
+        if not known:
+            # Nothing to check against. Forward the filter and let NetBox answer,
+            # rather than concluding that nothing matches: an empty set means
+            # either a NetBox with no platforms at all -- where a platform filter
+            # cannot match anyway -- or a platform_list read that returned nothing,
+            # and in the second case failing closed would silently empty the result
+            # of every platform-scoped workflow.
+            logger.debug("NetBox reported no platforms; forwarding the filter unchecked")
+            return pairs
+        # An id is not a slug and cannot be checked against this list; pass it
+        # through and let NetBox judge it.
+        usable = [(key, value) for key, value in pairs if key != "platform" or value in known]
+        missing = [value for key, value in pairs if key == "platform" and value not in known]
+        if missing:
+            logger.info("Ignoring platform(s) NetBox does not define: %r", missing)
+        return usable or None
+
+    async def _known_platform_slugs(self) -> set[str]:
+        """The platform slugs this NetBox actually defines.
+
+        NetBox's ``platform`` filter is a choice field over existing slugs, so a
+        value it does not have is rejected with HTTP 400 ("Select a valid choice")
+        and the whole device query fails.
+
+        Platforms are the only selection filter where that is reachable. Site,
+        tenant and role values come from NVCM forms that our own
+        ``list_locations``/``list_tenants``/``list_roles`` populated, so they exist
+        by construction; ``Platform`` is a fixed enum in the SDK and a workflow
+        sends whichever members it supports regardless of what the DCIM holds.
+
+        Cached for the client's lifetime — reference data, on the path of every
+        device selection.
+        """
+        if self._platform_slugs is None:
+            data = await self.graphql_query("query { platform_list { slug } }")
+            self._platform_slugs = {
+                row["slug"] for row in (data.get("platform_list") or []) if row.get("slug")
+            }
+        return self._platform_slugs
 
     @staticmethod
     def _map_unique_by_name(devices: list[dict], mapper: Callable[[dict], _T]) -> list[_T]:
@@ -312,8 +370,10 @@ class NetBoxInventoryMixin:
                     params.append((key, str(value)))
                 else:
                     params.append(slug_or_id(key, value))
-        for platform in filters.platforms or []:
-            params.append(slug_or_id("platform", platform.value))
+        platform_params = await self._platform_params(filters.platforms)
+        if platform_params is None:
+            return None
+        params.extend(platform_params)
 
         # Every filter that narrows to a set of device ids, collected for
         # intersection. managed_only proxies to render_enabled, so it only applies

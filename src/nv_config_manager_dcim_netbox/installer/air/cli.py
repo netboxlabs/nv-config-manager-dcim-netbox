@@ -4,12 +4,17 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import click
 
 from nv_config_manager_dcim_netbox.installer import config as base_config
 from nv_config_manager_dcim_netbox.installer.air import AirSupportUnavailable
+
+# Safe at module scope: tunnel.py takes the AIR client as an argument rather than
+# importing it, so `air --help` still works without the `air` extra installed.
+from nv_config_manager_dcim_netbox.installer.air import tunnel as tunnel_mod
 
 
 class ConsoleCallback:
@@ -243,3 +248,136 @@ def air_up(
     click.secho(f"NetBox API token: {orchestrator.api_token}", fg="yellow")
 
     orchestrator.run()
+
+
+# The sim's own hostnames, which resolve only through the tunnel: they live in
+# the box's /etc/hosts, where NVCM writes its services and `air up` adds NetBox.
+_NETBOX_URL_TEMPLATE = "https://{hostname}"
+
+
+@air.command("tunnel")
+@click.option(
+    "--config",
+    "-c",
+    "config_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=lambda: _default_sim_config(),
+    show_default=str(DEFAULT_SIM_CONFIG),
+    help=f"Sim config to read. Defaults to ${SIM_CONFIG_ENV}, then {DEFAULT_SIM_CONFIG}.",
+)
+@click.option(
+    "--socks-port",
+    default=None,
+    type=int,
+    help=f"Local SOCKS port. Defaults to {tunnel_mod.DEFAULT_SOCKS_PORT}, matching NVCM's.",
+)
+@click.option(
+    "--print", "print_only", is_flag=True, help="Print the command instead of opening the tunnel."
+)
+@click.option(
+    "--browser", is_flag=True, help="Also launch a Chromium-family browser through the tunnel."
+)
+@click.option("--url", default=None, help="URL to open with --browser. Defaults to NetBox's.")
+def air_tunnel(
+    config_path: Path,
+    socks_port: int | None,
+    print_only: bool,
+    browser: bool,
+    url: str | None,
+) -> None:
+    """Open a SOCKS tunnel to the running simulation.
+
+    One tunnel reaches every `*.nvcm.air` service, NetBox included: those names
+    resolve only on the sim box, and a SOCKS proxy resolves DNS there rather than
+    here.
+
+    Takes no arguments because it needs none. AIR allocates the box's SSH host
+    and port per simulation, so they cannot be written down -- but the sim config
+    already names the simulation, which AIR can be asked about, and already holds
+    `oob_ssh_password`. The password is handed to ssh down a pipe, so it never
+    appears in a command line, a file, or this output.
+    """
+    try:
+        from nv_config_manager_installer.air_sim.constants import NVCM_BOX_USER
+        from nv_config_manager_installer.air_sim.sim_manager import AirSimulationManager
+
+        from nv_config_manager_dcim_netbox.installer.air.config import NetBoxSimConfig
+    except AirSupportUnavailable as exc:
+        raise click.ClickException(str(exc)) from exc
+    except ImportError as exc:
+        raise click.ClickException(str(AirSupportUnavailable(exc))) from exc
+
+    cfg = NetBoxSimConfig.from_yaml(config_path)
+    if not cfg.simulation_name:
+        raise click.ClickException(
+            f"{config_path} has no simulation_name, so there is nothing to look up.\n"
+            "Set it to the name `air up` created the simulation with."
+        )
+    if not cfg.ngc_api_key:
+        raise click.ClickException(
+            "Looking the simulation up needs an NGC API key. Export $NGC_API_KEY, "
+            f"or set ngc_api_key in {config_path}."
+        )
+
+    port = socks_port or tunnel_mod.DEFAULT_SOCKS_PORT
+    manager = AirSimulationManager(
+        ngc_api_key=cfg.ngc_api_key or None,
+        org_id=cfg.org_id or None,
+        use_internal=cfg.use_internal,
+        ssh_password=cfg.oob_ssh_password,
+    )
+    try:
+        endpoint = tunnel_mod.find_ssh_endpoint(manager, cfg.simulation_name, cfg.oob_server_name)
+    except tunnel_mod.AmbiguousSim as exc:
+        raise click.ClickException(
+            f"{exc}\nDelete the ones you are not using, or rename this sim in {config_path}."
+        ) from exc
+    except tunnel_mod.SimNotFound as exc:
+        raise click.ClickException(
+            f"No running simulation for {exc}.\n"
+            "AIR deletes simulations when they expire, so a sim from an earlier run may "
+            "be gone; `nvcm-netbox air up` creates a new one."
+        ) from exc
+
+    target = url or _NETBOX_URL_TEMPLATE.format(hostname=cfg.netbox_hostname())
+    if print_only:
+        click.echo(tunnel_mod.printable_command(endpoint, port, NVCM_BOX_USER))
+        click.echo(f"\nssh will prompt for the password; it is oob_ssh_password in {config_path}.")
+        return
+
+    click.secho(f"SOCKS tunnel to nvcm@{endpoint.host}:{endpoint.port}", fg="cyan")
+    click.echo(f"  proxy:  socks5://localhost:{port}")
+    click.echo(f"  NetBox: {target}")
+    proc = tunnel_mod.open_tunnel(
+        endpoint, cfg.oob_ssh_password, socks_port=port, user=NVCM_BOX_USER
+    )
+
+    if browser:
+        argv = tunnel_mod.browser_argv(port, target)
+        if argv is None:
+            _warn_no_browser(port)
+        else:
+            # Not waited on: the browser outlives the tunnel command only if the
+            # user leaves it open, and killing it here would close their tabs.
+            subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    click.echo("Ctrl-C to close the tunnel.")
+    try:
+        raise SystemExit(proc.wait())
+    except KeyboardInterrupt:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        click.echo("\nTunnel closed.")
+
+
+def _warn_no_browser(socks_port: int) -> None:
+    click.secho(
+        "No Chromium-family browser found, so --browser did nothing. Point one at\n"
+        f"  socks5://localhost:{socks_port}\n"
+        "In Firefox also enable network.proxy.socks_remote_dns, or *.nvcm.air will "
+        "not resolve.",
+        fg="yellow",
+    )

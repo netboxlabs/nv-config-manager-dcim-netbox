@@ -478,10 +478,13 @@ def test_the_bring_up_script_is_deleted_before_the_run_reports_done(tmp_path):
 
 
 class _Uploads:
-    """An SshRunner stand-in that accepts the upload and records nothing."""
+    """An SshRunner stand-in that accepts the upload and the session probe."""
 
     def upload(self, local, remote):
         assert local.exists()
+
+    def run(self, argv, *, stdin=None):
+        return ""
 
 
 def test_the_api_token_is_never_traced():
@@ -561,3 +564,359 @@ def test_matching_images_pass(monkeypatch):
 def test_an_arm_box_wants_arm_images(monkeypatch):
     cb = _arch_callback(monkeypatch, "aarch64", "arm64")
     cb.check_image_arch("host", 22)
+
+
+# -- the SOCKS tunnel ----------------------------------------------------------
+#
+# `tunnel` is importable without the `air` extra on purpose (it takes the AIR
+# client as an argument), but it lives here with the rest of the Air path.
+from nv_config_manager_dcim_netbox.installer.air import tunnel as tunnel_mod  # noqa: E402
+
+
+class _Iface:
+    def __init__(self, iface_id):
+        self.id = iface_id
+
+
+class _Node:
+    def __init__(self, name):
+        self.name = name
+        self.id = f"node-{name}"
+
+
+class _Service:
+    def __init__(self, interface, node_port, fqdn, port):
+        self.interface = interface
+        self.node_port = node_port
+        self.worker_fqdn = fqdn
+        self.worker_port = port
+
+
+class _Sim:
+    def __init__(self, name, sim_id="sim-1"):
+        self.name = name
+        self.id = sim_id
+
+
+class _Client:
+    """The two-call shape find_ssh_endpoint needs from the AIR client."""
+
+    def __init__(self, sims, nodes, services, ifaces):
+        self._sims, self._nodes, self._services, self._ifaces = sims, nodes, services, ifaces
+        self.created = []
+
+    class _Sims:
+        def __init__(self, outer):
+            self._outer = outer
+
+        def list(self, **kwargs):
+            return iter(self._outer._sims)
+
+    @property
+    def simulations(self):
+        return self._Sims(self)
+
+    @property
+    def nodes(self):
+        return type("N", (), {"list": lambda _s, **k: iter(self._nodes)})()
+
+    @property
+    def interfaces(self):
+        return type("I", (), {"list": lambda _s, **k: iter(self._ifaces)})()
+
+    @property
+    def services(self):
+        outer = self
+
+        class _Svcs:
+            def list(self, **kwargs):
+                return iter(outer._services)
+
+            def create(self, **kwargs):
+                outer.created.append(kwargs)
+                raise AssertionError("tunnel must not create an SSH service")
+
+        return _Svcs()
+
+
+class _Manager:
+    def __init__(self, client):
+        self.client = client
+
+
+def _manager(sim_name="air-trial", server="oob-mgmt-server", node_port=22):
+    iface = _Iface("iface-1")
+    return _Manager(
+        _Client(
+            sims=[_Sim(sim_name)],
+            nodes=[_Node(server)],
+            services=[_Service(iface, node_port, "worker-7.air.nvidia.com", 31234)],
+            ifaces=[iface],
+        )
+    )
+
+
+def test_the_ssh_endpoint_is_read_from_the_running_sim():
+    # AIR allocates the box's host and port per simulation, so they cannot be
+    # written down; the sim config's name is what makes them findable again.
+    endpoint = tunnel_mod.find_ssh_endpoint(_manager(), "air-trial", "oob-mgmt-server")
+    assert (endpoint.host, endpoint.port) == ("worker-7.air.nvidia.com", 31234)
+
+
+def test_a_missing_sim_is_reported_not_guessed():
+    with pytest.raises(tunnel_mod.SimNotFound):
+        tunnel_mod.find_ssh_endpoint(
+            _manager(sim_name="something-else"), "air-trial", "oob-mgmt-server"
+        )
+
+
+def test_two_sims_of_one_name_are_ambiguous_rather_than_arbitrary():
+    """Names are not unique in an AIR org.
+
+    Connecting to whichever came back first looks like a deployment that
+    silently did nothing.
+    """
+    manager = _manager()
+    manager.client._sims = [_Sim("air-trial", "sim-1"), _Sim("air-trial", "sim-2")]
+    with pytest.raises(tunnel_mod.AmbiguousSim) as excinfo:
+        tunnel_mod.find_ssh_endpoint(manager, "air-trial", "oob-mgmt-server")
+    assert "sim-1" in str(excinfo.value) and "sim-2" in str(excinfo.value)
+
+
+def test_a_sim_still_booting_has_no_ssh_service_yet():
+    # And the tunnel must not create one: `air up` owns that, and mutating a sim
+    # you were only asked to connect to is a surprise.
+    manager = _manager(node_port=80)
+    with pytest.raises(tunnel_mod.SimNotFound):
+        tunnel_mod.find_ssh_endpoint(manager, "air-trial", "oob-mgmt-server")
+    assert manager.client.created == []
+
+
+def test_the_password_never_reaches_the_command_line():
+    """sshpass's own help calls `-p` "security unwise" — any same-user `ps` reads
+    argv.
+
+    NVCM's ProxyInfo.start_tunnel uses it; this uses `-d <fd>` and a pipe, so the
+    password exists only in the two processes' memory.
+    """
+    endpoint = tunnel_mod.SshEndpoint("worker-7.air.nvidia.com", 31234)
+    argv = tunnel_mod.tunnel_argv(endpoint, 8080, "nvcm", password_fd=9)
+
+    assert "-p" not in argv[:3], argv  # sshpass's -p, not ssh's port flag
+    assert argv[:3] == ["sshpass", "-d", "9"], argv
+    # The endpoint still has to arrive, or the tunnel goes nowhere.
+    assert "nvcm@worker-7.air.nvidia.com" in argv
+    assert "31234" in argv and "-D" in argv and "8080" in argv
+    assert "-N" in argv, "a forwarding-only tunnel must not run a remote command"
+
+
+def test_the_printable_form_carries_no_secret_at_all():
+    # Meant for pasting into a ticket, so it must be the prompting form.
+    endpoint = tunnel_mod.SshEndpoint("worker-7.air.nvidia.com", 31234)
+    printed = tunnel_mod.printable_command(endpoint, 1080, "nvcm")
+
+    assert "sshpass" not in printed
+    assert printed.startswith("ssh ")
+    assert "-D 1080" in printed and "-p 31234" in printed
+    assert "nvcm@worker-7.air.nvidia.com" in printed
+
+
+def test_the_tunnel_prompts_when_sshpass_is_missing(monkeypatch):
+    # macOS has no sshpass by default. Falling back to a prompting ssh keeps the
+    # command usable instead of failing on a missing dependency.
+    monkeypatch.setattr(tunnel_mod.shutil, "which", lambda _name: None)
+    seen = {}
+
+    def _popen(argv, **kwargs):
+        seen["argv"] = argv
+        seen["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(tunnel_mod.subprocess, "Popen", _popen)
+    tunnel_mod.open_tunnel(
+        tunnel_mod.SshEndpoint("box", 22), "s3cret", socks_port=8080, user="nvcm"
+    )
+
+    assert seen["argv"][0] == "ssh"
+    assert "s3cret" not in seen["argv"]
+    assert "pass_fds" not in seen["kwargs"]
+
+
+def test_the_password_goes_down_a_pipe_not_a_file(monkeypatch):
+    monkeypatch.setattr(tunnel_mod.shutil, "which", lambda _name: "/usr/bin/sshpass")
+    seen = {}
+
+    def _popen(argv, **kwargs):
+        seen["argv"] = argv
+        # Read it back the way sshpass would, proving the pipe carries it.
+        import os as _os
+
+        fd = kwargs["pass_fds"][0]
+        seen["piped"] = _os.read(fd, 128)
+        return object()
+
+    monkeypatch.setattr(tunnel_mod.subprocess, "Popen", _popen)
+    tunnel_mod.open_tunnel(
+        tunnel_mod.SshEndpoint("box", 2222), "s3cret", socks_port=8080, user="nvcm"
+    )
+
+    assert seen["piped"] == b"s3cret\n"
+    assert not any("s3cret" in str(a) for a in seen["argv"]), seen["argv"]
+
+
+def test_a_failed_remote_command_does_not_print_the_box_password(monkeypatch):
+    """NVCM's `_ssh_cmd` puts the password in argv (`sshpass -p <pw>`), and
+    CommandError renders argv into its message.
+
+    Callers log that message, so every failed remote command wrote the sim box's
+    password to the terminal and into any captured CI output. `air up`'s
+    on_complete did exactly that when publishing the route failed.
+    """
+    from nv_config_manager_dcim_netbox.installer import remote
+    from nv_config_manager_dcim_netbox.installer.shell import CommandError
+
+    secret = "Aq05YrTZtoj9OWd2okqtdjX6"
+
+    class _Manager:
+        ssh_password = secret
+
+        def _ssh_cmd(self, host, port, command):
+            return ["sshpass", "-p", secret, "ssh", f"{host}:{port}", command]
+
+    def _fail(argv, stdin=None):
+        # Echoed in the output too, the way ssh reports the command it ran.
+        raise CommandError(argv, 1, f"tried: {' '.join(argv)}")
+
+    monkeypatch.setattr(remote, "run", _fail)
+    runner = remote.SshRunner(_Manager(), "box", 22)
+
+    with pytest.raises(CommandError) as excinfo:
+        runner.run(["helm", "upgrade", "netbox"])
+
+    rendered = str(excinfo.value)
+    assert secret not in rendered, rendered
+    assert secret not in " ".join(excinfo.value.argv)
+    assert secret not in excinfo.value.output
+    assert "<redacted>" in rendered
+    # The useful part still survives, or the error is not diagnosable.
+    assert "helm" in rendered and "exited 1" in rendered
+    # And the unredacted original must not resurface as exception context.
+    assert excinfo.value.__suppress_context__
+
+
+def test_publishing_is_skipped_when_nothing_was_deployed(monkeypatch):
+    """NVCM's orchestrator calls on_complete(success=True) even when `wait-setup`
+    failed and it skipped `upload-files` and `run-deploy`.
+
+    Trusting that produced two confusing errors -- a chart directory that was
+    never uploaded, then "no NVCM hosts entry yet" -- instead of saying plainly
+    that nothing had been deployed.
+    """
+    cb = _callback_for_script()
+    cb._inner = _Recorder()
+    logs: list[str] = []
+    cb.on_log = logs.append
+    cb.host, cb.port = "box", 22
+
+    called = []
+    cb.publish_route = lambda h, p: called.append("route")
+    cb.publish_hostname = lambda h, p: called.append("hostname")
+    # Stubbed, or building a real SshRunner raises and the check would answer
+    # "not deployed" for the wrong reason.
+    cb.runner = lambda h, p: object()
+    monkeypatch.setattr(
+        air_callback.cluster, "netbox_service_exists", lambda ns, runner=None: False
+    )
+
+    cb.on_complete(True, "box", 22)
+
+    assert called == [], "published against a cluster with no NetBox on it"
+    assert any("not on the sim's cluster" in line for line in logs), logs
+
+
+def test_an_unreachable_box_counts_as_not_deployed():
+    # The check runs over SSH, and the box may be gone by the time on_complete
+    # fires. That must not turn a cosmetic step into a traceback.
+    cb = _callback_for_script()
+    cb._inner = _Recorder()
+    cb.on_log = lambda _line: None
+
+    def _explode(host, port):
+        raise OSError("connection refused")
+
+    cb.runner = _explode
+    assert cb._netbox_is_deployed("box", 22) is False
+
+
+def test_publishing_runs_once_netbox_is_actually_there(monkeypatch):
+    cb = _callback_for_script()
+    cb._inner = _Recorder()
+    cb.on_log = lambda _line: None
+    cb.host, cb.port = "box", 22
+
+    called = []
+    cb.publish_route = lambda h, p: called.append("route")
+    cb.publish_hostname = lambda h, p: called.append("hostname")
+    cb.runner = lambda h, p: object()
+    monkeypatch.setattr(air_callback.cluster, "netbox_service_exists", lambda ns, runner=None: True)
+
+    cb.on_complete(True, "box", 22)
+
+    # Route first: the hostname entry is only useful once something answers on it.
+    assert called == ["route", "hostname"]
+
+
+def test_the_bring_up_waits_out_a_settling_sshd(monkeypatch):
+    """The uploads prove the box is reachable; the bring-up then opens a fresh
+    connection, and a settling sshd refuses the odd one with 255.
+
+    SshRunner retries that, but the bring-up used to hand the command straight to
+    NVCM's `_ssh_run_and_tail`, which does not retry and reports a refused
+    connection exactly like a failed script.
+    """
+    cb = _callback_for_script()
+    probes = []
+
+    class _Probing:
+        def upload(self, local, remote):
+            assert local.exists()
+
+        def run(self, argv, *, stdin=None):
+            probes.append(argv)
+            return ""
+
+    cb.runner = lambda h, p: _Probing()
+
+    class _Manager:
+        def _ssh_run_and_tail(self, host, port, command, *, marker, label, timeout):
+            return True
+
+    cb._manager = _Manager()
+    cb.run_script("box", 22, "#!/usr/bin/env bash\necho hi\n")
+
+    assert probes == [["true"]], "the bring-up did not establish a session first"
+
+
+def test_a_refused_session_says_what_it_means(monkeypatch):
+    # "The NetBox bring-up did not finish" sent us looking at the script, when
+    # the script had never run.
+    cb = _callback_for_script()
+
+    class _Refusing:
+        def upload(self, local, remote):
+            assert local.exists()
+
+        def run(self, argv, *, stdin=None):
+            raise RuntimeError("`sshpass -p <redacted> ssh ...` exited 255\nPermission denied")
+
+    cb.runner = lambda h, p: _Refusing()
+    cb._manager = None  # must never be reached
+
+    with pytest.raises(RuntimeError) as excinfo:
+        cb.run_script("box", 22, "#!/usr/bin/env bash\necho hi\n")
+
+    message = str(excinfo.value)
+    assert "Could not open a session" in message
+    assert "oob_ssh_password" in message, "does not point at the likely cause"
+    # And it still must not leak the password it was given.
+    assert "<redacted>" in message

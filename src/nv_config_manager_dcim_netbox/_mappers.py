@@ -156,16 +156,13 @@ def slug_or_id(key: str, value: Any) -> tuple[str, str]:
 
     The name -> slug step reproduces NetBox's own slugify, which is what its UI
     prefills the field with: lowercase, every run of non-alphanumerics collapsed
-    to one hyphen, ends trimmed. Only collapsing whitespace and underscores left
-    punctuation in place, so ``DSX Air (DC1)`` asked NetBox for
-    ``site=dsx-air-(dc1)`` — a filter that matches nothing, and NetBox answers 200
-    with an empty list rather than rejecting it, so discovery silently found no
-    devices.
+    to one hyphen, ends trimmed. So ``DSX Air (DC1)`` becomes ``dsx-air-dc1``.
 
-    A slug that was edited away from its name (a site named ``DSX Air Demo``
-    slugged ``demo``) still cannot be derived and behaves the same way. Deriving
-    it is a best effort on NVCM sending a display name where NetBox wants a key;
-    sending the id avoids the guess entirely.
+    A slug edited away from its name (a site named ``DSX Air Demo`` slugged
+    ``demo``) cannot be derived; NetBox answers such a filter with 200 and an
+    empty list rather than an error. Deriving the slug is a best effort on NVCM
+    sending a display name where NetBox wants a key; sending the id avoids the
+    guess entirely.
     """
     text = str(value)
     if text.isdigit() and int(text) > 0:
