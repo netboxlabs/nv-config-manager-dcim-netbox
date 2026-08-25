@@ -84,6 +84,8 @@ _SHOWN_DEFAULTS = (
     "use_internal",
     "netbox_image",
     "netbox_image_tag",
+    "netbox_superuser_name",
+    "netbox_superuser_password",
     "dcim_provider_package_image",
     "dcim_server",
     "dcim_token",
@@ -255,6 +257,10 @@ def air_up(
 
     orchestrator = NetBoxSimOrchestrator(cfg, ConsoleCallback(), chart=chart)
     click.secho(f"NetBox API token: {orchestrator.api_token}", fg="yellow")
+    click.secho(
+        f"NetBox UI login: {cfg.netbox_superuser_name} / {cfg.netbox_superuser_password}",
+        fg="yellow",
+    )
 
     orchestrator.run()
 

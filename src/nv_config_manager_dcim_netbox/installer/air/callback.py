@@ -270,7 +270,12 @@ class NetBoxAirCallback:
             image_repository=self.cfg.netbox_image,
             image_tag=self.cfg.netbox_image_tag,
             nats_password=self.nats_password,
-            extra_set=[*self.cfg.gateway_overrides(), *self.cfg.netbox_helm_set],
+            extra_set=[
+                *self.cfg.gateway_overrides(),
+                f"netbox.superuser.name={self.cfg.netbox_superuser_name}",
+                f"netbox.superuser.password={self.cfg.netbox_superuser_password}",
+                *self.cfg.netbox_helm_set,
+            ],
             timeout=NETBOX_INSTALL_TIMEOUT,
             runner=script,
         )

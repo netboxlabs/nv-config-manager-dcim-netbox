@@ -55,6 +55,12 @@ class NetBoxSimConfig(SimConfig):
     netbox_release: str = "netbox"
     netbox_chart: Path | None = None
 
+    # AIR simulations are disposable demo environments, so use the same
+    # predictable UI login as the bundled demo provider. Normal installer
+    # deployments continue to let the chart generate their credentials.
+    netbox_superuser_name: str = "demo"
+    netbox_superuser_password: str = "demo"
+
     # Load the sim's topology into NetBox with the plugin's nvcm_load_dcim. Off
     # means an empty NetBox, which renders nothing; only turn it off when
     # pointing at a NetBox that already holds the fabric.

@@ -353,6 +353,19 @@ def test_netbox_is_installed_once_with_the_nats_password():
     assert f"nvcm.natsPassword={cb.nats_password}" in script
 
 
+def test_air_netbox_uses_overridable_demo_login():
+    script = _callback_for_script().bring_up_script("/i.tar", "/c.tgz")
+    assert "netbox.superuser.name=demo" in script
+    assert "netbox.superuser.password=demo" in script
+
+    custom = _callback_for_script(
+        netbox_superuser_name="operator",
+        netbox_superuser_password="lab-password",
+    ).bring_up_script("/i.tar", "/c.tgz")
+    assert "netbox.superuser.name=operator" in custom
+    assert "netbox.superuser.password=lab-password" in custom
+
+
 def test_generated_config_pins_the_box_password():
     """SimConfig mints a new one per run, and nothing records it.
 
@@ -434,7 +447,10 @@ def test_netbox_provisioning_status_uses_netbox_shell(monkeypatch):
 
 
 def test_generated_config_exposes_air_inside_setting():
-    assert "# use_internal: false" in air_cli._render_example("air_trial", "demo")
+    generated = air_cli._render_example("air_trial", "demo")
+    assert "# use_internal: false" in generated
+    assert "# netbox_superuser_name: demo" in generated
+    assert "# netbox_superuser_password: demo" in generated
 
 
 # -- SSH retry -----------------------------------------------------------------
