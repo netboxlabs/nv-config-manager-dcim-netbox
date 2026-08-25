@@ -55,7 +55,7 @@ help:
 	@echo "kind-up         create the Kind cluster and deploy NetBox + NVCM"
 	@echo "kind-down       delete the Kind cluster"
 	@echo "topology        load mock topology data into NetBox (BLUEPRINT=air_trial)"
-	@echo "tunnel          SOCKS tunnel to a DSX Air sim (PRINT=1, BROWSER=1)"
+	@echo "tunnel          SOCKS tunnel to a DSX Air sim (CONFIG=, PRINT=1, BROWSER=1)"
 	@echo "airgapped       build an offline bundle carrying NVCM + NetBox"
 	@echo "clean           remove venv and caches"
 	@echo ""
@@ -174,8 +174,13 @@ topology:
 # the sim's SSH endpoint is looked up from simulation_name in the sim config, and
 # the password comes from the same file. `make tunnel PRINT=1` shows the command
 # instead, `BROWSER=1` also opens one.
+# CONFIG= picks the sim, and must match the one `air up` used: the tunnel finds
+# the simulation by the `simulation_name` in that file. Without it the CLI reads
+# $NVCM_AIR_CONFIG, then ~/.nvcm-air-sim.yaml, and looking up a name no running
+# sim has reports "No running simulation for ...".
 tunnel:
-	$(VENV)/bin/nvcm-netbox air tunnel $(if $(PRINT),--print,) $(if $(BROWSER),--browser,) \
+	$(VENV)/bin/nvcm-netbox air tunnel $(if $(CONFIG),-c $(CONFIG),) \
+	  $(if $(PRINT),--print,) $(if $(BROWSER),--browser,) \
 	  $(if $(SOCKS_PORT),--socks-port $(SOCKS_PORT),)
 
 # --- air-gapped ---

@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from click.testing import CliRunner
 
 from nv_config_manager_dcim_netbox.installer import config as base_config
 from nv_config_manager_dcim_netbox.installer.tokens import generate_api_token, is_valid_api_token
@@ -995,3 +996,39 @@ def test_the_heartbeat_reports_pod_status():
     assert "$(nbstat)" in command
     # Best effort: a heartbeat must never be what fails the run.
     assert "2>/dev/null" in command
+
+
+def test_tunnel_accepts_the_ngc_key_from_the_environment(tmp_path, monkeypatch):
+    """`air up` worked with only $NGC_API_KEY set; `air tunnel` refused.
+
+    AirSimulationManager resolves `ngc_api_key or os.environ["NGC_API_KEY"]`, and
+    NVCM's SimConfig never reads the environment -- so gating on the config value
+    alone rejected exactly what the error message told the user to do.
+    """
+    config = tmp_path / "air-trial.yaml"
+    config.write_text("simulation_name: sim-under-test\nmock_blueprint: air_trial\n")
+    monkeypatch.setenv("NGC_API_KEY", "nvapi-from-the-environment")
+
+    called = {}
+
+    def _endpoint(manager, simulation_name, server_name):
+        called["simulation_name"] = simulation_name
+        raise RuntimeError("stop here: the key check already passed")
+
+    monkeypatch.setattr(air_cli.tunnel_mod, "find_ssh_endpoint", _endpoint)
+
+    result = CliRunner().invoke(air_cli.air, ["tunnel", "-c", str(config), "--print"])
+
+    assert "needs an NGC API key" not in result.output, result.output
+    assert called.get("simulation_name") == "sim-under-test"
+
+
+def test_tunnel_still_reports_a_genuinely_missing_key(tmp_path, monkeypatch):
+    config = tmp_path / "air-trial.yaml"
+    config.write_text("simulation_name: sim-under-test\nmock_blueprint: air_trial\n")
+    monkeypatch.delenv("NGC_API_KEY", raising=False)
+
+    result = CliRunner().invoke(air_cli.air, ["tunnel", "-c", str(config), "--print"])
+
+    assert result.exit_code != 0
+    assert "needs an NGC API key" in result.output

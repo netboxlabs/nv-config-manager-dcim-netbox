@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -46,6 +47,8 @@ class ConsoleCallback:
 # Where the sim config lives, matching NVCM's air-sim so their documentation
 # applies unchanged: the same default path and the same environment variable.
 SIM_CONFIG_ENV = "NVCM_AIR_CONFIG"
+# Read by AirSimulationManager when the sim config carries no key.
+NGC_API_KEY_ENV = "NGC_API_KEY"
 DEFAULT_SIM_CONFIG = Path("~/.nvcm-air-sim.yaml")
 
 
@@ -313,9 +316,14 @@ def air_tunnel(
             f"{config_path} has no simulation_name, so there is nothing to look up.\n"
             "Set it to the name `air up` created the simulation with."
         )
-    if not cfg.ngc_api_key:
+    # $NGC_API_KEY counts: AirSimulationManager falls back to it
+    # (`ngc_api_key or os.environ.get("NGC_API_KEY")`) and NVCM's SimConfig never
+    # reads the environment, so gating on the config value alone rejected the
+    # very thing this message tells you to do -- and `air up`, which lets the
+    # manager do the resolving, worked all along.
+    if not (cfg.ngc_api_key or os.environ.get(NGC_API_KEY_ENV)):
         raise click.ClickException(
-            "Looking the simulation up needs an NGC API key. Export $NGC_API_KEY, "
+            f"Looking the simulation up needs an NGC API key. Export ${NGC_API_KEY_ENV}, "
             f"or set ngc_api_key in {config_path}."
         )
 
