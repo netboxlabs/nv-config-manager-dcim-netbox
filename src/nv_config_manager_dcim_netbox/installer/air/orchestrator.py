@@ -62,7 +62,7 @@ class NetBoxSimOrchestrator(SimOrchestrator):
                 api_token=self._provider_deployment.api_token,
                 provider_image=cfg.dcim_provider_package_image,
                 netbox_server=cfg.dcim_server,
-                netbox_public_url=cfg.dcim_public_url or cfg.dcim_server,
+                netbox_public_url=cfg.dcim_ui_url(),
                 nats_password=self._provider_deployment.nats_password,
             ),
         )

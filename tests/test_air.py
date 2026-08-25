@@ -139,6 +139,14 @@ def test_blueprint_dir_points_into_the_clone_on_the_box():
     )
 
 
+def test_air_dcim_ui_url_uses_the_tunneled_netbox_route():
+    assert NetBoxSimConfig().dcim_ui_url() == "https://netbox.nvcm.air"
+    assert (
+        NetBoxSimConfig(dcim_public_url="https://netbox.example.com").dcim_ui_url()
+        == "https://netbox.example.com"
+    )
+
+
 # -- the install-config patch --------------------------------------------------
 
 
@@ -213,6 +221,7 @@ def test_netbox_orchestrator_configures_provider_before_upload():
     )
 
     assert generated["dcim"]["provider"] == "netbox"
+    assert generated["dcim"]["public_url"] == "https://netbox.nvcm.air"
     assert generated["dcim"]["provider_packages"][0]["image"] == (cfg.dcim_provider_package_image)
     assert generated["secrets"]["k8s"]["nats"]["values"]["password"] == (provider.nats_password)
     assert generated["services"]["nautobot"] is False

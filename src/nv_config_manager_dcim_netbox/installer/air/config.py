@@ -87,6 +87,10 @@ class NetBoxSimConfig(SimConfig):
 
         return f"netbox.{CONFIG_MANAGER_HOSTNAME}"
 
+    def dcim_ui_url(self) -> str:
+        """Return the browser-facing NetBox URL persisted for UI links."""
+        return self.dcim_public_url or f"https://{self.netbox_hostname()}"
+
     def blueprint_dir(self, remote_repo: str) -> str:
         """Path on the sim box to this sim's topology blueprint.
 

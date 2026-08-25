@@ -520,7 +520,7 @@ class NetBoxAirCallback:
                 api_token=self.api_token,
                 provider_image=self.cfg.dcim_provider_package_image,
                 netbox_server=self.cfg.dcim_server,
-                netbox_public_url=self.cfg.dcim_public_url or self.cfg.dcim_server,
+                netbox_public_url=self.cfg.dcim_ui_url(),
             ),
         )
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as tmp:
