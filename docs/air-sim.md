@@ -47,8 +47,17 @@ export NGC_API_KEY=<your key>
 make images PLATFORM=linux/amd64     # sim boxes are x86_64
 
 .venv/bin/nvcm-netbox air config     # writes ~/.nvcm-air-sim.yaml
-.venv/bin/nvcm-netbox air up
+.venv/bin/nvcm-netbox air tui        # guided setup and launch
 ```
+
+The TUI is built on NVCM's shared Air wizard, with NetBox-specific topology
+population, launch orchestration, pod readiness, provisioning status, and UI
+link behavior. To use the internal `air-inside` service, turn off **Use Public
+DSX Air** on the Options screen. The equivalent YAML setting is
+`use_internal: true`.
+
+For a non-interactive deployment, use `.venv/bin/nvcm-netbox air up` with the
+same config file.
 
 `PLATFORM=linux/amd64` matters on an Apple Silicon Mac. `make images` builds for
 the host, and arm64 images loaded onto an x86_64 box die immediately with

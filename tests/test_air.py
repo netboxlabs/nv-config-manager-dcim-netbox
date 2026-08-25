@@ -9,6 +9,7 @@ end-to-end steps in docs/air-sim.md.
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 import yaml
@@ -48,6 +49,11 @@ air_orchestrator = pytest.importorskip(
     reason="the `air` extra is not installed",
     exc_type=ImportError,
 )
+air_tui = pytest.importorskip(
+    "nv_config_manager_dcim_netbox.installer.air.tui",
+    reason="the `air` extra is not installed",
+    exc_type=ImportError,
+)
 netbox_air_orchestrator = pytest.importorskip(
     "nv_config_manager_dcim_netbox.installer.air.orchestrator",
     reason="the `air` extra is not installed",
@@ -60,6 +66,11 @@ build_content_jobs = air_installer_config.build_content_jobs
 build_template_plugins = air_installer_config.build_template_plugins
 SimOrchestrator = air_orchestrator.SimOrchestrator
 NetBoxSimOrchestrator = netbox_air_orchestrator.NetBoxSimOrchestrator
+NetBoxAirSimApp = air_tui.NetBoxAirSimApp
+NetBoxAirSimulationManager = air_tui.NetBoxAirSimulationManager
+NetBoxLaunchScreen = air_tui.NetBoxLaunchScreen
+NetBoxPopulationPanel = air_tui.NetBoxPopulationPanel
+NetBoxTopologyScreen = air_tui.NetBoxTopologyScreen
 
 
 # -- independent fabric generation and DCIM population ------------------------
@@ -355,6 +366,66 @@ def test_generated_configs_do_not_share_a_password():
     a = yaml.safe_load(air_cli._render_example("air_trial", "demo"))
     b = yaml.safe_load(air_cli._render_example("air_trial", "demo"))
     assert a["oob_ssh_password"] != b["oob_ssh_password"]
+
+
+# -- shared TUI adapter --------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_uses_netbox_config_and_population_controls():
+    cfg = NetBoxSimConfig(ngc_api_key="nvapi-test", load_blueprint=False)
+    app = NetBoxAirSimApp(config=cfg)
+
+    async with app.run_test(size=(180, 100)):
+        topology = app.query_one("#screen-topology", NetBoxTopologyScreen)
+        panel = topology.query_one("#population-panel", NetBoxPopulationPanel)
+        assert not panel.query_one("#load-blueprint").value
+        assert not topology.query("#run-mock-topology-job")
+
+        panel.query_one("#load-blueprint").value = True
+        topology.write_to_config(cfg)
+        assert cfg.load_blueprint is True
+
+
+@pytest.mark.asyncio
+async def test_tui_launch_uses_netbox_orchestrator_and_dashboard():
+    cfg = NetBoxSimConfig(ngc_api_key="nvapi-test")
+    app = NetBoxAirSimApp(config=cfg)
+
+    async with app.run_test(size=(180, 100)) as pilot:
+        app.switch_section("launch")
+        await pilot.pause()
+        launch = app.query_one("#screen-launch", NetBoxLaunchScreen)
+
+        assert isinstance(launch.create_orchestrator(_Recorder()), NetBoxSimOrchestrator)
+        assert isinstance(launch.create_simulation_manager(), NetBoxAirSimulationManager)
+        assert launch._provider_status.display_name == "NetBox"
+        assert launch._provider_status.access_url == "https://netbox.nvcm.air"
+
+
+def test_netbox_provisioning_status_uses_netbox_shell(monkeypatch):
+    manager = NetBoxAirSimulationManager(ngc_api_key="nvapi-test", ssh_password="test")
+    monkeypatch.setattr(manager, "_ssh_cmd", lambda host, port: ["ssh", host, str(port)])
+    completed = Mock(returncode=0, stdout="2/3|leaf-03\n")
+    run = Mock(return_value=completed)
+    monkeypatch.setattr(air_tui.subprocess, "run", run)
+
+    assert manager.get_provisioning_status("worker.example", 17117) == (
+        2,
+        3,
+        ["leaf-03"],
+    )
+    command = run.call_args.args[0][-1]
+    assert "-n nv-config-manager" in command
+    assert "deployment/netbox" in command
+    assert "-c netbox" in command
+    assert "/opt/netbox/venv/bin/python" in command
+    assert "DeviceConfigStatus" in command
+    assert "nautobot" not in command.lower()
+
+
+def test_generated_config_exposes_air_inside_setting():
+    assert "# use_internal: false" in air_cli._render_example("air_trial", "demo")
 
 
 # -- SSH retry -----------------------------------------------------------------
