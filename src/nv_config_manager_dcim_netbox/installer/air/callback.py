@@ -451,10 +451,9 @@ class NetBoxAirCallback:
     def check_image_arch(self, host: str, port: int) -> None:
         """Refuse to ship images the sim box cannot execute.
 
-        `make images` builds for the host, and a sim box is x86_64, so building on
-        Apple Silicon produces arm64 images. Loaded onto the box they start and
-        immediately die with "exec format error", which surfaces ten minutes later
-        as a helm timeout with nothing pointing at the cause.
+        The orchestrator builds for x86_64 before allocating the sim. Keep this
+        check at the upload boundary so a custom image reference cannot reach the
+        cluster with an incompatible architecture.
         """
         want = self.runner(host, port).run(["uname", "-m"]).strip()
         want = {"x86_64": "amd64", "aarch64": "arm64"}.get(want, want)
@@ -476,7 +475,8 @@ class NetBoxAirCallback:
             raise RuntimeError(
                 f"The sim box is {want}, but these images are not:\n"
                 + "\n".join(wrong)
-                + f"\n\nRebuild them for it:\n  make images PLATFORM=linux/{want}"
+                + "\n\nThe automatic NetBox image build did not produce the images "
+                + f"expected for linux/{want}. See the earlier build output."
             )
 
     def upload_images(self, host: str, port: int) -> str:

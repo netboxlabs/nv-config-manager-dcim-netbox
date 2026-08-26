@@ -34,6 +34,11 @@ air_callback = pytest.importorskip(
     reason="the `air` extra is not installed",
     exc_type=ImportError,
 )
+air_images = pytest.importorskip(
+    "nv_config_manager_dcim_netbox.installer.air.images",
+    reason="the `air` extra is not installed",
+    exc_type=ImportError,
+)
 air_cli = pytest.importorskip(
     "nv_config_manager_dcim_netbox.installer.air.cli",
     reason="the `air` extra is not installed",
@@ -243,6 +248,31 @@ def test_netbox_orchestrator_owns_provider_lifecycle():
         ("post", "worker.example", 17117),
     ]
     assert orchestrator._provider_gateway_hostnames(cfg) == (cfg.netbox_hostname(),)
+
+
+def test_netbox_orchestrator_prepares_images_before_common_air_flow(monkeypatch):
+    cfg = NetBoxSimConfig()
+    recorder = _Recorder()
+    orchestrator = NetBoxSimOrchestrator(
+        cfg,
+        recorder,
+        provider_deployment=_FakeProviderDeployment(),
+    )
+    calls = []
+    monkeypatch.setattr(
+        netbox_air_orchestrator,
+        "ensure_air_images",
+        lambda provider, netbox, log: calls.append((provider, netbox)),
+    )
+    monkeypatch.setattr(SimOrchestrator, "_run_impl", lambda self: ("box", 22))
+
+    assert orchestrator._run_impl() == ("box", 22)
+    assert calls == [
+        (
+            cfg.dcim_provider_package_image,
+            f"{cfg.netbox_image}:{cfg.netbox_image_tag}",
+        )
+    ]
 
 
 # -- the bring-up sequence -----------------------------------------------------
@@ -622,6 +652,36 @@ def test_script_runner_renders_stdin_as_a_heredoc():
 # -- image architecture --------------------------------------------------------
 
 
+def test_air_image_preparation_builds_without_make(monkeypatch, tmp_path):
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+    commands = []
+    monkeypatch.setattr(air_images, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(air_images, "require_tools", lambda *names: None)
+    monkeypatch.setattr(air_images, "_resolve_nvcm_repo", lambda: Path("/nvcm"))
+    monkeypatch.setattr(air_images, "_resolve_plugin_repo", lambda log: Path("/plugin"))
+    monkeypatch.setattr(
+        air_images,
+        "_load_versions",
+        lambda: {
+            "NETBOX_BASE_IMAGE": "netbox-base:4.7",
+            "NETBOX_BGP_REF": "abc123",
+        },
+    )
+    monkeypatch.setattr(
+        air_images,
+        "_stream",
+        lambda argv, **kwargs: commands.append(argv),
+    )
+
+    air_images.ensure_air_images("provider:tag", "netbox:tag", lambda line: None)
+
+    assert len(commands) == 3
+    assert commands[0][:4] == ["docker", "build", "--platform", "linux/amd64"]
+    assert commands[1] == [str(tmp_path / "build" / "netbox-image.sh")]
+    assert commands[2][:4] == ["docker", "build", "--platform", "linux/amd64"]
+    assert all("make" not in command for command in commands)
+
+
 def _arch_callback(monkeypatch, box_arch, image_arch):
     from nv_config_manager_dcim_netbox.installer.air import callback as cb_mod
 
@@ -639,7 +699,7 @@ def _arch_callback(monkeypatch, box_arch, image_arch):
 
 
 def test_images_built_for_the_wrong_arch_are_refused(monkeypatch):
-    """`make images` builds for the host; a sim box is x86_64.
+    """The upload boundary still rejects a custom image for the wrong host.
 
     Built on Apple Silicon and loaded onto the box, the containers die instantly
     with "exec format error", which surfaces ten minutes later as a helm timeout
@@ -650,8 +710,7 @@ def test_images_built_for_the_wrong_arch_are_refused(monkeypatch):
         cb.check_image_arch("host", 22)
     message = str(excinfo.value)
     assert "amd64" in message
-    # It has to say how to fix it, not just that it is wrong.
-    assert "make images PLATFORM=linux/amd64" in message
+    assert "automatic NetBox image build" in message
 
 
 def test_matching_images_pass(monkeypatch):

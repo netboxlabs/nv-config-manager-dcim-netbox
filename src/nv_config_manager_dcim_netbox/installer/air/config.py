@@ -37,9 +37,9 @@ class NetBoxSimConfig(SimConfig):
 
     dcim_provider: str = base_config.PROVIDER_NAME
 
-    # Built by `make images`; neither image exists in a registry, so both are
-    # shipped into the sim's kind cluster over SSH. Tags track the package version,
-    # the same source `make images` builds them from.
+    # Neither image exists in a registry, so the AIR orchestrator builds both for
+    # the simulation architecture and ships them into its kind cluster over SSH.
+    # Tags track the package version.
     dcim_provider_package_image: str = base_config.PROVIDER_IMAGE
     netbox_image: str = base_config.NETBOX_IMAGE
     netbox_image_tag: str = base_config.IMAGE_TAG
