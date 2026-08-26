@@ -24,9 +24,9 @@ class NetBoxSimConfig(SimConfig):
     keys load from the same YAML file.
     """
 
-    # NVCM's pluggable-DCIM framework is not on main, and the sim clones this ref
-    # onto the box (cloud_init.py: `git clone -b <config_manager_ref>`). Left at
-    # SimConfig's `main` default the box gets a tree with no DCIM support at all.
+    # The sim clones this ref onto the box (cloud_init.py:
+    # `git clone -b <config_manager_ref>`). Bound to NVCM_BRANCH rather than left
+    # to SimConfig so both resolve from one place if it ever moves off main again.
     config_manager_ref: str = base_config.NVCM_BRANCH
 
     # Build the simulated fabric from the shared blueprint, but do not register

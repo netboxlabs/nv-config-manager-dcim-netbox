@@ -113,12 +113,10 @@ def test_an_explicit_topology_is_not_overwritten():
 # -- config -------------------------------------------------------------------
 
 
-def test_sim_clones_the_branch_that_has_the_dcim_framework():
-    # SimConfig defaults this to `main`, and cloud-init clones it onto the sim
-    # box. `main` carries none of the pluggable-DCIM framework, so a sim built
-    # with the base default cannot deploy this provider at all.
+def test_sim_clones_the_branch_this_provider_is_built_against():
+    # cloud-init clones this ref onto the sim box. It tracks NVCM_BRANCH so a
+    # move off the default branch reaches the sim as well as local checkouts.
     assert NetBoxSimConfig().config_manager_ref == base_config.NVCM_BRANCH
-    assert base_config.NVCM_BRANCH != "main"
 
 
 def test_extra_keys_survive_from_yaml(tmp_path):

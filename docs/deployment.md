@@ -28,9 +28,7 @@ Re-running it is safe.
 
 - Docker with ≥24 GB for the `small` profile (`--size medium` / `large` need more)
 - `kind`, `kubectl`, `helm`, `uv`
-- A checkout of [nv-config-manager](https://github.com/nvidia/nv-config-manager) on
-  the `zb/pluggable-dcim` branch. `main` does not carry the pluggable-DCIM
-  framework this provider plugs into
+- A checkout of [nv-config-manager](https://github.com/nvidia/nv-config-manager)
 - A checkout of [netbox-nv-config-manager](https://github.com/netboxlabs/netbox-nv-config-manager),
   which the NetBox image build installs the plugin from
 

@@ -48,9 +48,11 @@ PROVIDER_NAME = "netbox"
 EVENT_STREAM = "netbox"
 EVENT_SUBJECT = "netbox.change"
 
-# The NVCM branch carrying the pluggable-DCIM framework. `main` has none of it, so
-# a checkout or sim clone on main cannot deploy this provider.
-NVCM_BRANCH = "zb/pluggable-dcim"
+# The NVCM branch to check out and to clone onto a sim box. The pluggable-DCIM
+# framework this provider plugs into merged to main, so this is NVCM's default
+# branch; it stays a named constant because every checkout, sim clone and CI job
+# resolves it from here.
+NVCM_BRANCH = "main"
 
 
 @dataclass(frozen=True)

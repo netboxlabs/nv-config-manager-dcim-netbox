@@ -28,7 +28,7 @@ with `nvcm-netbox`, which:
 ## Deploying
 
 ```bash
-git clone -b zb/pluggable-dcim https://github.com/nvidia/nv-config-manager
+git clone https://github.com/nvidia/nv-config-manager
 git clone https://github.com/netboxlabs/netbox-nv-config-manager
 git clone https://github.com/netboxlabs/nv-config-manager-dcim-netbox
 cd nv-config-manager-dcim-netbox
@@ -122,7 +122,6 @@ Prerequisites:
 - kubectl configured for the target cluster
 - Python 3.11 or newer, managed through `uv`
 - A checkout of [nv-config-manager](https://github.com/nvidia/nv-config-manager)
-  on `zb/pluggable-dcim`. `main` does not carry the pluggable-DCIM framework
 - A checkout of
   [netbox-nv-config-manager](https://github.com/netboxlabs/netbox-nv-config-manager),
   which the NetBox image is built from

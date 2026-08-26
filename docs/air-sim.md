@@ -36,9 +36,8 @@ NetBox, and points NVCM at it.
   make setup-air
   ```
 
-The NVCM checkout must be on **`zb/pluggable-dcim`**. `main` has none of the
-pluggable-DCIM framework. The sim clones that branch onto its box too, which
-`NetBoxSimConfig` defaults to; NVCM's own `SimConfig` defaults to `main`.
+The sim clones the same ref onto its box, from `config_manager_ref`, which
+`NetBoxSimConfig` defaults to NVCM's default branch.
 
 ## Running it
 

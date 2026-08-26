@@ -10,7 +10,6 @@ from pathlib import Path
 
 import click
 
-from nv_config_manager_dcim_netbox.installer import config as base_config
 from nv_config_manager_dcim_netbox.installer.air import AirSupportUnavailable
 
 # Safe at module scope: tunnel.py takes the AIR client as an argument rather than
@@ -244,12 +243,6 @@ def air_up(
         raise click.ClickException(str(AirSupportUnavailable(exc))) from exc
 
     cfg = NetBoxSimConfig.from_yaml(config_path)
-    if cfg.config_manager_ref == "main":
-        raise click.ClickException(
-            f"{config_path} sets config_manager_ref: main, which has no pluggable-DCIM "
-            f"framework, so the sim would clone a tree this provider cannot run on.\n"
-            f"Set it to {base_config.NVCM_BRANCH}, or remove the key to take that default."
-        )
     if token:
         cfg.dcim_token = token
     if blueprint is not None:

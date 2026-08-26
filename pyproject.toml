@@ -51,7 +51,7 @@ dev = [
 ]
 
 # The SDK is not yet published to an index. For local development, point uv at a
-# sibling checkout of nv-config-manager (branch: zb/pluggable-dcim), e.g.:
+# sibling checkout of nv-config-manager, e.g.:
 #
 # [tool.uv.sources]
 # nv-config-manager-dcim = { path = "../nv-config-manager/components/dcim", editable = true }

@@ -10,18 +10,13 @@
 # This is NVCM's own air-sim format. Only the fields that must be chosen, or that
 # differ from a default, are here; everything else NetBox needs already defaults
 # correctly in NetBoxSimConfig. Do not copy NVCM's development/air_sim/configs/
-# air_trial.yaml over this, see config_manager_ref below.
+# air_trial.yaml over this.
 
 # 7 devices. `air_superpod` is 24 and needs a much larger box.
 mock_blueprint: air_trial
 
 deployment_name: demo
 simulation_name: nv-config-manager-netbox-air-trial
-
-# The branch carrying the pluggable-DCIM framework. cloud-init clones this onto
-# the sim box, and SimConfig's default is `main`, which has none of it. This is
-# the field to check first if the sim comes up with no DCIM support.
-config_manager_ref: zb/pluggable-dcim
 
 size: small
 

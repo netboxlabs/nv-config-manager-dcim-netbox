@@ -2,7 +2,7 @@
 #
 # Override on the command line, e.g.:
 #   make render SERVER=https://netbox.example TOKEN=abc DEVICE_ID=<id> ENTRYPOINT=<name>
-#   make setup NVCM=/path/to/nv-config-manager   # branch: zb/pluggable-dcim
+#   make setup NVCM=/path/to/nv-config-manager
 
 # Path to the nv-config-manager checkout. Only a sibling clone by default, so
 # export NVCM_REPO once rather than passing NVCM= to every target. The
