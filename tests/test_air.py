@@ -8,6 +8,9 @@ end-to-end steps in docs/air-sim.md.
 
 from __future__ import annotations
 
+import builtins
+import importlib
+import sys
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -15,7 +18,9 @@ import pytest
 import yaml
 from click.testing import CliRunner
 
+from nv_config_manager_dcim_netbox.installer import cluster
 from nv_config_manager_dcim_netbox.installer import config as base_config
+from nv_config_manager_dcim_netbox.installer.air import AirSupportUnavailable
 from nv_config_manager_dcim_netbox.installer.tokens import generate_api_token, is_valid_api_token
 
 pytestmark = pytest.mark.air
@@ -396,6 +401,49 @@ def test_air_netbox_uses_overridable_demo_login():
     assert "netbox.superuser.password=lab-password" in custom
 
 
+def test_air_netbox_login_escapes_helm_separators():
+    """helm --set reads `,` as the next assignment and `\\` as an escape.
+
+    Unescaped, a password holding either silently becomes a shorter password
+    plus a junk key, and the login the TUI prints is not the one installed.
+    The generated NATS password cannot hit this -- it is alphanumeric by
+    construction -- but these two are free-form config values.
+    """
+    script = _callback_for_script(
+        netbox_superuser_password=r"lab,pass\word",
+    ).bring_up_script("/i.tar", "/c.tgz")
+    assert r"netbox.superuser.password=lab\,pass\\word" in script
+
+
+def test_helm_set_value_escapes_only_what_helm_reads():
+    assert cluster.helm_set_value("plain") == "plain"
+    assert cluster.helm_set_value("a.b") == "a.b"
+    assert cluster.helm_set_value("a,b") == r"a\,b"
+    assert cluster.helm_set_value("a\\b") == r"a\\b"
+
+
+def test_tui_import_failure_stays_air_support_unavailable(monkeypatch):
+    """textual arrives with the `air` extra, so without it the import must not
+    raise a bare ImportError.
+
+    cli.py guards this import with `except AirSupportUnavailable`; anything else
+    escaping here takes down every `air` subcommand, including `air tunnel`,
+    which is documented to work without the extra.
+    """
+    module = "nv_config_manager_dcim_netbox.installer.air.tui"
+    real_import = builtins.__import__
+
+    def without_textual(name, *args, **kwargs):
+        if name == "textual" or name.startswith("textual."):
+            raise ImportError("No module named 'textual'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, module, raising=False)
+    monkeypatch.setattr(builtins, "__import__", without_textual)
+    with pytest.raises(AirSupportUnavailable):
+        importlib.import_module(module)
+
+
 def test_generated_config_pins_the_box_password():
     """SimConfig mints a new one per run, and nothing records it.
 
@@ -658,13 +706,14 @@ def test_air_image_preparation_builds_without_make(monkeypatch, tmp_path):
     monkeypatch.setattr(air_images, "_REPO_ROOT", tmp_path)
     monkeypatch.setattr(air_images, "require_tools", lambda *names: None)
     monkeypatch.setattr(air_images, "_resolve_nvcm_repo", lambda: Path("/nvcm"))
-    monkeypatch.setattr(air_images, "_resolve_plugin_repo", lambda log: Path("/plugin"))
+    monkeypatch.setattr(air_images, "_resolve_plugin_repo", lambda log, ref: Path("/plugin"))
     monkeypatch.setattr(
         air_images,
         "_load_versions",
         lambda: {
             "NETBOX_BASE_IMAGE": "netbox-base:4.7",
             "NETBOX_BGP_REF": "abc123",
+            "NETBOX_PLUGIN_REF": "main",
         },
     )
     monkeypatch.setattr(
@@ -710,7 +759,8 @@ def test_images_built_for_the_wrong_arch_are_refused(monkeypatch):
         cb.check_image_arch("host", 22)
     message = str(excinfo.value)
     assert "amd64" in message
-    assert "automatic NetBox image build" in message
+    assert air_images.TARGET_PLATFORM in message
+    assert "overridden in the sim config" in message
 
 
 def test_matching_images_pass(monkeypatch):

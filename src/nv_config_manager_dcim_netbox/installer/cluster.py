@@ -189,6 +189,16 @@ def orphaned_data_volumes(release: str, namespace: str, runner: Runner | None = 
     return []
 
 
+def helm_set_value(value: str) -> str:
+    """Escape a value for the right-hand side of a ``helm --set`` assignment.
+
+    helm's parser reads `,` as the next assignment and `\\` as an escape, so an
+    unescaped value silently becomes a shorter value plus a junk key. Dots are
+    literal on this side and need no handling.
+    """
+    return value.replace("\\", "\\\\").replace(",", "\\,")
+
+
 def install_netbox(
     chart_ref: str,
     *,
@@ -217,7 +227,8 @@ def install_netbox(
     was never built.
 
     ``extra_set`` carries caller-supplied ``key=value`` overrides, appended last so
-    they win over the ones built here.
+    they win over the ones built here. Values that may contain `,` or `\\` must be
+    passed through ``helm_set_value`` by the caller, which knows where the key ends.
     """
     argv = [
         "helm",

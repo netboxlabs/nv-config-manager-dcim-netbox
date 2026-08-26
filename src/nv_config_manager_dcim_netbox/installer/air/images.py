@@ -41,7 +41,7 @@ def _resolve_nvcm_repo() -> Path:
     return candidate
 
 
-def _resolve_plugin_repo(log: Callable[[str], None]) -> Path:
+def _resolve_plugin_repo(log: Callable[[str], None], ref: str) -> Path:
     """Find the plugin checkout, cloning it into the build cache if necessary."""
     configured = os.environ.get(PLUGIN_REPO_ENV)
     if configured:
@@ -69,10 +69,12 @@ def _resolve_plugin_repo(log: Callable[[str], None]) -> Path:
             cwd=_REPO_ROOT,
             log=log,
         )
-    elif (destination / ".git").is_dir():
-        log("Refreshing the cached NetBox plugin build context...")
+    if (destination / ".git").is_dir():
+        log(f"Checking out the NetBox plugin at {ref}...")
+        # By ref, not by branch, so a SHA in versions.env pins the build. GitHub
+        # serves a shallow fetch of either.
         _stream(
-            ["git", "fetch", "--depth", "1", "origin", "main"],
+            ["git", "fetch", "--depth", "1", "origin", ref],
             cwd=destination,
             log=log,
         )
@@ -125,13 +127,14 @@ def ensure_air_images(
     require_tools("docker", "git")
     if not (_REPO_ROOT / "Dockerfile").is_file():
         raise RuntimeError(
-            "The NetBox AIR image builder is missing its packaged build assets. "
-            "Reinstall nv-config-manager-dcim-netbox with its AIR support."
+            "The NetBox AIR image builder needs this repository's Dockerfile and "
+            f"build/ directory, which are not in the wheel. Expected them under {_REPO_ROOT}; "
+            "run `nvcm-netbox air` from a source checkout."
         )
 
     nvcm_repo = _resolve_nvcm_repo()
-    plugin_repo = _resolve_plugin_repo(log)
     versions = _load_versions()
+    plugin_repo = _resolve_plugin_repo(log, versions.get("NETBOX_PLUGIN_REF", "main"))
     build_env = {**os.environ, "DOCKER_BUILDKIT": "1"}
 
     log("Building the NetBox provider image for linux/amd64...")

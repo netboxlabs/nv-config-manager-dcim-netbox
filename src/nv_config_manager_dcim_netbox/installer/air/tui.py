@@ -8,15 +8,15 @@ import subprocess
 from pathlib import Path
 from typing import ClassVar
 
-from textual.app import ComposeResult
-from textual.widgets import Label
-
 from nv_config_manager_dcim_netbox.installer import cluster
 from nv_config_manager_dcim_netbox.installer.air import AirSupportUnavailable
 from nv_config_manager_dcim_netbox.installer.air.callback import NAMESPACE
 from nv_config_manager_dcim_netbox.installer.air.config import NetBoxSimConfig
 from nv_config_manager_dcim_netbox.installer.air.orchestrator import NetBoxSimOrchestrator
 
+# textual belongs in here with the rest: it reaches us through
+# nv-config-manager-installer, so without the `air` extra it is absent too, and
+# importing it above would raise a bare ImportError that `air --help` cannot catch.
 try:
     from nv_config_manager_installer.air_sim.orchestrator import OrchestratorCallback
     from nv_config_manager_installer.air_sim.sim_config import SimConfig
@@ -31,6 +31,8 @@ try:
         TopologyScreen,
     )
     from nv_config_manager_installer.tui.widgets import LabeledSwitch
+    from textual.app import ComposeResult
+    from textual.widgets import Label
 except ImportError as exc:  # pragma: no cover - depends on the `air` extra
     raise AirSupportUnavailable(exc) from exc
 

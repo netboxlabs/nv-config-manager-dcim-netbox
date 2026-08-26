@@ -19,6 +19,7 @@ from nv_config_manager_dcim_netbox.installer import cluster
 from nv_config_manager_dcim_netbox.installer import config as base_config
 from nv_config_manager_dcim_netbox.installer.air import AirSupportUnavailable
 from nv_config_manager_dcim_netbox.installer.air.config import NetBoxSimConfig
+from nv_config_manager_dcim_netbox.installer.air.images import TARGET_PLATFORM
 from nv_config_manager_dcim_netbox.installer.remote import ScriptRunner, SshRunner
 from nv_config_manager_dcim_netbox.installer.shell import CommandError, run
 from nv_config_manager_dcim_netbox.installer.tokens import (
@@ -272,8 +273,9 @@ class NetBoxAirCallback:
             nats_password=self.nats_password,
             extra_set=[
                 *self.cfg.gateway_overrides(),
-                f"netbox.superuser.name={self.cfg.netbox_superuser_name}",
-                f"netbox.superuser.password={self.cfg.netbox_superuser_password}",
+                f"netbox.superuser.name={cluster.helm_set_value(self.cfg.netbox_superuser_name)}",
+                "netbox.superuser.password="
+                f"{cluster.helm_set_value(self.cfg.netbox_superuser_password)}",
                 *self.cfg.netbox_helm_set,
             ],
             timeout=NETBOX_INSTALL_TIMEOUT,
@@ -451,9 +453,10 @@ class NetBoxAirCallback:
     def check_image_arch(self, host: str, port: int) -> None:
         """Refuse to ship images the sim box cannot execute.
 
-        The orchestrator builds for x86_64 before allocating the sim. Keep this
-        check at the upload boundary so a custom image reference cannot reach the
-        cluster with an incompatible architecture.
+        The orchestrator builds for the sim architecture before allocating one.
+        Keep this check at the upload boundary so an image that did not come from
+        that build -- overridden in the sim config, or replaced locally -- cannot
+        reach the cluster with an incompatible architecture.
         """
         want = self.runner(host, port).run(["uname", "-m"]).strip()
         want = {"x86_64": "amd64", "aarch64": "arm64"}.get(want, want)
@@ -475,8 +478,9 @@ class NetBoxAirCallback:
             raise RuntimeError(
                 f"The sim box is {want}, but these images are not:\n"
                 + "\n".join(wrong)
-                + "\n\nThe automatic NetBox image build did not produce the images "
-                + f"expected for linux/{want}. See the earlier build output."
+                + f"\n\nThe orchestrator builds these for {TARGET_PLATFORM} before allocating "
+                + "the sim, so each one above was either overridden in the sim config, "
+                + "replaced locally, or never built. Check the build output above."
             )
 
     def upload_images(self, host: str, port: int) -> str:

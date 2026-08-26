@@ -70,6 +70,11 @@ tag. A separate `make images` step is neither required nor recommended. The fina
 upload boundary checks the architecture too, so a custom arm64 image cannot
 surface later as an opaque Helm timeout.
 
+The plugin layer is built from the ref in
+[`build/versions.env`](../build/versions.env) (`NETBOX_PLUGIN_REF`, `main` by
+default). Set it to a commit to make a simulation reproducible, or point
+`NETBOX_NVCM_PLUGIN_REPO` at a local checkout to build what you are editing.
+
 The config path matches NVCM's air-sim: `~/.nvcm-air-sim.yaml` by default,
 overridden by `$NVCM_AIR_CONFIG` or `--config`, so their documentation applies
 here unchanged.
