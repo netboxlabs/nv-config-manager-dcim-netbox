@@ -17,6 +17,11 @@ from nv_config_manager_dcim_netbox.installer.air import AirSupportUnavailable
 # importing it, so `air --help` still works without the `air` extra installed.
 from nv_config_manager_dcim_netbox.installer.air import tunnel as tunnel_mod
 
+try:
+    from nv_config_manager_dcim_netbox.installer.air.tui import run as run_tui
+except AirSupportUnavailable:  # pragma: no cover - depends on the `air` extra
+    run_tui = None
+
 
 class ConsoleCallback:
     """Minimal OrchestratorCallback that just reports to the terminal."""
@@ -76,8 +81,11 @@ _ENV_ONLY_NOTE = "# ngc_api_key comes from $NGC_API_KEY. Add it here only to ove
 # without reading the source. Rendered from the dataclass, never hand-written, so
 # they cannot drift from the defaults they document.
 _SHOWN_DEFAULTS = (
+    "use_internal",
     "netbox_image",
     "netbox_image_tag",
+    "netbox_superuser_name",
+    "netbox_superuser_password",
     "dcim_provider_package_image",
     "dcim_server",
     "dcim_token",
@@ -249,8 +257,29 @@ def air_up(
 
     orchestrator = NetBoxSimOrchestrator(cfg, ConsoleCallback(), chart=chart)
     click.secho(f"NetBox API token: {orchestrator.api_token}", fg="yellow")
+    click.secho(
+        f"NetBox UI login: {cfg.netbox_superuser_name} / {cfg.netbox_superuser_password}",
+        fg="yellow",
+    )
 
     orchestrator.run()
+
+
+@air.command("tui")
+@click.option(
+    "--config",
+    "-c",
+    "config_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=lambda: _default_sim_config(),
+    show_default=str(DEFAULT_SIM_CONFIG),
+    help=f"Sim config to load and save. Defaults to ${SIM_CONFIG_ENV}, then {DEFAULT_SIM_CONFIG}.",
+)
+def air_tui(config_path: Path) -> None:
+    """Open the NetBox DSX Air simulation wizard."""
+    if run_tui is None:
+        raise click.ClickException(str(AirSupportUnavailable()))
+    run_tui(config_path)
 
 
 # The sim's own hostnames, which resolve only through the tunnel: they live in

@@ -12,6 +12,7 @@ from nv_config_manager_dcim_netbox.installer import config as base_config
 from nv_config_manager_dcim_netbox.installer.air import AirSupportUnavailable
 from nv_config_manager_dcim_netbox.installer.air.callback import NetBoxAirCallback
 from nv_config_manager_dcim_netbox.installer.air.config import NetBoxSimConfig
+from nv_config_manager_dcim_netbox.installer.air.images import ensure_air_images
 
 try:
     from nv_config_manager_installer.air_sim.orchestrator import (
@@ -46,6 +47,15 @@ class NetBoxSimOrchestrator(SimOrchestrator):
         """Return the token shared by NetBox and NVIDIA Config Manager."""
         return self._provider_deployment.api_token
 
+    def _run_impl(self) -> tuple[str, int]:
+        """Prepare provider-owned images before allocating an AIR simulation."""
+        ensure_air_images(
+            self._cfg.dcim_provider_package_image,
+            f"{self._cfg.netbox_image}:{self._cfg.netbox_image_tag}",
+            self._log,
+        )
+        return super()._run_impl()
+
     def _generate_install_yaml(
         self,
         cfg: NetBoxSimConfig,
@@ -62,7 +72,7 @@ class NetBoxSimOrchestrator(SimOrchestrator):
                 api_token=self._provider_deployment.api_token,
                 provider_image=cfg.dcim_provider_package_image,
                 netbox_server=cfg.dcim_server,
-                netbox_public_url=cfg.dcim_public_url or cfg.dcim_server,
+                netbox_public_url=cfg.dcim_ui_url(),
                 nats_password=self._provider_deployment.nats_password,
             ),
         )

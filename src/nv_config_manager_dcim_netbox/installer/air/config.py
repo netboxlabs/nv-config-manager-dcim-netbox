@@ -37,9 +37,9 @@ class NetBoxSimConfig(SimConfig):
 
     dcim_provider: str = base_config.PROVIDER_NAME
 
-    # Built by `make images`; neither image exists in a registry, so both are
-    # shipped into the sim's kind cluster over SSH. Tags track the package version,
-    # the same source `make images` builds them from.
+    # Neither image exists in a registry, so the AIR orchestrator builds both for
+    # the simulation architecture and ships them into its kind cluster over SSH.
+    # Tags track the package version.
     dcim_provider_package_image: str = base_config.PROVIDER_IMAGE
     netbox_image: str = base_config.NETBOX_IMAGE
     netbox_image_tag: str = base_config.IMAGE_TAG
@@ -54,6 +54,12 @@ class NetBoxSimConfig(SimConfig):
 
     netbox_release: str = "netbox"
     netbox_chart: Path | None = None
+
+    # AIR simulations are disposable demo environments, so use the same
+    # predictable UI login as the bundled demo provider. Normal installer
+    # deployments continue to let the chart generate their credentials.
+    netbox_superuser_name: str = "demo"
+    netbox_superuser_password: str = "demo"
 
     # Load the sim's topology into NetBox with the plugin's nvcm_load_dcim. Off
     # means an empty NetBox, which renders nothing; only turn it off when
@@ -86,6 +92,10 @@ class NetBoxSimConfig(SimConfig):
         from nv_config_manager_installer.air_sim.constants import CONFIG_MANAGER_HOSTNAME
 
         return f"netbox.{CONFIG_MANAGER_HOSTNAME}"
+
+    def dcim_ui_url(self) -> str:
+        """Return the browser-facing NetBox URL persisted for UI links."""
+        return self.dcim_public_url or f"https://{self.netbox_hostname()}"
 
     def blueprint_dir(self, remote_repo: str) -> str:
         """Path on the sim box to this sim's topology blueprint.

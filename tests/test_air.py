@@ -8,13 +8,19 @@ end-to-end steps in docs/air-sim.md.
 
 from __future__ import annotations
 
+import builtins
+import importlib
+import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 import yaml
 from click.testing import CliRunner
 
+from nv_config_manager_dcim_netbox.installer import cluster
 from nv_config_manager_dcim_netbox.installer import config as base_config
+from nv_config_manager_dcim_netbox.installer.air import AirSupportUnavailable
 from nv_config_manager_dcim_netbox.installer.tokens import generate_api_token, is_valid_api_token
 
 pytestmark = pytest.mark.air
@@ -33,6 +39,11 @@ air_callback = pytest.importorskip(
     reason="the `air` extra is not installed",
     exc_type=ImportError,
 )
+air_images = pytest.importorskip(
+    "nv_config_manager_dcim_netbox.installer.air.images",
+    reason="the `air` extra is not installed",
+    exc_type=ImportError,
+)
 air_cli = pytest.importorskip(
     "nv_config_manager_dcim_netbox.installer.air.cli",
     reason="the `air` extra is not installed",
@@ -48,6 +59,11 @@ air_orchestrator = pytest.importorskip(
     reason="the `air` extra is not installed",
     exc_type=ImportError,
 )
+air_tui = pytest.importorskip(
+    "nv_config_manager_dcim_netbox.installer.air.tui",
+    reason="the `air` extra is not installed",
+    exc_type=ImportError,
+)
 netbox_air_orchestrator = pytest.importorskip(
     "nv_config_manager_dcim_netbox.installer.air.orchestrator",
     reason="the `air` extra is not installed",
@@ -60,6 +76,11 @@ build_content_jobs = air_installer_config.build_content_jobs
 build_template_plugins = air_installer_config.build_template_plugins
 SimOrchestrator = air_orchestrator.SimOrchestrator
 NetBoxSimOrchestrator = netbox_air_orchestrator.NetBoxSimOrchestrator
+NetBoxAirSimApp = air_tui.NetBoxAirSimApp
+NetBoxAirSimulationManager = air_tui.NetBoxAirSimulationManager
+NetBoxLaunchScreen = air_tui.NetBoxLaunchScreen
+NetBoxPopulationPanel = air_tui.NetBoxPopulationPanel
+NetBoxTopologyScreen = air_tui.NetBoxTopologyScreen
 
 
 # -- independent fabric generation and DCIM population ------------------------
@@ -125,6 +146,14 @@ def test_blueprint_dir_points_into_the_clone_on_the_box():
     cfg = NetBoxSimConfig(mock_blueprint="air_trial")
     assert cfg.blueprint_dir("/home/nvcm/nv-config-manager").endswith(
         "/development/mock_topology/context/air_trial"
+    )
+
+
+def test_air_dcim_ui_url_uses_the_tunneled_netbox_route():
+    assert NetBoxSimConfig().dcim_ui_url() == "https://netbox.nvcm.air"
+    assert (
+        NetBoxSimConfig(dcim_public_url="https://netbox.example.com").dcim_ui_url()
+        == "https://netbox.example.com"
     )
 
 
@@ -202,6 +231,7 @@ def test_netbox_orchestrator_configures_provider_before_upload():
     )
 
     assert generated["dcim"]["provider"] == "netbox"
+    assert generated["dcim"]["public_url"] == "https://netbox.nvcm.air"
     assert generated["dcim"]["provider_packages"][0]["image"] == (cfg.dcim_provider_package_image)
     assert generated["secrets"]["k8s"]["nats"]["values"]["password"] == (provider.nats_password)
     assert generated["services"]["nautobot"] is False
@@ -223,6 +253,31 @@ def test_netbox_orchestrator_owns_provider_lifecycle():
         ("post", "worker.example", 17117),
     ]
     assert orchestrator._provider_gateway_hostnames(cfg) == (cfg.netbox_hostname(),)
+
+
+def test_netbox_orchestrator_prepares_images_before_common_air_flow(monkeypatch):
+    cfg = NetBoxSimConfig()
+    recorder = _Recorder()
+    orchestrator = NetBoxSimOrchestrator(
+        cfg,
+        recorder,
+        provider_deployment=_FakeProviderDeployment(),
+    )
+    calls = []
+    monkeypatch.setattr(
+        netbox_air_orchestrator,
+        "ensure_air_images",
+        lambda provider, netbox, log: calls.append((provider, netbox)),
+    )
+    monkeypatch.setattr(SimOrchestrator, "_run_impl", lambda self: ("box", 22))
+
+    assert orchestrator._run_impl() == ("box", 22)
+    assert calls == [
+        (
+            cfg.dcim_provider_package_image,
+            f"{cfg.netbox_image}:{cfg.netbox_image_tag}",
+        )
+    ]
 
 
 # -- the bring-up sequence -----------------------------------------------------
@@ -333,6 +388,62 @@ def test_netbox_is_installed_once_with_the_nats_password():
     assert f"nvcm.natsPassword={cb.nats_password}" in script
 
 
+def test_air_netbox_uses_overridable_demo_login():
+    script = _callback_for_script().bring_up_script("/i.tar", "/c.tgz")
+    assert "netbox.superuser.name=demo" in script
+    assert "netbox.superuser.password=demo" in script
+
+    custom = _callback_for_script(
+        netbox_superuser_name="operator",
+        netbox_superuser_password="lab-password",
+    ).bring_up_script("/i.tar", "/c.tgz")
+    assert "netbox.superuser.name=operator" in custom
+    assert "netbox.superuser.password=lab-password" in custom
+
+
+def test_air_netbox_login_escapes_helm_separators():
+    """helm --set reads `,` as the next assignment and `\\` as an escape.
+
+    Unescaped, a password holding either silently becomes a shorter password
+    plus a junk key, and the login the TUI prints is not the one installed.
+    The generated NATS password cannot hit this -- it is alphanumeric by
+    construction -- but these two are free-form config values.
+    """
+    script = _callback_for_script(
+        netbox_superuser_password=r"lab,pass\word",
+    ).bring_up_script("/i.tar", "/c.tgz")
+    assert r"netbox.superuser.password=lab\,pass\\word" in script
+
+
+def test_helm_set_value_escapes_only_what_helm_reads():
+    assert cluster.helm_set_value("plain") == "plain"
+    assert cluster.helm_set_value("a.b") == "a.b"
+    assert cluster.helm_set_value("a,b") == r"a\,b"
+    assert cluster.helm_set_value("a\\b") == r"a\\b"
+
+
+def test_tui_import_failure_stays_air_support_unavailable(monkeypatch):
+    """textual arrives with the `air` extra, so without it the import must not
+    raise a bare ImportError.
+
+    cli.py guards this import with `except AirSupportUnavailable`; anything else
+    escaping here takes down every `air` subcommand, including `air tunnel`,
+    which is documented to work without the extra.
+    """
+    module = "nv_config_manager_dcim_netbox.installer.air.tui"
+    real_import = builtins.__import__
+
+    def without_textual(name, *args, **kwargs):
+        if name == "textual" or name.startswith("textual."):
+            raise ImportError("No module named 'textual'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, module, raising=False)
+    monkeypatch.setattr(builtins, "__import__", without_textual)
+    with pytest.raises(AirSupportUnavailable):
+        importlib.import_module(module)
+
+
 def test_generated_config_pins_the_box_password():
     """SimConfig mints a new one per run, and nothing records it.
 
@@ -355,6 +466,69 @@ def test_generated_configs_do_not_share_a_password():
     a = yaml.safe_load(air_cli._render_example("air_trial", "demo"))
     b = yaml.safe_load(air_cli._render_example("air_trial", "demo"))
     assert a["oob_ssh_password"] != b["oob_ssh_password"]
+
+
+# -- shared TUI adapter --------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_uses_netbox_config_and_population_controls():
+    cfg = NetBoxSimConfig(ngc_api_key="nvapi-test", load_blueprint=False)
+    app = NetBoxAirSimApp(config=cfg)
+
+    async with app.run_test(size=(180, 100)):
+        topology = app.query_one("#screen-topology", NetBoxTopologyScreen)
+        panel = topology.query_one("#population-panel", NetBoxPopulationPanel)
+        assert not panel.query_one("#load-blueprint").value
+        assert not topology.query("#run-mock-topology-job")
+
+        panel.query_one("#load-blueprint").value = True
+        topology.write_to_config(cfg)
+        assert cfg.load_blueprint is True
+
+
+@pytest.mark.asyncio
+async def test_tui_launch_uses_netbox_orchestrator_and_dashboard():
+    cfg = NetBoxSimConfig(ngc_api_key="nvapi-test")
+    app = NetBoxAirSimApp(config=cfg)
+
+    async with app.run_test(size=(180, 100)) as pilot:
+        app.switch_section("launch")
+        await pilot.pause()
+        launch = app.query_one("#screen-launch", NetBoxLaunchScreen)
+
+        assert isinstance(launch.create_orchestrator(_Recorder()), NetBoxSimOrchestrator)
+        assert isinstance(launch.create_simulation_manager(), NetBoxAirSimulationManager)
+        assert launch._provider_status.display_name == "NetBox"
+        assert launch._provider_status.access_url == "https://netbox.nvcm.air"
+
+
+def test_netbox_provisioning_status_uses_netbox_shell(monkeypatch):
+    manager = NetBoxAirSimulationManager(ngc_api_key="nvapi-test", ssh_password="test")
+    monkeypatch.setattr(manager, "_ssh_cmd", lambda host, port: ["ssh", host, str(port)])
+    completed = Mock(returncode=0, stdout="2/3|leaf-03\n")
+    run = Mock(return_value=completed)
+    monkeypatch.setattr(air_tui.subprocess, "run", run)
+
+    assert manager.get_provisioning_status("worker.example", 17117) == (
+        2,
+        3,
+        ["leaf-03"],
+    )
+    command = run.call_args.args[0][-1]
+    assert "-n nv-config-manager" in command
+    assert "deployment/netbox" in command
+    assert "-c netbox" in command
+    assert "/opt/netbox/venv/bin/python" in command
+    assert "DeviceConfigStatus" in command
+    assert "nautobot" not in command.lower()
+
+
+def test_generated_config_exposes_air_inside_setting():
+    generated = air_cli._render_example("air_trial", "demo")
+    assert "# use_internal: false" in generated
+    assert "# netbox_superuser_name: demo" in generated
+    assert "# netbox_superuser_password: demo" in generated
 
 
 # -- SSH retry -----------------------------------------------------------------
@@ -526,6 +700,37 @@ def test_script_runner_renders_stdin_as_a_heredoc():
 # -- image architecture --------------------------------------------------------
 
 
+def test_air_image_preparation_builds_without_make(monkeypatch, tmp_path):
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+    commands = []
+    monkeypatch.setattr(air_images, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(air_images, "require_tools", lambda *names: None)
+    monkeypatch.setattr(air_images, "_resolve_nvcm_repo", lambda: Path("/nvcm"))
+    monkeypatch.setattr(air_images, "_resolve_plugin_repo", lambda log, ref: Path("/plugin"))
+    monkeypatch.setattr(
+        air_images,
+        "_load_versions",
+        lambda: {
+            "NETBOX_BASE_IMAGE": "netbox-base:4.7",
+            "NETBOX_BGP_REF": "abc123",
+            "NETBOX_PLUGIN_REF": "main",
+        },
+    )
+    monkeypatch.setattr(
+        air_images,
+        "_stream",
+        lambda argv, **kwargs: commands.append(argv),
+    )
+
+    air_images.ensure_air_images("provider:tag", "netbox:tag", lambda line: None)
+
+    assert len(commands) == 3
+    assert commands[0][:4] == ["docker", "build", "--platform", "linux/amd64"]
+    assert commands[1] == [str(tmp_path / "build" / "netbox-image.sh")]
+    assert commands[2][:4] == ["docker", "build", "--platform", "linux/amd64"]
+    assert all("make" not in command for command in commands)
+
+
 def _arch_callback(monkeypatch, box_arch, image_arch):
     from nv_config_manager_dcim_netbox.installer.air import callback as cb_mod
 
@@ -543,7 +748,7 @@ def _arch_callback(monkeypatch, box_arch, image_arch):
 
 
 def test_images_built_for_the_wrong_arch_are_refused(monkeypatch):
-    """`make images` builds for the host; a sim box is x86_64.
+    """The upload boundary still rejects a custom image for the wrong host.
 
     Built on Apple Silicon and loaded onto the box, the containers die instantly
     with "exec format error", which surfaces ten minutes later as a helm timeout
@@ -554,8 +759,8 @@ def test_images_built_for_the_wrong_arch_are_refused(monkeypatch):
         cb.check_image_arch("host", 22)
     message = str(excinfo.value)
     assert "amd64" in message
-    # It has to say how to fix it, not just that it is wrong.
-    assert "make images PLATFORM=linux/amd64" in message
+    assert air_images.TARGET_PLATFORM in message
+    assert "overridden in the sim config" in message
 
 
 def test_matching_images_pass(monkeypatch):

@@ -19,6 +19,7 @@ from nv_config_manager_dcim_netbox.installer import cluster
 from nv_config_manager_dcim_netbox.installer import config as base_config
 from nv_config_manager_dcim_netbox.installer.air import AirSupportUnavailable
 from nv_config_manager_dcim_netbox.installer.air.config import NetBoxSimConfig
+from nv_config_manager_dcim_netbox.installer.air.images import TARGET_PLATFORM
 from nv_config_manager_dcim_netbox.installer.remote import ScriptRunner, SshRunner
 from nv_config_manager_dcim_netbox.installer.shell import CommandError, run
 from nv_config_manager_dcim_netbox.installer.tokens import (
@@ -270,7 +271,13 @@ class NetBoxAirCallback:
             image_repository=self.cfg.netbox_image,
             image_tag=self.cfg.netbox_image_tag,
             nats_password=self.nats_password,
-            extra_set=[*self.cfg.gateway_overrides(), *self.cfg.netbox_helm_set],
+            extra_set=[
+                *self.cfg.gateway_overrides(),
+                f"netbox.superuser.name={cluster.helm_set_value(self.cfg.netbox_superuser_name)}",
+                "netbox.superuser.password="
+                f"{cluster.helm_set_value(self.cfg.netbox_superuser_password)}",
+                *self.cfg.netbox_helm_set,
+            ],
             timeout=NETBOX_INSTALL_TIMEOUT,
             runner=script,
         )
@@ -446,10 +453,10 @@ class NetBoxAirCallback:
     def check_image_arch(self, host: str, port: int) -> None:
         """Refuse to ship images the sim box cannot execute.
 
-        `make images` builds for the host, and a sim box is x86_64, so building on
-        Apple Silicon produces arm64 images. Loaded onto the box they start and
-        immediately die with "exec format error", which surfaces ten minutes later
-        as a helm timeout with nothing pointing at the cause.
+        The orchestrator builds for the sim architecture before allocating one.
+        Keep this check at the upload boundary so an image that did not come from
+        that build -- overridden in the sim config, or replaced locally -- cannot
+        reach the cluster with an incompatible architecture.
         """
         want = self.runner(host, port).run(["uname", "-m"]).strip()
         want = {"x86_64": "amd64", "aarch64": "arm64"}.get(want, want)
@@ -471,7 +478,9 @@ class NetBoxAirCallback:
             raise RuntimeError(
                 f"The sim box is {want}, but these images are not:\n"
                 + "\n".join(wrong)
-                + f"\n\nRebuild them for it:\n  make images PLATFORM=linux/{want}"
+                + f"\n\nThe orchestrator builds these for {TARGET_PLATFORM} before allocating "
+                + "the sim, so each one above was either overridden in the sim config, "
+                + "replaced locally, or never built. Check the build output above."
             )
 
     def upload_images(self, host: str, port: int) -> str:
@@ -520,7 +529,7 @@ class NetBoxAirCallback:
                 api_token=self.api_token,
                 provider_image=self.cfg.dcim_provider_package_image,
                 netbox_server=self.cfg.dcim_server,
-                netbox_public_url=self.cfg.dcim_public_url or self.cfg.dcim_server,
+                netbox_public_url=self.cfg.dcim_ui_url(),
             ),
         )
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as tmp:
