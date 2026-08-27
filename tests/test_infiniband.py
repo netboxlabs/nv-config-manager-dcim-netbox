@@ -386,3 +386,30 @@ async def test_resolve_ib_pkey_context():
     ctx = await client.resolve_ib_pkey_context("host-01", "0x7fff")
     assert isinstance(ctx, IBPKeyContext)
     assert ctx.overlay_id == "10" and ctx.pkey_id == "20" and ctx.pkey == "0x7fff"
+
+
+async def test_resolve_ib_pkey_context_requires_a_location():
+    # Device.location is optional in NetBox. With no scope_id the overlay query is
+    # unscoped, so it would match another site's ib_pkey overlay.
+    seen: list[list] = []
+    client = _client(
+        rest_list={
+            _OVERLAYS: [{"id": 10, "name": "other-site-part"}],
+            _PKEYS: [{"id": 20, "pkey": "0x7fff", "overlay": 10}],
+        }
+    )
+    inner = client.rest_list
+
+    async def spy(path, params=None, **kwargs):
+        seen.append((path, list(params or [])))
+        return await inner(path, params, **kwargs)
+
+    client.rest_list = spy
+
+    async def resolve(host):
+        return {"id": "1", "name": "host-01", "site": {"id": "2", "name": "DM-Akron"}}
+
+    client._resolve_ib_device = resolve
+    with pytest.raises(DCIMInvalidDataError, match="no Location"):
+        await client.resolve_ib_pkey_context("host-01", "0x7fff")
+    assert not [p for path, p in seen if path == _OVERLAYS]

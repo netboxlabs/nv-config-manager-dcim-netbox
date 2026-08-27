@@ -43,14 +43,19 @@ class NetBoxIPAMMixin:
         the VRF on its interfaces — which is exactly how ``get_device_vrfs``
         reads it back. Interfaces already in the target VRF are skipped so repeat
         calls don't emit redundant changes.
+
+        ``mgmt_only`` interfaces are excluded: the reference provider models this
+        as a device-level assignment that leaves the management port alone, and
+        rendering a tenant VRF under it severs the management plane.
         """
         target = int(vrf_id)
         interfaces = await self.rest_list(INTERFACES_PATH, [("device_id", str(device_id))])
         stale = [
             interface
             for interface in interfaces
+            if not interface.get("mgmt_only")
             # str-compare: the FK may arrive nested or bare, and as int or str.
-            if str(fk_id(interface.get("vrf"))) != str(target)
+            and str(fk_id(interface.get("vrf"))) != str(target)
         ]
         # Independent PATCHes: issue them together rather than one round trip per
         # interface (a spine can carry hundreds).
@@ -77,8 +82,9 @@ class NetBoxIPAMMixin:
     ) -> list[str]:
         """Return no removals because NetBox has no separate device/VRF relation.
 
-        Interface VRF changes are the complete source of truth in NetBox, so
-        there is no device-level association left to reconcile afterward.
+        The reference provider reconciles a device-level assignment table here;
+        NetBox has no such model, so the non-management interface VRFs
+        ``assign_vrf_to_device`` writes are the whole association.
         """
         return []
 

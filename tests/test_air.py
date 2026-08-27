@@ -1235,3 +1235,27 @@ def test_tunnel_still_reports_a_genuinely_missing_key(tmp_path, monkeypatch):
 
     assert result.exit_code != 0
     assert "needs an NGC API key" in result.output
+
+
+def test_patch_install_config_carries_the_nats_password_netbox_was_installed_with():
+    """bring_up_script installs NetBox with `cb.nats_password`.
+
+    Leaving it out of the uploaded install config makes NVCM's deployer mint its
+    own for `nats-nv-config-manager`, so NetBox's publisher authenticates with a
+    password NATS rejects and renders silently never happen.
+    """
+    from nv_config_manager_dcim_netbox.installer.air.callback import (
+        CONFIG_MANAGER_INSTALL_CONFIG,
+        NVCM_BOX_USER,
+    )
+
+    remote = f"/home/{NVCM_BOX_USER}/{CONFIG_MANAGER_INSTALL_CONFIG}"
+    manager = _FakeManager(files={remote: yaml.safe_dump({"cluster": {"size": "small"}})})
+    cb = _callback_for_script()
+    cb._manager = manager
+
+    cb.patch_install_config("host", 22)
+
+    uploaded = yaml.safe_load(manager.files[remote])
+    assert uploaded["secrets"]["k8s"]["nats"]["values"]["password"] == cb.nats_password
+    assert uploaded["dcim"]["provider"] == "netbox"

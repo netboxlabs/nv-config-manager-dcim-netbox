@@ -56,3 +56,25 @@ async def test_assign_vrf_noop_when_all_interfaces_already_set():
     finally:
         await client.close()
     assert client._patches == []
+
+
+async def test_assign_vrf_leaves_management_interfaces_alone():
+    # Moving eth0 into a tenant VRF severs the management plane.
+    interfaces = [
+        {"id": 1, "name": "swp1", "vrf": None},
+        {"id": 2, "name": "eth0", "vrf": None, "mgmt_only": True},
+    ]
+    client = _client(interfaces)
+    try:
+        await client.assign_vrf_to_device("7", "9")
+    finally:
+        await client.close()
+    assert [p[1] for p in client._patches] == ["dcim/interfaces/1/"]
+
+
+async def test_remove_unmapped_device_vrfs_is_a_noop():
+    client = _client([])
+    try:
+        assert await client.remove_unmapped_device_vrfs("7", ["9"]) == []
+    finally:
+        await client.close()

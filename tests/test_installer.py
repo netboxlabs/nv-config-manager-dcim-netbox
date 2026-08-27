@@ -1285,3 +1285,37 @@ def test_no_kind_node_is_not_an_arch_failure(monkeypatch):
     # Nothing to ask; the load step reports its own failure.
     monkeypatch.setattr(cluster, "kind_node_arch", lambda c: "")
     cluster.check_image_arch(["netbox:0.1.0"], "nv-config-manager")
+
+
+def test_up_reuses_the_nats_password_from_the_config_it_wrote(monkeypatch, tmp_path):
+    """Reading the base profile for it always came up empty, so every run minted a
+    fresh password and rewrote the NetBox release with it.
+
+    `config` already resolves this from `--output`; `up` has to read the same file
+    or the two disagree about what NetBox publishes with.
+    """
+    password = "ReusedNatsPassword1"
+    out = tmp_path / "install.yaml"
+    out.write_text(
+        yaml.safe_dump({"secrets": {"k8s": {"nats": {"values": {"password": password}}}}})
+    )
+    monkeypatch.setattr(cluster, "kind_cluster_exists", lambda name: True)
+    monkeypatch.setattr(cluster, "helm_dependency_build", lambda chart: None)
+    monkeypatch.setattr(cluster, "pending_release_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cluster, "orphaned_data_volumes", lambda *args, **kwargs: [])
+    seen = {}
+    monkeypatch.setattr(
+        cluster,
+        "install_netbox",
+        lambda *args, **kwargs: seen.update(nats=kwargs.get("nats_password")),
+    )
+    monkeypatch.setattr(cluster, "wait_for_netbox", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cluster, "run_nvcm_init", lambda *args, **kwargs: "")
+
+    result = CliRunner().invoke(
+        cli.main, ["netbox", "up", "--no-kind-load", "--config-out", str(out)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen["nats"] == password
+    assert _written_nats_password(out) == password

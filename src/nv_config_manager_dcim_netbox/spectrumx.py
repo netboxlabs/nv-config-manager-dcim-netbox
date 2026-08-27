@@ -54,6 +54,22 @@ _SPECTRUMX_ZONE_TAG = "spectrumx"
 _SITE_FIELD = "nvcm_site"
 
 
+def _namespace_tag_name(vrf: dict) -> str:
+    """Return the VRF's namespace tag name, ignoring the zone marker.
+
+    Tag names only, not ``tag_names`` (which also yields slugs and the
+    ``spectrumx`` marker). Matches ``get_namespace_route_distinguishers``.
+    """
+    candidates = sorted(
+        t["name"]
+        for t in (vrf.get("tags") or [])
+        if isinstance(t, dict)
+        and t.get("name")
+        and _SPECTRUMX_ZONE_TAG not in (t.get("name"), t.get("slug"))
+    )
+    return candidates[0] if candidates else ""
+
+
 class NetBoxSpectrumXMixin:
     """Spectrum-X VRF/overlay provisioning and reconciliation."""
 
@@ -75,7 +91,7 @@ class NetBoxSpectrumXMixin:
             vrf_tags = tag_names(vrf)
             if namespace and namespace not in vrf_tags:
                 continue
-            vrf_namespace = namespace or next(iter(sorted(vrf_tags)), "")
+            vrf_namespace = namespace or _namespace_tag_name(vrf)
             interface_rows = vrf.get("interfaces") or []
             interfaces = tuple(
                 f"{(i.get('device') or {}).get('name')}:{i['name']}"

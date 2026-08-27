@@ -536,11 +536,20 @@ class NetBoxInfiniBandMixin:
         # sibling locations' overlays.
         location_chain = self._ib_location_chain(device.get("location"))
         location_id = self._fk_id(device.get("location") or {})
+        scope_ids = [
+            str(chain_id)
+            for chain_location in location_chain
+            if (chain_id := self._fk_id(chain_location)) is not None
+        ]
+        if not scope_ids:
+            # Device.location is optional in NetBox. With no scope_id the overlay
+            # query is unscoped and matches every ib_pkey overlay in the install.
+            raise DCIMInvalidDataError(
+                f"NetBox device {device.get('name')!r} has no Location; "
+                f"cannot scope IB PKey {pkey_norm!r} to an overlay"
+            )
         params = [("isolation_type", _IB_PKEY_ISOLATION), ("scope_type", LOCATION_SCOPE_TYPE)]
-        for chain_location in location_chain:
-            chain_id = self._fk_id(chain_location)
-            if chain_id is not None:
-                params.append(("scope_id", str(chain_id)))
+        params.extend(("scope_id", scope_id) for scope_id in scope_ids)
         overlays = await self.rest_list(self.OVERLAYS_PATH, params)
         overlays_by_id = {str(overlay["id"]): overlay for overlay in overlays}
         # One pkey query, then match against the location/isolation-scoped

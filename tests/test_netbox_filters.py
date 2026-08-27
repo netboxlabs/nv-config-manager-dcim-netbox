@@ -140,14 +140,15 @@ async def test_dhcp_contexts_resolve_ztp_eligibility_from_the_status_endpoint():
 
 
 @pytest.mark.state
-async def test_backup_eligibility_ors_active_and_provisioned_statuses():
-    # ZTP writes status=provisioned, so a freshly-provisioned device must still be
-    # eligible for backup; NetBox ORs a repeated status param.
-    client, queries = _client()
+async def test_backup_eligibility_never_filters_status_or_platform_server_side():
+    # Both are choice-validated: a NetBox without the plugin's `provisioned` status,
+    # or without one of the backup platforms, rejects the query with 400 rather than
+    # matching nothing. They are matched client-side instead.
+    client, queries = _client(rest_list={STATUS_PATH: [{"device": 4}]})
     await client.get_backup_enabled_device_ids(is_aggregate_managed=True)
     device_params = params_for(queries, _DEVICES)
-    assert ("status", "active") in device_params
-    assert ("status", "provisioned") in device_params
+    assert ("id", "4") in device_params
+    assert not any(key in ("status", "platform") for key, _ in device_params)
     status_params = params_for(queries, STATUS_PATH)
     assert ("backup_enabled", "true") in status_params
     assert ("is_aggregate_managed", "true") in status_params

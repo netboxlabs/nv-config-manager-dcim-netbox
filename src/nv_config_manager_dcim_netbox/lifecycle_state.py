@@ -23,11 +23,12 @@ from nv_config_manager_dcim import (
     RenderTemplateVersion,
 )
 
+from nv_config_manager_dcim_netbox._mappers import choice_str as _choice_str
 from nv_config_manager_dcim_netbox._mappers import device_pk as _device_pk
+from nv_config_manager_dcim_netbox._mappers import slug_of as _slug_of
 from nv_config_manager_dcim_netbox.fabric_common import (
     BACKUP_PATH as _BACKUP_PATH,
 )
-from nv_config_manager_dcim_netbox.fabric_common import DEVICES_PATH
 from nv_config_manager_dcim_netbox.fabric_common import (
     INTENDED_PATH as _INTENDED_PATH,
 )
@@ -44,7 +45,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Platform slugs eligible for backup (matches the managed-fleet platforms).
-_BACKUP_PLATFORMS = ("arista-eos", "cumulus-linux", "nv-os")
+_BACKUP_PLATFORMS = frozenset({"arista-eos", "cumulus-linux", "nv-os"})
+# ZTP writes ``provisioned``, so freshly-provisioned devices need it as well as
+# ``active`` or they would never be backed up.
+_BACKUP_STATUSES = frozenset({"active", "provisioned"})
 
 
 class NetBoxLifecycleStateMixin:
@@ -149,25 +153,31 @@ class NetBoxLifecycleStateMixin:
             )
 
     async def get_backup_enabled_device_ids(self, is_aggregate_managed: bool) -> set[str]:
-        # Backup-enabled statuses intersected with in-service devices on
-        # backup-capable platforms, in two independent queries. ``provisioned`` is
-        # included as well as ``active``: ZTP writes it, so freshly-provisioned
-        # devices would otherwise never be backed up.
-        params = [("status", "active"), ("status", "provisioned")]
-        params.extend(("platform", slug) for slug in _BACKUP_PLATFORMS)
-        statuses, devices = await asyncio.gather(
-            self.rest_list(
-                _STATUS_PATH,
-                [
-                    ("backup_enabled", "true"),
-                    ("is_aggregate_managed", str(is_aggregate_managed).lower()),
-                ],
-            ),
-            self.rest_list(DEVICES_PATH, params),
+        """Backup-enabled devices that are in service on a backup-capable platform.
+
+        Status and platform are matched client-side, as the reference provider
+        does. Both are choice-validated filters in NetBox, so sending a value this
+        NetBox does not define (``provisioned`` needs the plugin's FIELD_CHOICES;
+        a platform needs the slug to exist) fails the whole query with a 400
+        instead of matching nothing.
+        """
+        statuses = await self.rest_list(
+            _STATUS_PATH,
+            [
+                ("backup_enabled", "true"),
+                ("is_aggregate_managed", str(is_aggregate_managed).lower()),
+            ],
         )
         backup_enabled = {pk for s in statuses if (pk := _device_pk(s))}
-        eligible = {str(d["id"]) for d in devices}
-        return backup_enabled & eligible
+        if not backup_enabled:
+            return set()
+        devices = await self.devices_by_ids(backup_enabled)
+        return {
+            str(d["id"])
+            for d in devices
+            if _choice_str(d.get("status")) in _BACKUP_STATUSES
+            and _slug_of(d.get("platform")) in _BACKUP_PLATFORMS
+        }
 
     async def get_configuration_backup_metadata(
         self, device_id: str

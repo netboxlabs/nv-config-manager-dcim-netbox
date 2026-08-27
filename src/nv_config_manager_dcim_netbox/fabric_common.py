@@ -13,6 +13,7 @@ redeclaring the same string.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from collections.abc import Iterable, Iterator
 
@@ -24,6 +25,8 @@ from nv_config_manager_dcim import (
 
 from nv_config_manager_dcim_netbox._mappers import device_pk, fk_id
 from nv_config_manager_dcim_netbox.client import is_netbox_pk
+
+logger = logging.getLogger(__name__)
 
 # Default fabric status value (plugin uses a choice field, not a status object).
 FABRIC_STATUS = "active"
@@ -94,6 +97,35 @@ class FabricCommonMixin:
     # fields. Never query them as cf_nvcm_* filters on dcim/devices: no such field
     # exists, and NetBox drops unknown params rather than rejecting them, so the
     # filter widens the read to the whole fleet instead of failing closed.
+
+    # -- reads that tolerate a NetBox missing the thing being filtered on -----
+
+    async def _safe_list(self, path: str, params: list[tuple[str, str]] | None = None):
+        """List a REST endpoint, treating a missing endpoint (optional plugin) as no data."""
+        try:
+            return await self.rest_list(path, params)
+        except DCIMNotFoundError:
+            return []
+
+    async def _optional_list(self, path: str, params: list[tuple[str, str]] | None = None):
+        """List an endpoint whose *filter values* may not exist in this NetBox.
+
+        Like ``_safe_list``, but also degrades on 400: NetBox validates slug-keyed
+        filters (``tag``, ``role``, ``platform``, ``status``) against what exists,
+        so an undefined value fails the whole query instead of matching nothing.
+        """
+        try:
+            return await self.rest_list(path, params)
+        except DCIMNotFoundError:
+            return []
+        except DCIMInvalidDataError as exc:
+            logger.warning(
+                "NetBox rejected the optional %s selection %s (%s); treating it as empty",
+                path,
+                params,
+                exc,
+            )
+            return []
 
     async def status_flag_device_ids(self, **flags: bool | None) -> set[str] | None:
         """Return the device PKs whose ``DeviceConfigStatus`` matches every flag.

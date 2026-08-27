@@ -655,3 +655,37 @@ async def test_topology_device_in_both_lists_is_fetched_once_and_appears_in_both
     assert [d.name for d in topology.route_servers] == ["border-1"]
     assert [d.name for d in topology.wan_routers] == ["border-1"]
     assert loopback_calls == ["5"], "the shared device must be resolved once"
+
+
+async def test_one_wan_role_query_per_role_so_an_undefined_role_keeps_the_other():
+    # _optional_list degrades the whole query on a 400, so a combined role filter
+    # lets a role this NetBox lacks discard the devices the other role matched.
+    rest = copy.deepcopy(_REST_MAP)
+    role_params: list[str] = []
+    client = create_dcim_client("netbox", _SETTINGS)
+
+    async def fake_graphql(query, variables=None):
+        return {"device": _DEVICE}
+
+    async def fake_rest_list(path, params=None):
+        if path == "dcim/devices/":
+            roles = [value for key, value in params or [] if key == "role"]
+            role_params.extend(roles)
+            if "tan-bbr" in roles:
+                raise DCIMInvalidDataError("tan-bbr is not one of the available choices")
+            if roles == ["wan"]:
+                return [{"id": 5, "name": "wan-1", "config_context": {}}]
+            return []
+        if path == "dcim/interfaces/" and any(k == "name__isw" for k, _ in params or []):
+            return []
+        return rest.get(path, [])
+
+    client.graphql_query = fake_graphql
+    client.rest_list = fake_rest_list
+    try:
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+    assert sorted(role_params) == ["tan-bbr", "wan"], "each role must be its own query"
+    assert [d.name for d in rd.location.topology.wan_routers] == ["wan-1"]

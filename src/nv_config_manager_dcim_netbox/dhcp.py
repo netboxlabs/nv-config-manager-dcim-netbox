@@ -26,6 +26,7 @@ from nv_config_manager_dcim_netbox.fabric_common import (
     IP_ADDRESSES_PATH,
     PREFIXES_PATH,
     STATUS_PATH,
+    chunked,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,12 +64,14 @@ class NetBoxDHCPMixin:
         self, family: int = 4, is_aggregate_managed: bool | None = None
     ) -> list[dict[str, object]]:
         # The three tag queries are independent, so issue them together.
+        # _optional_list: the slugs are bootstrap-seeded, and NetBox rejects an
+        # undefined tag slug with a 400 rather than matching nothing.
         prefixes, pool_ips, reserved_ips = await asyncio.gather(
             # Filter by family server-side; the client-side check below still
             # guards a NetBox that ignores the parameter.
-            self.rest_list(PREFIXES_PATH, [("tag", "dhcp-subnet"), ("family", str(family))]),
-            self.rest_list(IP_ADDRESSES_PATH, [("tag", "dhcp-pool")]),
-            self.rest_list(IP_ADDRESSES_PATH, [("tag", "dhcp-reserve")]),
+            self._optional_list(PREFIXES_PATH, [("tag", "dhcp-subnet"), ("family", str(family))]),
+            self._optional_list(IP_ADDRESSES_PATH, [("tag", "dhcp-pool")]),
+            self._optional_list(IP_ADDRESSES_PATH, [("tag", "dhcp-reserve")]),
         )
 
         # NetBox returns tagged prefixes and IPs as flat lists with no parent link,
@@ -184,9 +187,15 @@ class NetBoxDHCPMixin:
         if not interface_ids:
             return device_cache, interface_cache, status_cache
 
-        for row in await self.rest_list(
-            INTERFACES_PATH, [("id", i) for i in sorted(interface_ids)]
-        ):
+        # Chunked: the id set is fleet-sized, and repeating the param for a whole
+        # fleet builds a query string a proxy rejects with 414 (see ID_CHUNK).
+        interface_pages = await asyncio.gather(
+            *(
+                self.rest_list(INTERFACES_PATH, [("id", i) for i in chunk])
+                for chunk in chunked(sorted(interface_ids))
+            )
+        )
+        for row in (row for page in interface_pages for row in page):
             if row.get("id") is not None:
                 interface_cache[str(row["id"])] = row
 
@@ -198,10 +207,23 @@ class NetBoxDHCPMixin:
         if not device_ids:
             return device_cache, interface_cache, status_cache
 
-        devices, statuses = await asyncio.gather(
-            self.rest_list(DEVICES_PATH, [("id", i) for i in sorted(device_ids)]),
-            self.rest_list(STATUS_PATH, [("device_id", i) for i in sorted(device_ids)]),
+        sorted_device_ids = sorted(device_ids)
+        device_pages, status_pages = await asyncio.gather(
+            asyncio.gather(
+                *(
+                    self.rest_list(DEVICES_PATH, [("id", i) for i in chunk])
+                    for chunk in chunked(sorted_device_ids)
+                )
+            ),
+            asyncio.gather(
+                *(
+                    self.rest_list(STATUS_PATH, [("device_id", i) for i in chunk])
+                    for chunk in chunked(sorted_device_ids)
+                )
+            ),
         )
+        devices = [row for page in device_pages for row in page]
+        statuses = [row for page in status_pages for row in page]
         for row in devices:
             if row.get("id") is not None:
                 device_cache[str(row["id"])] = row

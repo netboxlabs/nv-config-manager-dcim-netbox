@@ -39,7 +39,6 @@ from typing import TYPE_CHECKING, Any
 
 from nv_config_manager_dcim import (
     DCIMInvalidDataError,
-    DCIMNotFoundError,
     DeviceRenderData,
     IntendedInterfaceNeighbor,
     IntendedNeighborDevice,
@@ -475,16 +474,23 @@ def _location_hierarchy(device: dict[str, Any]) -> tuple[RenderLocation, RenderL
     return device_location, site_location
 
 
+def _peer_group_name(peer_group: Any, group_names: dict[str, str]) -> str:
+    """Return a session's peer-group name, whether nested or a bare pk."""
+    if isinstance(peer_group, dict) and peer_group.get("name"):
+        return str(peer_group["name"])
+    return group_names.get(str(fk_id(peer_group)), "")
+
+
 def _peer_ttl(session: dict[str, Any], group_attributes: dict[str, dict[str, Any]]) -> int | None:
     """Return a peer's multihop TTL from its own or its peer group's extra attributes.
 
     netbox-bgp keeps free-form settings in ``extra_attributes`` on both the
     session and the peer group; the session wins where both are set.
     """
-    group = session.get("peer_group") or {}
+    # fk_id: netbox-bgp may serialize peer_group nested or as a bare pk.
     sources = (
         session.get("extra_attributes"),
-        group_attributes.get(str(group.get("id"))),
+        group_attributes.get(str(fk_id(session.get("peer_group")))),
     )
     for attributes in sources:
         if isinstance(attributes, dict) and attributes.get("ttl") is not None:
@@ -511,6 +517,11 @@ def _bgp_instances(
     """
     group_attributes = {
         str(group["id"]): group.get("extra_attributes") or {}
+        for group in peer_groups or []
+        if group.get("id") is not None
+    }
+    group_names = {
+        str(group["id"]): group.get("name") or ""
         for group in peer_groups or []
         if group.get("id") is not None
     }
@@ -545,7 +556,7 @@ def _bgp_instances(
                 name=session.get("name") or f"peer-{session.get('id')}",
                 status=choice_str(session.get("status")) or "active",
                 description=session.get("description") or "",
-                peer_group=(session.get("peer_group") or {}).get("name") or "",
+                peer_group=_peer_group_name(session.get("peer_group"), group_names),
                 peer_role="",
                 asn=_str_or_none((session.get("remote_as") or {}).get("asn")) or "",
                 peer_ipv4=peer_ipv4,
@@ -750,32 +761,7 @@ def _routing_from_context(
 class NetBoxRenderMixin:
     """Typed render-data assembly for the template engine."""
 
-    async def _safe_list(self, path: str, params: list[tuple[str, str]] | None = None):
-        """List a REST endpoint, treating a missing endpoint (optional plugin) as no data."""
-        try:
-            return await self.rest_list(path, params)
-        except DCIMNotFoundError:
-            return []
-
-    async def _optional_list(self, path: str, params: list[tuple[str, str]] | None = None):
-        """List an endpoint whose *filter values* may not exist in this NetBox.
-
-        Like ``_safe_list``, but also degrades on 400: NetBox validates slug-keyed
-        filters (``tag``, ``role``) against what exists, and these selections are
-        optional enrichment, so a rejected slug must not fail the whole render.
-        """
-        try:
-            return await self.rest_list(path, params)
-        except DCIMNotFoundError:
-            return []
-        except DCIMInvalidDataError as exc:
-            logger.warning(
-                "NetBox rejected the optional %s selection %s (%s); treating it as empty",
-                path,
-                params,
-                exc,
-            )
-            return []
+    # ``_safe_list`` / ``_optional_list`` live on FabricCommonMixin.
 
     async def _assigned_overlays(
         self, device_id: str, interface_ids: set[str]
@@ -942,12 +928,24 @@ class NetBoxRenderMixin:
         """
         if not site_id:
             return RenderLocationTopology()
-        route_servers, wan_routers = await asyncio.gather(
+        # One query per WAN role: _optional_list degrades the whole query on a 400,
+        # so combining them lets one undefined role discard the other's devices.
+        route_servers, *wan_router_pages = await asyncio.gather(
             self._optional_list(DEVICES_PATH, [("site_id", site_id), ("tag", _ROUTE_SERVER_TAG)]),
-            self._optional_list(
-                DEVICES_PATH,
-                [("site_id", site_id), *(("role", role) for role in _WAN_ROLE_SLUGS)],
+            *(
+                self._optional_list(DEVICES_PATH, [("site_id", site_id), ("role", role)])
+                for role in _WAN_ROLE_SLUGS
             ),
+        )
+        # Deduped by id: the queries are independent, so a device carrying more
+        # than one WAN role comes back from each of them.
+        wan_routers = list(
+            {
+                str(row["id"]): row
+                for page in wan_router_pages
+                for row in page
+                if row.get("id") is not None
+            }.values()
         )
         # Mapped once per distinct device, then indexed back into both tuples: a
         # border leaf can be both route-server-tagged and WAN-roled, and each

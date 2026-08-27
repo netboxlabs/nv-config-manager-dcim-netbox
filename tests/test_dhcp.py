@@ -207,3 +207,44 @@ async def test_get_dhcp_auto_subnets_builds_option_candidate_from_pool_ip():
     assert candidates[0]["interface_name"] == "swp1"
     assert str(candidates[0]["address"]) == "10.0.0.5"
     assert candidates[0]["device_id"] == "3"
+
+
+async def test_get_dhcp_auto_subnets_degrades_on_an_undefined_tag_slug():
+    # The dhcp-* slugs are bootstrap-seeded. NetBox rejects an undefined tag slug
+    # with a 400, which would otherwise fail the whole Kea config generation.
+    from nv_config_manager_dcim import DCIMInvalidDataError
+
+    client = _client()
+
+    async def reject(path, params=None, **kwargs):
+        if any(key == "tag" for key, _ in params or []):
+            raise DCIMInvalidDataError("Select a valid choice")
+        return []
+
+    client.rest_list = reject
+    assert await client.get_dhcp_auto_subnets() == []
+
+
+async def test_prefetch_ip_owners_chunks_fleet_sized_id_reads():
+    # Repeating `id` for a whole fleet builds a query string a proxy rejects with
+    # 414, so every id read walks the fleet in ID_CHUNK-sized pages.
+    from nv_config_manager_dcim_netbox.fabric_common import ID_CHUNK
+
+    seen: list[tuple[str, int]] = []
+    client = _client()
+
+    async def spy(path, params=None, **kwargs):
+        params = list(params or [])
+        seen.append((path, len([1 for key, _ in params if key in ("id", "device_id")])))
+        if path == "dcim/interfaces/":
+            return [{"id": int(value), "device": {"id": 1}} for key, value in params if key == "id"]
+        return []
+
+    client.rest_list = spy
+    ips = [
+        {"assigned_object_type": "dcim.interface", "assigned_object": {"id": i}}
+        for i in range(1, ID_CHUNK * 2 + 5)
+    ]
+    await client._prefetch_ip_owners(ips)
+    assert seen, "expected the prefetch to issue reads"
+    assert all(count <= ID_CHUNK for _, count in seen)

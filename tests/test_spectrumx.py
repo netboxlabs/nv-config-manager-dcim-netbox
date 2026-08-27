@@ -54,6 +54,48 @@ async def test_get_spectrum_x_vrfs_no_overlay():
     assert await _client(overlay=None).get_spectrum_x_vrfs("x", "DM-Akron") == []
 
 
+async def test_get_spectrum_x_vrfs_namespace_skips_the_zone_marker():
+    # provision_spectrum_x_vrf stamps `spectrumx` on every namespace VRF, and it
+    # sorts before namespaces like `tenant-a`.
+    gql = {
+        "vrf_list": [
+            {
+                "id": "8",
+                "name": "SpXTenant",
+                "rd": "*:60000",
+                "tags": [
+                    {"name": "spectrumx", "slug": "spectrumx"},
+                    {"name": "tenant-a", "slug": "tenant-a"},
+                ],
+                "interfaces": [],
+            }
+        ]
+    }
+    client = _client(gql=gql, rest_list={_VXLANS: [{"vrf": 8}]}, overlay={"id": 10})
+    vrfs = await client.get_spectrum_x_vrfs("nvcm-spx", "DM-Akron")
+    assert vrfs[0].namespace == "tenant-a"
+
+
+async def test_get_spectrum_x_vrfs_namespace_prefers_the_tag_name_over_its_slug():
+    gql = {
+        "vrf_list": [
+            {
+                "id": "8",
+                "name": "SpXTenant",
+                "rd": "*:60000",
+                "tags": [
+                    {"name": "spectrumx", "slug": "spectrumx"},
+                    {"name": "NS Blue", "slug": "ns-blue"},
+                ],
+                "interfaces": [],
+            }
+        ]
+    }
+    client = _client(gql=gql, rest_list={_VXLANS: [{"vrf": 8}]}, overlay={"id": 10})
+    vrfs = await client.get_spectrum_x_vrfs("nvcm-spx", "DM-Akron")
+    assert vrfs[0].namespace == "NS Blue"
+
+
 async def test_provision_spectrum_x_vrf_creates_overlay_vrf_assignment_vxlan():
     """Happy path (overlay does not exist yet): create the overlay, then the VRF,
     assignment, and VXLAN — asserting each write's path + body. Previously only the

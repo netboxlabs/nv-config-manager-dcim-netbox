@@ -672,7 +672,16 @@ def up(
     # Supplying it in the install config means NetBox can be given the password at
     # install time, so the release does not have to be upgraded again afterwards
     # just to switch its publisher from `log` to NATS.
-    nats_password = _nats_password(profile, namespace)
+    #
+    # Read from `config_out`, not `profile`: the profile never carries a
+    # natsPassword, so every run would mint a new one and rotate the secret.
+    previous_config: dict = {}
+    if config_out.is_file():
+        try:
+            previous_config = yaml.safe_load(config_out.read_text()) or {}
+        except (OSError, yaml.YAMLError):
+            previous_config = {}
+    nats_password = _nats_password(previous_config, namespace)
 
     if skip_nvcm:
         step += 1

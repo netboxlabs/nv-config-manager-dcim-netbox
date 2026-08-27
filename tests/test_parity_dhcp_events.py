@@ -186,8 +186,10 @@ async def test_backup_enabled_includes_provisioned_status():
     client = fake_client(
         rest_list={
             "plugins/nv-config-manager/device-config-statuses/": [{"device": 1}, {"device": 2}],
-            # Only device 1 is returned by the (status active|provisioned) query.
-            "dcim/devices/": [{"id": 1}],
+            "dcim/devices/": [
+                {"id": 1, "status": {"value": "provisioned"}, "platform": {"slug": "nv-os"}},
+                {"id": 2, "status": {"value": "decommissioning"}, "platform": {"slug": "nv-os"}},
+            ],
         }
     )
     calls: list[tuple[str, list]] = []
@@ -203,9 +205,10 @@ async def test_backup_enabled_includes_provisioned_status():
 
     # Device 2 is backup-enabled but not in-service -> excluded; device 1 kept.
     assert result == {"1"}
+    # Status is matched client-side: NetBox 400s on `provisioned` unless the
+    # plugin's FIELD_CHOICES are registered.
     device_params = next(p for path, p in calls if path == "dcim/devices/")
-    assert ("status", "active") in device_params
-    assert ("status", "provisioned") in device_params
+    assert not any(key == "status" for key, _ in device_params)
 
 
 # --- Shared BGP object fan-out (Fix 6) ------------------------------------------

@@ -530,6 +530,9 @@ class NetBoxAirCallback:
                 provider_image=self.cfg.dcim_provider_package_image,
                 netbox_server=self.cfg.dcim_server,
                 netbox_public_url=self.cfg.dcim_ui_url(),
+                # The same password bring_up_script installed NetBox with; without
+                # it NVCM mints its own and NetBox's publisher is rejected by NATS.
+                nats_password=self.nats_password,
             ),
         )
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as tmp:

@@ -57,14 +57,52 @@ async def test_update_render_template_version_does_not_create_when_absent():
 
 
 async def test_get_backup_enabled_device_ids_intersects_eligible():
+    # Status and platform are matched client-side, so the device rows carry them
+    # rather than the query filtering on them.
     client = _client(
         rest_list={
-            _STATUS: [{"device": 5}, {"device": 6}],
-            "dcim/devices/": [{"id": 5}],  # only 5 is active on a backup platform
+            _STATUS: [{"device": 5}, {"device": 6}, {"device": 7}],
+            "dcim/devices/": [
+                {"id": 5, "status": {"value": "active"}, "platform": {"slug": "cumulus-linux"}},
+                {"id": 6, "status": {"value": "offline"}, "platform": {"slug": "cumulus-linux"}},
+                {"id": 7, "status": {"value": "active"}, "platform": {"slug": "generic-linux"}},
+            ],
         }
     )
     result = await client.get_backup_enabled_device_ids(True)
     assert {i for i in result} == {"5"}
+
+
+async def test_get_backup_enabled_device_ids_accepts_provisioned():
+    # ZTP writes `provisioned`; a NetBox without the plugin's FIELD_CHOICES cannot
+    # be asked to filter on it, so it must be matched here.
+    client = _client(
+        rest_list={
+            _STATUS: [{"device": 5}],
+            "dcim/devices/": [
+                {"id": 5, "status": {"value": "provisioned"}, "platform": {"slug": "nv-os"}},
+            ],
+        }
+    )
+    assert set(await client.get_backup_enabled_device_ids(True)) == {"5"}
+
+
+async def test_get_backup_enabled_device_ids_does_not_filter_server_side(monkeypatch):
+    # A platform/status the NetBox does not define is a 400, not an empty match,
+    # so neither may appear as a query param.
+    seen: list[list[tuple[str, str]]] = []
+    client = _client(rest_list={_STATUS: [{"device": 5}], "dcim/devices/": []})
+    original = client.rest_list
+
+    async def spy(path, params=None, **kwargs):
+        if path == "dcim/devices/":
+            seen.append(list(params or []))
+        return await original(path, params, **kwargs)
+
+    monkeypatch.setattr(client, "rest_list", spy)
+    await client.get_backup_enabled_device_ids(True)
+    keys = {key for params in seen for key, _ in params}
+    assert "platform" not in keys and "status" not in keys
 
 
 async def test_get_configuration_backup_metadata():
