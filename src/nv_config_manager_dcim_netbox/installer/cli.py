@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NetBox Labs. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""`nvcm-netbox` — bring up NVIDIA Config Manager with NetBox as its DCIM provider."""
+"""`nvcm-netbox` -- bring up NVIDIA Config Manager with NetBox as its DCIM provider."""
 
 from __future__ import annotations
 
@@ -143,7 +143,7 @@ def _existing_nats_password(config: dict) -> str:
     Regenerating it would leave NVCM's NATS users and the deployed NetBox
     disagreeing until both are rolled.
 
-    Note this has to be given the *generated* config, not the base profile — the
+    Note this has to be given the *generated* config, not the base profile -- the
     profile never carries a natsPassword, so passing it here always reads "" and
     every run mints a new one.
     """
@@ -471,7 +471,7 @@ def config_command(
     written = cfg.write_config(cfg.apply_options(base, options), output)
     click.echo(f"Wrote {written}")
     click.secho(f"API token: {token}", fg="yellow")
-    click.echo("Keep it — NetBox and NVCM must both be given this same value.")
+    click.echo("Keep it -- NetBox and NVCM must both be given this same value.")
 
 
 def _up_options(fn):
@@ -823,12 +823,23 @@ def verify(namespace: str, device_id: str) -> None:
     nats_password = cluster.read_nats_password(namespace)
     if not nats_password:
         raise click.ClickException(
-            f"No {cluster.NVCM_NATS_SECRET} secret in {namespace} — NVCM does not look deployed."
+            f"No {cluster.NVCM_NATS_SECRET} secret in {namespace} -- NVCM does not look deployed."
         )
 
     # This command publishes its own envelope, so it never exercises NetBox's
     # publisher. Check that separately or a broken one looks like a pass.
-    backend, importable = cluster.netbox_publisher_status(namespace)
+    publisher = cluster.netbox_publisher_status(namespace)
+    backend, importable = publisher.backend, publisher.importable
+    # The subject has to match on all three sides -- this, NVCM's stream filter,
+    # and the chart's nvcm.eventSubject -- or the broker drops every event with
+    # nothing logged anywhere.
+    if publisher.subject and publisher.subject != cfg.EVENT_SUBJECT:
+        raise click.ClickException(
+            f"NetBox publishes to {publisher.subject!r} but NVCM's stream filters on "
+            f"{cfg.EVENT_SUBJECT!r}; every change event is dropped by the broker.\n"
+            "Align nvcm.eventSubject in deploy/netbox with dcim.event_subject in the "
+            "install config."
+        )
     if backend == "nats" and not importable:
         click.secho(
             "NetBox is configured to publish to NATS but cannot import nats-py, so real\n"
@@ -839,7 +850,7 @@ def verify(namespace: str, device_id: str) -> None:
     elif backend == "log":
         _warn(
             "NetBox is on the `log` publisher, so real changes go to its log rather than\n"
-            "      NVCM. That means the release was installed with no nvcm.natsPassword —\n"
+            "      NVCM. That means the release was installed with no nvcm.natsPassword --\n"
             f"      `up` sets it on install. Switch it over with:\n"
             f"      helm upgrade {DEFAULT_NETBOX_RELEASE} {DEFAULT_CHART} -n {namespace} "
             "--reuse-values --set nvcm.natsPassword=<pw>"

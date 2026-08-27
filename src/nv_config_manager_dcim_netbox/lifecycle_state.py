@@ -3,7 +3,7 @@
 """NVCM lifecycle state (managed / intended / backup).
 
 Backed by first-class plugin models: ``DeviceConfigStatus`` (per-device flags),
-``IntendedConfig``, and ``BackupConfig`` — one record per device, read/written
+``IntendedConfig``, and ``BackupConfig`` -- one record per device, read/written
 over the plugin REST API.
 The config *content* lives in the config store (referenced by ``commit_id``);
 these records hold the flags and pointers. A device is "managed" when its

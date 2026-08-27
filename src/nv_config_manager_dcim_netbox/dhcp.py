@@ -286,6 +286,18 @@ class NetBoxDHCPMixin:
     async def _gateway_address(
         self, prefix: dict, gateway_cache: dict[str, str] | None = None
     ) -> str | None:
+        """The subnet's DHCP router.
+
+        The rule, shared with the plugin's blueprint loader (which writes
+        ``nvcm_gateway`` at load time -- see ``dcim_loader/blueprint.py``):
+
+        * an explicit ``nvcm_gateway`` wins, and must lie inside the subnet;
+        * the interface serving a DHCP pool is the router for it;
+        * failing both, derive -- the network address on a /31 or /127, the first
+          usable address otherwise.
+
+        Both sides must agree: a gateway the loader writes is one this reads back.
+        """
         try:
             network = ipaddress.ip_network(prefix.get("prefix"), strict=False)
         except (ValueError, TypeError):
@@ -302,7 +314,7 @@ class NetBoxDHCPMixin:
                 explicit = strip_mask((ip or {}).get("address"))
         if explicit:
             # Validate the override actually lies within the subnet, matching the
-            # reference DCIM provider — a gateway outside the prefix is a data error
+            # reference DCIM provider -- a gateway outside the prefix is a data error
             # kea can't honor, so fail loudly rather than emitting a bogus router.
             if ipaddress.ip_address(explicit) not in network:
                 raise DCIMInvalidDataError(

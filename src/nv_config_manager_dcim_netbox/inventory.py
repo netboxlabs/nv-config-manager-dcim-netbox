@@ -289,8 +289,8 @@ class NetBoxInventoryMixin:
     def _map_unique_by_name(devices: list[dict], mapper: Callable[[dict], _T]) -> list[_T]:
         """Map device rows, skipping unmappable ones and rejecting duplicate names.
 
-        A device that cannot be mapped — no platform, or no name (``Device.name``
-        is nullable in NetBox) — must not fail the whole listing; it is logged and
+        A device that cannot be mapped -- no platform, or no name (``Device.name``
+        is nullable in NetBox) -- must not fail the whole listing; it is logged and
         skipped. The no-platform skip is a deliberate NetBox improvement over the
         reference provider, which has no such notion.
 

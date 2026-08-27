@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Spectrum-X overlay operations (backed by the NetBox fabric plugin).
 
-NetBox has no first-class IPAM namespace, so — consistent with the rest of this
-provider (see ``ipam.py`` / ``reference.py``) — a namespace is emulated as a
+NetBox has no first-class IPAM namespace, so -- consistent with the rest of this
+provider (see ``ipam.py`` / ``reference.py``) -- a namespace is emulated as a
 **tag** on the VRF. ``provision_spectrum_x_vrf`` fans out one VRF (tagged with
 the namespace), overlay-assignment, and VXLAN per namespace, and
 ``get_spectrum_x_vrfs`` reads the namespace back from the VRF's tag while
@@ -269,7 +269,7 @@ class NetBoxSpectrumXMixin:
         if overlay.get("isolation_type") != _SPECTRUMX_ISOLATION:
             raise DCIMInvalidDataError(f"Overlay {overlay_name!r} is not a Spectrum-X overlay")
         overlay_id = overlay["id"]
-        existing = await self.rest_list(self.ASSIGNMENTS_PATH, [("overlay_id", str(overlay_id))])
+        existing = await self._overlay_assignments(overlay_id)
         present = {
             (str(a.get("assigned_object_type")), str(a["assigned_object_id"])) for a in existing
         }
@@ -293,32 +293,35 @@ class NetBoxSpectrumXMixin:
     # -- helpers -------------------------------------------------------------
 
     async def _remove_stale_spx_interface_assignments(self, overlay_id, interface_ids) -> int:
-        removed = 0
+        """Drop these interfaces from every *other* Spectrum-X overlay.
+
+        An interface belongs to one Spectrum-X overlay at a time, so joining this
+        one leaves any earlier membership stale.
+        """
         isolation_cache: dict[int, str | None] = {}
-        # Fetch each interface's assignments concurrently rather than serially.
         rows_per_interface = await asyncio.gather(
             *(
                 self.rest_list(self.ASSIGNMENTS_PATH, [("assigned_object_id", str(interface_id))])
                 for interface_id in interface_ids
             )
         )
-        for rows in rows_per_interface:
-            for row in rows:
-                other_overlay_id = self._fk_id(row.get("overlay"))
-                # str() on both sides: the plugin may render the FK as a string PK
-                # while the overlays endpoint returns an int, and `"7" == 7` is False,
-                # so the self-exclusion guard would delete what we just created.
-                if str(row.get("assigned_object_type")) != "dcim.interface" or str(
-                    other_overlay_id
-                ) == str(overlay_id):
-                    continue
-                if (
-                    await self._overlay_isolation(other_overlay_id, isolation_cache)
-                    == _SPECTRUMX_ISOLATION
-                ):
-                    await self._safe_delete(f"{self.ASSIGNMENTS_PATH}{row['id']}/")
-                    removed += 1
-        return removed
+        candidates = [
+            row
+            for rows in rows_per_interface
+            for row in rows
+            # str() both sides: the plugin may render the FK as a string PK while
+            # the overlays endpoint returns an int, and `"7" == 7` is False -- the
+            # self-exclusion guard would then delete what was just created.
+            if str(row.get("assigned_object_type")) == "dcim.interface"
+            and str(self._fk_id(row.get("overlay"))) != str(overlay_id)
+        ]
+        stale = [
+            row
+            for row in candidates
+            if await self._overlay_isolation(self._fk_id(row.get("overlay")), isolation_cache)
+            == _SPECTRUMX_ISOLATION
+        ]
+        return len(await self._delete_assignments(stale))
 
     async def _overlay_isolation(self, overlay_id, cache: dict) -> str | None:
         if overlay_id not in cache:

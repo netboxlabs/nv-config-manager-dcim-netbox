@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NetBox Labs. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""`nvcm-netbox air` — DSX Air simulations backed by NetBox."""
+"""`nvcm-netbox air` -- DSX Air simulations backed by NetBox."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ class ConsoleCallback:
         name = getattr(status, "name", str(status))
         colour = {"RUNNING": "cyan", "SUCCESS": "green", "FAILED": "red"}.get(name, "yellow")
         click.secho(
-            f"[{name.lower():8}] {step_id}" + (f" — {message}" if message else ""), fg=colour
+            f"[{name.lower():8}] {step_id}" + (f" -- {message}" if message else ""), fg=colour
         )
 
     def on_log(self, line: str) -> None:

@@ -3,7 +3,7 @@
 """Secret / password mapping operations (config-context driven).
 
 These surface secret *references* (which secret name / which version), not secret
-values — the reference NVCM implementation reads them from the device's config
+values -- the reference NVCM implementation reads them from the device's config
 context, and so does this. No secret store (e.g. netbox-secrets / Vault) is
 involved: the actual secret material is resolved elsewhere in NVCM.
 """

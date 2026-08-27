@@ -84,7 +84,7 @@ class NetBoxHostsMixin:
         (reused if already present on the interface) and set as the interface's
         ``primary_mac_address``.
 
-        NOTE: this is several writes with no transaction — NetBox's REST API offers
+        NOTE: this is several writes with no transaction -- NetBox's REST API offers
         none across objects. A failure part-way leaves the serial applied and some
         MACs unset; the operation is idempotent, so the fix is to re-run it.
         """

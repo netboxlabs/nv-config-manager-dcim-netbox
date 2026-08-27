@@ -1079,6 +1079,42 @@ def test_verify_waits_for_the_consumer_instead_of_racing_it(monkeypatch):
     assert calls["n"] == 3
 
 
+def test_verify_fails_when_netbox_publishes_to_a_different_subject(monkeypatch):
+    """Subject, stream filter and chart value must agree; when they do not the
+    broker drops every event and nothing logs it."""
+    monkeypatch.setattr(cluster, "read_nats_password", lambda ns: "pw")
+    monkeypatch.setattr(
+        cluster,
+        "netbox_publisher_status",
+        lambda ns: cluster.PublisherStatus("nats", True, "nautobot.change"),
+    )
+
+    result = CliRunner().invoke(cli.main, ["verify"])
+
+    assert result.exit_code != 0
+    assert "nautobot.change" in result.output
+    assert cfg.EVENT_SUBJECT in result.output
+
+
+def test_verify_accepts_a_matching_subject(monkeypatch):
+    monkeypatch.setattr(cli, "VERIFY_POLL_INTERVAL", 0)
+    monkeypatch.setattr(cluster, "read_nats_password", lambda ns: "pw")
+    monkeypatch.setattr(
+        cluster,
+        "netbox_publisher_status",
+        lambda ns: cluster.PublisherStatus("nats", True, cfg.EVENT_SUBJECT),
+    )
+    monkeypatch.setattr(cluster, "publish_test_event", lambda *a, **k: "")
+    monkeypatch.setattr(
+        cluster,
+        "dcim_consumer_logs",
+        lambda *a, **k: '{"message": "Starting batch queue operation for 1 devices"}',
+    )
+
+    result = CliRunner().invoke(cli.main, ["verify"])
+    assert result.exit_code == 0, result.output
+
+
 def test_verify_explains_a_device_that_does_not_exist(monkeypatch):
     # A 400 from NetBox still proves the whole path; only the last hop failed.
     monkeypatch.setattr(cli, "VERIFY_POLL_INTERVAL", 0)

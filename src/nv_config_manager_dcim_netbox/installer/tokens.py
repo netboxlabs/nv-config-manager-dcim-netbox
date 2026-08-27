@@ -40,7 +40,7 @@ def generate_api_token() -> str:
 def is_valid_api_token(value: str) -> bool:
     """Return whether *value* is a well-formed v2 token.
 
-    Shape only — this cannot tell whether NetBox actually holds it. Used to fail
+    Shape only -- this cannot tell whether NetBox actually holds it. Used to fail
     fast on a hand-supplied ``--token``, because the plugin silently skips
     installing a malformed one and the failure would otherwise surface much later
     as NVCM authentication errors.

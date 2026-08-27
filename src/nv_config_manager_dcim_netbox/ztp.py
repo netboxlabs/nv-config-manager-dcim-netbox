@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 # offline, active, planned, staged, failed, inventory, decommissioning). NVCM
 # adds one via netbox_nv_config_manager's FIELD_CHOICES (an extensible
 # `dcim.Device.status+` choice). Writing "provisioned" makes the device status
-# field a real ZTP signal — distinct from the pre-ZTP "provisioning"/"active"
-# state — instead of every device looking "active" forever. This REQUIRES the
+# field a real ZTP signal -- distinct from the pre-ZTP "provisioning"/"active"
+# state -- instead of every device looking "active" forever. This REQUIRES the
 # target NetBox to register that choice (see the plugin's field_choices.py); a
 # NetBox without it will reject the status write with a 400.
 ZTP_PROVISIONED_STATUS = "provisioned"

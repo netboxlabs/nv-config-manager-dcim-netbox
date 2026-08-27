@@ -136,7 +136,7 @@ class NetBoxAirCallback:
         elif success:
             self.on_log(
                 "NetBox is not on the sim's cluster, so its route and /etc/hosts entry "
-                "were skipped. Nothing was deployed — see the failed step above."
+                "were skipped. Nothing was deployed -- see the failed step above."
             )
         self._inner.on_complete(success, host, port)
 

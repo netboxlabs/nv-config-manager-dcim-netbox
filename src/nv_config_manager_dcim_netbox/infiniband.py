@@ -318,17 +318,13 @@ class NetBoxInfiniBandMixin:
     # -- assignments ---------------------------------------------------------
 
     async def _ib_assignments_by_interface(self, overlay_id) -> dict[str, dict]:
-        """Return the overlay's interface assignments keyed by interface id.
+        """The overlay's interface assignments keyed by interface id.
 
-        One query, so callers walking a device's ports do a dict lookup rather than
-        a round trip each.
+        One query, so callers walking a device's ports do a dict lookup rather
+        than a round trip each.
         """
-        rows = await self.rest_list(self.ASSIGNMENTS_PATH, [("overlay_id", str(overlay_id))])
-        return {
-            str(r["assigned_object_id"]): r
-            for r in rows
-            if str(r.get("assigned_object_type")) == "dcim.interface"
-        }
+        rows = await self._overlay_assignments(overlay_id)
+        return self._assignments_by_object(rows, "dcim.interface")
 
     async def _create_ib_assignment(self, overlay_id, interface_id, guid, membership_type):
         return await self._create_overlay_assignment(
@@ -369,28 +365,21 @@ class NetBoxInfiniBandMixin:
         # ``unassigned`` carries the INTERFACE ids that had no assignment to
         # remove -- matching the reference DCIM provider's return identity.
         current = await self._ib_assignments_by_interface(overlay_id)
-        removed: list[str] = []
-        unassigned: list[str] = []
-        for interface_id in interface_ids:
-            existing = current.get(str(interface_id))
-            if existing:
-                await self._safe_delete(f"{self.ASSIGNMENTS_PATH}{existing['id']}/")
-                removed.append(str(existing["id"]))
-            else:
-                unassigned.append(str(interface_id))
+        present = [current[str(i)] for i in interface_ids if current.get(str(i)) is not None]
+        unassigned = [str(i) for i in interface_ids if current.get(str(i)) is None]
+        removed = await self._delete_assignments(present)
         return removed, unassigned
 
     async def get_ib_pkey_assignments(self, overlay_id: str) -> list[IBPKeyAssignment]:
-        rows = await self.rest_list(self.ASSIGNMENTS_PATH, [("overlay_id", str(overlay_id))])
+        by_interface = await self._ib_assignments_by_interface(overlay_id)
         return [
             IBPKeyAssignment(
                 assignment_id=str(r["id"]),
-                interface_id=str(r["assigned_object_id"]),
+                interface_id=interface_id,
                 guid=r.get("guid") or "",
                 membership_type=_normalize_membership(r.get("membership_type")),
             )
-            for r in rows
-            if str(r.get("assigned_object_type")) == "dcim.interface"
+            for interface_id, r in by_interface.items()
         ]
 
     async def sync_ib_pkey_assignments(
@@ -404,12 +393,10 @@ class NetBoxInfiniBandMixin:
         # Contract: all three lists carry ASSIGNMENT ids (matching the reference
         # DCIM provider), not interface ids.
         added: list[str] = []
-        removed: list[str] = []
         unchanged: list[str] = []
-        for iface, row in current.items():
-            if iface not in desired:
-                await self._safe_delete(f"{self.ASSIGNMENTS_PATH}{row['id']}/")
-                removed.append(str(row["id"]))
+        removed = await self._delete_assignments(
+            [row for iface, row in current.items() if iface not in desired]
+        )
         for iface, (guid, membership) in desired.items():
             if iface in current:
                 row = current[iface]
@@ -445,7 +432,7 @@ class NetBoxInfiniBandMixin:
             by_id: dict[str, dict] = {}
             if interface_ids:
                 # One interfaces query for every matching IP, then one host query
-                # for the distinct device names — rather than a GET plus a GraphQL
+                # for the distinct device names -- rather than a GET plus a GraphQL
                 # round trip per address.
                 interfaces = await self.rest_list(
                     INTERFACES_PATH, [("id", i) for i in interface_ids]

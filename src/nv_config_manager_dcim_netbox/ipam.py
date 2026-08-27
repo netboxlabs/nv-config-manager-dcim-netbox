@@ -13,8 +13,8 @@ from nv_config_manager_dcim_netbox.fabric_common import INTERFACES_PATH, VRFS_PA
 
 # NetBox has no first-class IPAM "namespace" object: NetBox models a namespace
 # (an isolated zone of unique IP space) *as* a VRF. There is no grouping
-# container above the VRF, so a namespace *zone* — a set of related VRFs that
-# should hold unique route distinguishers — is emulated with a NetBox **tag**
+# container above the VRF, so a namespace *zone* -- a set of related VRFs that
+# should hold unique route distinguishers -- is emulated with a NetBox **tag**
 # applied to those VRFs. ``namespace_tag`` selects that zone; each VRF in it is
 # itself a namespace carrying one route distinguisher.
 
@@ -40,7 +40,7 @@ class NetBoxIPAMMixin:
 
         NetBox has no device→VRF relationship (VRFs attach to interfaces /
         prefixes / IPs, never devices), so "the device's VRF" is represented as
-        the VRF on its interfaces — which is exactly how ``get_device_vrfs``
+        the VRF on its interfaces -- which is exactly how ``get_device_vrfs``
         reads it back. Interfaces already in the target VRF are skipped so repeat
         calls don't emit redundant changes.
 

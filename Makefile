@@ -22,6 +22,15 @@ IMAGE      ?= nv-config-manager-dcim-netbox:$(VERSION)
 # ("exec format error").
 PLATFORM   ?=
 PLATFORM_ARG := $(if $(PLATFORM),--platform $(PLATFORM),)
+
+# Docker Hub rate-limits anonymous pulls (100/hour per IP) and BuildKit resolves
+# every base tag against the registry even when the image is cached, so a 429
+# fails the build outright. Point the Hub bases at a mirror to get around it:
+#   make images NVCM_NETBOX_BASE_MIRROR=mirror.gcr.io/library
+# `nvcm-netbox air up` does this automatically on a 429.
+NVCM_NETBOX_BASE_MIRROR ?=
+MIRROR_ARGS := $(foreach img,python:3.13-slim alpine:3.20,\
+  $(if $(NVCM_NETBOX_BASE_MIRROR),--build-context $(img)=docker-image://$(NVCM_NETBOX_BASE_MIRROR)/$(img),))
 NETBOX_IMAGE ?= nv-config-manager-netbox:$(VERSION)
 include build/versions.env
 
@@ -126,7 +135,7 @@ check: lint version-check test
 # The SDK is not yet published, so it is passed as a named build context.
 # Requires Docker Buildx (bundled with modern Docker). Override IMAGE / NVCM.
 image:
-	docker build $(PLATFORM_ARG) --build-context sdk=$(NVCM)/components/dcim -t $(IMAGE) .
+	docker build $(PLATFORM_ARG) $(MIRROR_ARGS) --build-context sdk=$(NVCM)/components/dcim -t $(IMAGE) .
 
 # The offline /plugin-wheels contract NVCM's init container relies on. Defaults
 # to this host's architecture, matching what `make image` just built.
@@ -140,7 +149,7 @@ netbox-base:
 	$(if $(PLATFORM),BUILDX_PLATFORM=$(PLATFORM)) build/netbox-image.sh
 
 netbox-image: netbox-base
-	docker build $(PLATFORM_ARG) -f build/netbox.Dockerfile \
+	docker build $(PLATFORM_ARG) $(MIRROR_ARGS) -f build/netbox.Dockerfile \
 	  --build-arg NETBOX_BASE_IMAGE=$(NETBOX_BASE_IMAGE) \
 	  --build-arg NETBOX_BGP_REF=$(NETBOX_BGP_REF) \
 	  --build-context plugin=$(PLUGIN) \

@@ -3,7 +3,7 @@
 """NetBox HTTP transport owned by the NetBox DCIM provider.
 
 Reads use the GraphQL endpoint (``/graphql/``); writes use the REST API
-(``/api/``). The transport performs no DCIM-contract logic — operation mixins
+(``/api/``). The transport performs no DCIM-contract logic -- operation mixins
 build on it. It is kept deliberately small; provider operations own their own
 queries, payloads, and SDK-model construction.
 """
@@ -136,13 +136,13 @@ def _build_ssl(verify: bool | str) -> bool | ssl.SSLContext:
 def _context_scoped_to_site(context: dict[str, Any], site: str) -> bool:
     """Return whether a config-context's *site* scoping admits ``site``.
 
-    This evaluates the site dimension only — a context with no ``locations`` /
+    This evaluates the site dimension only -- a context with no ``locations`` /
     ``sites`` assignment is admitted, because NetBox treats an empty assignment
     set for a dimension as "any". The other dimensions NetBox ANDs in (region,
     site-group, role, platform, tenant, tenant-group, cluster, tags) are
     deliberately not evaluated here: this filter exists to keep a *site*-scoped
     profile from leaking across sites, and cannot rule a context in or out on
-    dimensions the caller has not supplied. Callers therefore get a superset —
+    dimensions the caller has not supplied. Callers therefore get a superset --
     every context that could apply to the site.
     """
     scoped = False
@@ -162,7 +162,7 @@ def _context_scoped_to_site(context: dict[str, Any], site: str) -> bool:
 # keeps device identifiers as TEXT and delegates the shape check to this provider
 # through ``DCIMClient.is_valid_device_id`` / ``is_valid_location_id``. So the
 # provider hands NVCM the native NetBox id (as a string) and receives it back
-# unchanged — no encoding at the boundary.
+# unchanged -- no encoding at the boundary.
 
 
 def is_netbox_pk(value: object) -> bool:
@@ -302,7 +302,7 @@ class BaseNetBoxClient:
             return None
         try:
             return await response.json(content_type=None)
-        except ValueError as exc:  # JSONDecodeError — NetBox returned a non-JSON body
+        except ValueError as exc:  # JSONDecodeError -- NetBox returned a non-JSON body
             raise DCIMInvalidDataError(
                 f"NetBox returned a non-JSON response: {text[:200]}"
             ) from exc
@@ -363,7 +363,7 @@ class BaseNetBoxClient:
         """Return all results from a paginated NetBox REST list endpoint.
 
         Walks ``offset``/``limit`` until the endpoint reports no further page.
-        Stops early — with a warning — if a page does not advance the offset or if
+        Stops early -- with a warning -- if a page does not advance the offset or if
         more results arrive than the endpoint's own ``count``, so an endpoint that
         reports ``next`` without honouring ``offset`` cannot spin forever
         accumulating duplicate rows.
@@ -415,7 +415,7 @@ class BaseNetBoxClient:
         else:
             logger.warning(
                 "Stopped paginating %s after %d pages (%d rows); the endpoint kept "
-                "reporting a next page — it may not honour the offset parameter",
+                "reporting a next page -- it may not honour the offset parameter",
                 path,
                 _MAX_LIST_PAGES,
                 len(out),

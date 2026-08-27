@@ -729,6 +729,43 @@ def test_air_image_preparation_builds_without_make(monkeypatch, tmp_path):
     assert all("make" not in command for command in commands)
 
 
+def test_a_rate_limited_build_retries_through_a_mirror(monkeypatch, tmp_path):
+    """Hub 429s the base-image manifest even when the image is cached locally, so
+    the build dies before the layer cache is reached."""
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+    calls = []
+
+    def fake_stream(argv, **kwargs):
+        calls.append(argv)
+        if len(calls) == 1:
+            raise air_images._RateLimited(argv, 1)
+
+    monkeypatch.setattr(air_images, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(air_images, "require_tools", lambda *names: None)
+    monkeypatch.setattr(air_images, "_resolve_nvcm_repo", lambda: Path("/nvcm"))
+    monkeypatch.setattr(air_images, "_resolve_plugin_repo", lambda log, ref: Path("/plugin"))
+    monkeypatch.setattr(
+        air_images,
+        "_load_versions",
+        lambda: {"NETBOX_BASE_IMAGE": "netbox-base:4.7", "NETBOX_BGP_REF": "abc"},
+    )
+    monkeypatch.setattr(air_images, "_stream", fake_stream)
+
+    air_images.ensure_air_images("provider:tag", "netbox:tag", lambda line: None)
+
+    retry = calls[1]
+    assert retry[-1] == ".", "the build context must stay last"
+    for image in air_images._HUB_BASE_IMAGES:
+        assert f"{image}=docker-image://{air_images.DEFAULT_MIRROR}/{image}" in retry
+
+
+def test_skipping_the_build_refuses_a_wrong_arch_image(monkeypatch, tmp_path):
+    monkeypatch.setenv(air_images.SKIP_BUILD_ENV, "1")
+    monkeypatch.setattr(air_images, "_image_is_amd64", lambda image: image == "provider:tag")
+    with pytest.raises(RuntimeError, match="netbox:tag"):
+        air_images.ensure_air_images("provider:tag", "netbox:tag", lambda line: None)
+
+
 def _arch_callback(monkeypatch, box_arch, image_arch):
     from nv_config_manager_dcim_netbox.installer.air import callback as cb_mod
 

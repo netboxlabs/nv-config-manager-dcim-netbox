@@ -13,6 +13,13 @@ from pathlib import Path
 from nv_config_manager_dcim_netbox.installer.shell import CommandError, require_tools
 
 PLUGIN_REPO_ENV = "NETBOX_NVCM_PLUGIN_REPO"
+SKIP_BUILD_ENV = "NVCM_NETBOX_SKIP_IMAGE_BUILD"
+MIRROR_ENV = "NVCM_NETBOX_BASE_MIRROR"
+DEFAULT_MIRROR = "mirror.gcr.io/library"
+
+# Docker Hub bases the build pulls. Only needed on a 429 retry, where each is
+# re-pointed at a mirror through BuildKit's FROM override.
+_HUB_BASE_IMAGES = ("python:3.13-slim", "alpine:3.20")
 PLUGIN_REPO_URL = "https://github.com/netboxlabs/netbox_nv_config_manager.git"
 TARGET_PLATFORM = "linux/amd64"
 
@@ -94,6 +101,34 @@ def _load_versions() -> dict[str, str]:
     return values
 
 
+class _RateLimited(CommandError):
+    """Docker Hub answered a base-image lookup with 429."""
+
+
+def _mirror_contexts() -> list[str]:
+    """BuildKit FROM overrides pointing the Hub bases at a mirror."""
+    mirror = os.environ.get(MIRROR_ENV, DEFAULT_MIRROR).rstrip("/")
+    args = []
+    for image in _HUB_BASE_IMAGES:
+        args += ["--build-context", f"{image}=docker-image://{mirror}/{image}"]
+    return args
+
+
+def _build(argv: list[str], *, cwd: Path, log: Callable[[str], None], env: dict[str, str]) -> None:
+    """Run a docker build, retrying through a mirror if Hub rate-limits us.
+
+    The bases are usually cached locally already, but BuildKit still resolves
+    each tag against the registry, so a 429 fails the build before the layer
+    cache is reached.
+    """
+    try:
+        _stream(argv, cwd=cwd, log=log, env=env)
+    except _RateLimited:
+        mirror = os.environ.get(MIRROR_ENV, DEFAULT_MIRROR)
+        log(f"Docker Hub rate-limited the base images; retrying through {mirror}.")
+        _stream(argv[:-1] + _mirror_contexts() + [argv[-1]], cwd=cwd, log=log, env=env)
+
+
 def _stream(
     argv: list[str],
     *,
@@ -111,11 +146,27 @@ def _stream(
         text=True,
     )
     assert process.stdout is not None
+    throttled = False
     for line in process.stdout:
-        log(line.rstrip())
+        line = line.rstrip()
+        if "429 Too Many Requests" in line:
+            throttled = True
+        log(line)
     returncode = process.wait()
     if returncode:
+        if throttled:
+            raise _RateLimited(argv, returncode)
         raise CommandError(argv, returncode)
+
+
+def _image_is_amd64(image: str) -> bool:
+    """Whether ``image`` exists locally and matches the sim's architecture."""
+    result = subprocess.run(  # noqa: S603 - fixed argv, image name from config
+        ["docker", "image", "inspect", image, "--format", "{{.Architecture}}"],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and result.stdout.strip() == TARGET_PLATFORM.split("/")[-1]
 
 
 def ensure_air_images(
@@ -124,6 +175,16 @@ def ensure_air_images(
     log: Callable[[str], None],
 ) -> None:
     """Build the NetBox images for a DSX Air host, using Docker's layer cache."""
+    if os.environ.get(SKIP_BUILD_ENV):
+        missing = [image for image in (provider_image, netbox_image) if not _image_is_amd64(image)]
+        if missing:
+            raise RuntimeError(
+                f"{SKIP_BUILD_ENV} is set, but these are absent or not "
+                f"{TARGET_PLATFORM}: {', '.join(missing)}"
+            )
+        log(f"{SKIP_BUILD_ENV} set; shipping the images already built.")
+        return
+
     require_tools("docker", "git")
     if not (_REPO_ROOT / "Dockerfile").is_file():
         raise RuntimeError(
@@ -138,7 +199,7 @@ def ensure_air_images(
     build_env = {**os.environ, "DOCKER_BUILDKIT": "1"}
 
     log("Building the NetBox provider image for linux/amd64...")
-    _stream(
+    _build(
         [
             "docker",
             "build",
@@ -164,7 +225,7 @@ def ensure_air_images(
     )
 
     log("Building the NetBox plugin image for linux/amd64...")
-    _stream(
+    _build(
         [
             "docker",
             "build",

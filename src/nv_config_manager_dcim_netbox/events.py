@@ -44,7 +44,7 @@ def _valid_device_id(device_id) -> str | None:
     """Return a NetBox device id as a string, or ``None`` if it is not a NetBox PK.
 
     A malformed id in an event envelope must drop that fan-out, not raise into the
-    dispatcher — the cross-object handlers are already best-effort and the
+    dispatcher -- the cross-object handlers are already best-effort and the
     device/parent handlers should behave the same way.
     """
     if not is_netbox_pk(device_id):
@@ -78,7 +78,7 @@ def _requests_multi(event: DCIMChangeEvent, device_ids) -> tuple[RenderEventRequ
 
 
 async def _parent_device_changed(event: DCIMChangeEvent, client: DCIMClient):
-    """Fan out to the device referenced by the changed record — interface, front/
+    """Fan out to the device referenced by the changed record -- interface, front/
     rear port, BGP session, or device-config-status (all carry a ``device``)."""
     return _requests(event, _record_device_id(event))
 
@@ -114,7 +114,7 @@ async def _overlay_assignment_changed(event: DCIMChangeEvent, client: DCIMClient
 # downstream, so these return candidates unfiltered.
 
 # ConfigContext scope dimension -> device-list filter. AND across dimensions, OR
-# within one — exactly how NetBox evaluates ConfigContext applicability.
+# within one -- exactly how NetBox evaluates ConfigContext applicability.
 _CONFIG_CONTEXT_FILTERS = {
     "regions": "region_id",
     "site_groups": "site_group_id",
@@ -210,7 +210,7 @@ async def _config_context_devices(event, client):
                 filters.append((param, str(value)))
     if not filters:
         # A context with no scope assignments genuinely applies to every device, so
-        # this correctly fans out fleet-wide — but that is an unbounded render
+        # this correctly fans out fleet-wide -- but that is an unbounded render
         # burst, so make it visible rather than silent.
         logger.warning(
             "Config context %s has no scope assignments; fanning out to every device",
@@ -243,8 +243,8 @@ _HANDLERS = {
     "ipam.prefix": _cross_handler(_prefix_devices),
     "ipam.ipaddress": _cross_handler(_ip_address_devices),
     # A netbox-bgp session carries only a single ``device`` FK (the local peer);
-    # it has no FK to the remote peer's device — unlike the reference provider's
-    # two-ended peering — so editing a session re-renders the local device only.
+    # it has no FK to the remote peer's device -- unlike the reference provider's
+    # two-ended peering -- so editing a session re-renders the local device only.
     "netbox_bgp.bgpsession": _parent_device_changed,
     # Shared BGP objects fan out to every dependent device: an ASN is core
     # ipam.asn (referenced by session local_as/remote_as); a peer group is

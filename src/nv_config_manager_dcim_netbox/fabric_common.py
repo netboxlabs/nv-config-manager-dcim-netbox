@@ -5,7 +5,7 @@
 Mixed into the composed client so the Spectrum-X and InfiniBand mixins share
 overlay lookup, id resolution, and the plugin REST paths.
 
-This module is also the single home for the companion plugin's REST paths — the
+This module is also the single home for the companion plugin's REST paths -- the
 lifecycle-state, ZTP, and DHCP mixins import them from here rather than each
 redeclaring the same string.
 """
@@ -268,7 +268,7 @@ class FabricCommonMixin:
     async def _resolve_any_scope(self, value: str | int | None) -> tuple[str | None, dict | None]:
         """Resolve a value to ``(scope_type, row)`` when the model is not known.
 
-        Only for reads that span both kinds of overlay — ``list_overlays`` is
+        Only for reads that span both kinds of overlay -- ``list_overlays`` is
         filtered by isolation type, which may be either. Sites before Locations,
         the order ``reference.get_location_metadata`` uses.
         """
@@ -316,7 +316,27 @@ class FabricCommonMixin:
             },
         )
 
+    async def _overlay_assignments(self, overlay_id) -> list[dict]:
+        """Every assignment on an overlay, in one query."""
+        return await self.rest_list(self.ASSIGNMENTS_PATH, [("overlay_id", str(overlay_id))])
+
+    @staticmethod
+    def _assignments_by_object(rows: list[dict], object_type: str) -> dict[str, dict]:
+        """Index assignment rows of one content type by assigned object id."""
+        return {
+            str(row["assigned_object_id"]): row
+            for row in rows
+            if str(row.get("assigned_object_type")) == object_type
+        }
+
+    async def _delete_assignments(self, rows: list[dict]) -> list[str]:
+        """Delete assignment rows concurrently. Returns the ids deleted."""
+        ids = [str(row["id"]) for row in rows]
+        await asyncio.gather(*(self._safe_delete(f"{self.ASSIGNMENTS_PATH}{i}/") for i in ids))
+        return ids
+
     async def _safe_delete(self, path: str) -> None:
+        """DELETE, treating "already gone" as success -- these paths are idempotent."""
         try:
             await self.rest_request("DELETE", path)
         except DCIMNotFoundError:

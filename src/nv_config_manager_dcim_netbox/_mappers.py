@@ -95,7 +95,7 @@ def device_pk(row: dict[str, Any]) -> str | None:
 def choice_value(value: Any) -> Any:
     """Return a NetBox choice's raw value (``{"value": …}``) or the value itself.
 
-    Preserves the value's type — use this when comparing against a non-string
+    Preserves the value's type -- use this when comparing against a non-string
     (e.g. ``family`` against ``4``). See :func:`choice_str` for the string form.
     """
     return value.get("value") if isinstance(value, dict) else value
@@ -173,7 +173,7 @@ def require_device_name(device: dict[str, Any]) -> str:
     ``Device.name`` is nullable in NetBox, but every workflow model built here
     keys devices by name, so an unnamed device cannot be represented. Raising the
     SDK error (rather than a ``KeyError``) lets single-device reads report a
-    proper provider failure and lets list reads skip the row — both paths already
+    proper provider failure and lets list reads skip the row -- both paths already
     handle ``DCIMInvalidDataError``.
     """
     name = device.get("name")

@@ -8,6 +8,7 @@ import base64
 import json
 import shlex
 from pathlib import Path
+from typing import NamedTuple
 
 from nv_config_manager_dcim_netbox.installer.remote import LocalRunner, Runner
 from nv_config_manager_dcim_netbox.installer.shell import CommandError, run, stream
@@ -371,8 +372,16 @@ def load_topology(
     )
 
 
-def netbox_publisher_status(namespace: str, runner: Runner | None = None) -> tuple[str, bool]:
-    """Return NetBox's configured event backend and whether it can actually run.
+class PublisherStatus(NamedTuple):
+    """What NetBox's event publisher is configured to do, read from the pod."""
+
+    backend: str
+    importable: bool
+    subject: str | None
+
+
+def netbox_publisher_status(namespace: str, runner: Runner | None = None) -> PublisherStatus:
+    """Return NetBox's configured event backend, whether it can run, and its subject.
 
     The `nats` backend imports nats-py lazily, inside publish(). A NetBox image
     without that package therefore starts, loads the config and looks healthy,
@@ -397,12 +406,13 @@ def netbox_publisher_status(namespace: str, runner: Runner | None = None) -> tup
             "import json;from django.conf import settings;"
             "cfg=settings.PLUGINS_CONFIG.get('netbox_nv_config_manager',{});"
             "ok=True\ntry:\n import nats\nexcept ImportError:\n ok=False\n"
-            "print(json.dumps({'backend':cfg.get('event_publisher','log'),'importable':ok}))",
+            "print(json.dumps({'backend':cfg.get('event_publisher','log'),'importable':ok,"
+            "'subject':cfg.get('nats_subject')}))",
             namespace=namespace,
             runner=runner,
         )
     except CommandError:
-        return ("unknown", True)
+        return PublisherStatus("unknown", True, None)
     for line in reversed(out.splitlines()):
         line = line.strip()
         if line.startswith("{"):
@@ -410,8 +420,13 @@ def netbox_publisher_status(namespace: str, runner: Runner | None = None) -> tup
                 payload = json.loads(line)
             except ValueError:
                 continue
-            return (str(payload.get("backend", "unknown")), bool(payload.get("importable")))
-    return ("unknown", True)
+            subject = payload.get("subject")
+            return PublisherStatus(
+                str(payload.get("backend", "unknown")),
+                bool(payload.get("importable")),
+                str(subject) if subject else None,
+            )
+    return PublisherStatus("unknown", True, None)
 
 
 def netbox_service_exists(namespace: str, runner: Runner | None = None) -> bool:

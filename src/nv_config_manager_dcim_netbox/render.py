@@ -4,25 +4,25 @@
 
 ``get_render_data`` translates NetBox's native inventory into the provider-neutral
 :class:`RenderData` contract the template engine consumes. As of the 2026-07-28
-SDK contract, providers must return *fully typed* render concepts — there is no
+SDK contract, providers must return *fully typed* render concepts -- there is no
 generic ``intent`` blob or ``inventory`` dict; every value belongs to a typed
 ``Render*`` model that the common template filters read directly.
 
 Sections populated from NetBox native data:
 
-* ``device.identity`` — id, name, platform, role, model, full location hierarchy.
-* ``device.interfaces`` — typed interfaces (type, VRF, VLANs, addresses with
+* ``device.identity`` -- id, name, platform, role, model, full location hierarchy.
+* ``device.interfaces`` -- typed interfaces (type, VRF, VLANs, addresses with
   prefix ancestry, MAC, management flag).
-* ``device.network`` — the device's distinct VRFs, console-server ports and
+* ``device.network`` -- the device's distinct VRFs, console-server ports and
   NVLink topology.
-* ``device.routing`` — BGP instances/peers from ``netbox-bgp``, grouped by ASN.
-* ``device.overlays`` — L2/L3 VNIs scoped to the device via the plugin's overlay
+* ``device.routing`` -- BGP instances/peers from ``netbox-bgp``, grouped by ASN.
+* ``device.overlays`` -- L2/L3 VNIs scoped to the device via the plugin's overlay
   assignments (never the global VXLAN table).
-* ``device.services`` / ``device.firmware`` — best-effort from the device's
+* ``device.services`` / ``device.firmware`` -- best-effort from the device's
   merged ``config_context`` where the native keys exist.
-* ``location.location`` / ``location.address_space`` — the Site hierarchy plus
+* ``location.location`` / ``location.address_space`` -- the Site hierarchy plus
   site prefixes (role/tags) and VLANs (with plugin DHCP helper addresses).
-* ``location.topology`` — the site's route servers (by tag) and WAN routers (by
+* ``location.topology`` -- the site's route servers (by tag) and WAN routers (by
   role), for inter-site peering.
 
 Sections with no first-class NetBox source (ISIS/EVPN, firmware bundles,
@@ -364,8 +364,8 @@ def _render_interface(
 
     ``role`` comes from the ``nvcm_interface_role`` custom field (NetBox has no
     native interface role; templates gate uplink/downlink on it). ``member_interfaces``
-    is the inverse of the child ``lag`` FK — the names of interfaces whose ``lag``
-    points at this one — supplied precomputed in ``lag_members`` keyed by LAG id.
+    is the inverse of the child ``lag`` FK -- the names of interfaces whose ``lag``
+    points at this one -- supplied precomputed in ``lag_members`` keyed by LAG id.
     """
     name = _require(iface.get("name"), "interface name")
     iface_type = iface.get("type")
@@ -408,7 +408,7 @@ def _lag_member_map(interfaces: list[dict[str, Any]]) -> dict[str, tuple[str, ..
     """Map each LAG interface id → the names of its member interfaces.
 
     NetBox stores the relation as the child's ``lag`` FK; the render contract
-    (and the spine ``bond`` templates) want the inverse — the parent's member
+    (and the spine ``bond`` templates) want the inverse -- the parent's member
     list. Order-stable by interface iteration order.
     """
     members: dict[str, list[str]] = {}
@@ -420,7 +420,7 @@ def _lag_member_map(interfaces: list[dict[str, Any]]) -> dict[str, tuple[str, ..
 
 
 def _loopback_interface_name(interfaces: list[dict[str, Any]]) -> str | None:
-    """Pick the device's loopback interface — the BGP router-id interface.
+    """Pick the device's loopback interface -- the BGP router-id interface.
 
     Prefer the interface whose ``nvcm_interface_role`` custom field is ``Loopback``,
     then a conventionally-named ``lo``. Returns ``None`` if neither exists.
@@ -511,7 +511,7 @@ def _bgp_instances(
     ``netbox-bgp`` models each peering as a ``session`` with nested ``local_as`` /
     ``remote_as`` / ``remote_address`` / ``peer_group``. It exposes no VRF
     association nor a router-id, so peers use the default source VRF and the
-    router-id interface is supplied by the caller (the device loopback) — the
+    router-id interface is supplied by the caller (the device loopback) -- the
     ``bgp_routing_instance()`` template filter treats it as required and raises
     without it whenever a session exists.
     """
@@ -588,7 +588,7 @@ def _bgp_instances(
 def _address_family_set(value: Any, model: type, described_as: str):
     """Build a ``{ipv4, ipv6}`` context value into ``model``, or ``None`` if empty.
 
-    Shared by the endpoint (host addresses) and prefix (CIDR) sets — the two
+    Shared by the endpoint (host addresses) and prefix (CIDR) sets -- the two
     differ only in which SDK model validates the values.
     """
     if not isinstance(value, dict):
@@ -810,7 +810,7 @@ class NetBoxRenderMixin:
         """Build device-scoped L2/L3 VNI inventory from the plugin's overlays.
 
         Scoped via overlay *assignments* (which overlays reach this device), never
-        the global VXLAN table — a device must not receive every fabric VNI.
+        the global VXLAN table -- a device must not receive every fabric VNI.
         """
         overlay_ids, device_assignments = await self._assigned_overlays(device_id, interface_ids)
         if not overlay_ids:
@@ -1095,7 +1095,7 @@ class NetBoxRenderMixin:
         )
 
         # Sessions nest only a brief peer_group, so the groups carrying the TTL in
-        # extra_attributes are fetched separately and joined by id — after the
+        # extra_attributes are fetched separately and joined by id -- after the
         # sessions, scoped to the ids they reference, so this does not paginate the
         # whole fabric's peer-group table per render.
         peer_groups = list(

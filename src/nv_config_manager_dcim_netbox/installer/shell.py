@@ -34,7 +34,7 @@ def require_tools(*names: str) -> None:
 def run(argv: Sequence[str], *, stdin: str | None = None) -> str:
     """Run *argv*, returning stdout. Raises CommandError on failure.
 
-    ``stdin`` is for values that must not appear in the process table — the NetBox
+    ``stdin`` is for values that must not appear in the process table -- the NetBox
     API token and the NATS password are piped to a shell rather than passed as
     arguments. Stderr is folded into the error on failure and otherwise dropped
     (helm and kubectl write progress there even when they succeed).

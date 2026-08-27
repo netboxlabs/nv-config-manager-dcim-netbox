@@ -174,8 +174,8 @@ class NetBoxReferenceMixin:
     async def _managed_device_selections(self, field: str) -> list[DCIMSelection]:
         """Return distinct ``tenant``/``role`` choices across managed devices.
 
-        "Managed" is ``DeviceConfigStatus.render_enabled`` — the same source
-        ``get_managed_device_metadata`` uses — resolved to device ids first. Read over
+        "Managed" is ``DeviceConfigStatus.render_enabled`` -- the same source
+        ``get_managed_device_metadata`` uses -- resolved to device ids first. Read over
         GraphQL asking only for the two nested objects, rather than paginating every
         field of the whole managed fleet to collect a few dozen names.
         """
@@ -228,7 +228,7 @@ class NetBoxReferenceMixin:
         if location:
             params.append(("cf_nvcm_site", await self._site_field_value(location)))
         vrfs = await self.rest_list(VRFS_PATH, params)
-        # Names only — deliberately not ``_mappers.tag_names``, which also returns
+        # Names only -- deliberately not ``_mappers.tag_names``, which also returns
         # slugs. These are offered to operators as choices, so a tag must appear
         # once (as its name), not twice (name and slug).
         tags: set[str] = set()
