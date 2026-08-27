@@ -143,29 +143,32 @@ class NetBoxReferenceMixin:
         """Return normalized metadata for one NetBox location PK, or ``None``.
 
         Same id space as :meth:`list_locations`, so an id taken from a workflow
-        form round-trips here. Query failures propagate; only a location that
-        NetBox does not have resolves to ``None`` — which NetBox reports as a
-        GraphQL error on the singular query, classified by the transport as
-        ``DCIMNotFoundError``.
+        form round-trips here. Every level is tried, in
+        :data:`_LOCATION_RESOLUTION_ORDER`, and the first match wins -- PKs are
+        per-model, so ``list_locations`` never offers two entries under one id.
 
-        Every level is tried, in :data:`_LOCATION_RESOLUTION_ORDER`, so an id from
-        an explicitly-typed ``list_locations(("region",))`` resolves at all rather
-        than coming back ``None``. PKs are per-model, so an id held by more than one
-        level resolves to the first — unavoidable while NVCM stores location ids as
-        bare NetBox PKs, which is why ``list_locations`` never offers two entries
-        under the same id.
+        One document with an aliased list query per level, rather than a singular
+        query per level in turn: a list filtered to a missing id comes back empty
+        instead of erroring, so all four resolve in a single round-trip.
         """
-        for kind in _LOCATION_RESOLUTION_ORDER:
-            field = _LOCATION_MODELS[kind][1]
-            try:
-                data = await self.graphql_query(
-                    f"query ($id: ID!) {{ {field}(id: $id) {{ id name }} }}", {"id": location_id}
-                )
-            except DCIMNotFoundError:
-                continue
-            found = data.get(field)
-            if found:
-                return DCIMSelection(id=str(found["id"]), name=found["name"])
+        aliases = {
+            f"lvl{index}": _LOCATION_MODELS[kind][0]
+            for index, kind in enumerate(_LOCATION_RESOLUTION_ORDER)
+        }
+        selections = " ".join(
+            f"{alias}: {field}(filters: {{id: $id}}) {{ id name }}"
+            for alias, field in aliases.items()
+        )
+        try:
+            data = await self.graphql_query(
+                f"query ($id: ID!) {{ {selections} }}", {"id": location_id}
+            )
+        except DCIMNotFoundError:
+            return None
+        for alias in aliases:
+            rows = data.get(alias) or []
+            if rows:
+                return DCIMSelection(id=str(rows[0]["id"]), name=rows[0]["name"])
         return None
 
     async def _managed_device_selections(self, field: str) -> list[DCIMSelection]:
@@ -260,18 +263,12 @@ class NetBoxReferenceMixin:
         """Return the status choices for a content type as ``{id, name}`` options.
 
         NetBox has no first-class Status object; statuses are per-model choice
-        fields, read from the endpoint's ``OPTIONS`` response
-        (``actions.POST.status.choices`` → ``value`` / ``display_name``). The
-        returned ``id`` is the NetBox status value (e.g. ``"active"``), which is
-        exactly what object filters expect, so it round-trips into selection.
+        fields read from the endpoint's ``OPTIONS`` response. The returned ``id``
+        is the NetBox value (``"active"``), which round-trips into a filter.
 
-        A ``None`` content type resolves to the device status set — the sensible
-        NetBox default, since it has no global status list. A *known* content
-        type with no status field, or a genuinely unknown one, raises
-        ``DCIMInvalidDataError``: the SDK contract (pinned by the provider test
-        suite) requires a hard failure here rather than an empty list, so a
-        caller cannot mistake "this model has no statuses" for "no statuses are
-        defined".
+        ``None`` resolves to the device status set. A known content type with no
+        status field, or an unknown one, raises ``DCIMInvalidDataError`` -- the
+        SDK contract wants a hard failure rather than an empty list.
         """
         resolved = content_type or _DEFAULT_STATUS_CONTENT_TYPE
         endpoint = _STATUS_ENDPOINTS.get(resolved)

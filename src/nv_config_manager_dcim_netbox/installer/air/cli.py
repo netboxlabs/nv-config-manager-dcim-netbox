@@ -132,8 +132,8 @@ def _render_example(blueprint: str, name: str) -> str:
         "# Written by `nvcm-netbox air config`. It is NVCM's air-sim YAML; only the",
         "# keys that must be chosen are set, because everything NetBox needs already",
         "# defaults correctly. Do not replace it with NVCM's own",
-        "# development/air_sim/configs/air_trial.yaml: that sets config_manager_ref",
-        "# explicitly and enables the bundled Nautobot population job.",
+        "# development/air_sim/configs/air_trial.yaml: that pins config_manager_ref",
+        "# and enables the bundled DCIM's population job.",
         "",
     ]
     for key in _REQUIRED_KEYS:

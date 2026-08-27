@@ -99,7 +99,7 @@ class NetBoxSimOrchestrator(SimOrchestrator):
         port: int,
         expected_total: int,
     ) -> None:
-        """Wait through NetBox instead of invoking the bundled Nautobot shell."""
+        """Wait through NetBox rather than the bundled DCIM's shell."""
         self._provider_deployment._manager = manager
         self._provider_deployment.wait_for_intended_configs(host, port, expected_total)
 

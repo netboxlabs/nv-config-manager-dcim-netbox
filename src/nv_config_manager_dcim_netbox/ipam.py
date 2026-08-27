@@ -93,18 +93,14 @@ class NetBoxIPAMMixin:
     ) -> list[NamespaceRouteDistinguisher]:
         """Return the route distinguishers in use in a namespace zone.
 
-        The caller allocates a new, non-conflicting RD, so this returns every RD
-        already used by a VRF (namespace) tagged ``namespace_tag``. ``site``
-        scopes the candidate VRFs server-side via the ``nvcm_site`` VRF custom
-        field (NetBox VRFs have no native site link), so multi-site deployments
-        do not draw RD candidates from an unrelated site's namespaces. This is
-        guarded on that field being defined; the ``namespace_tag`` (matched by
-        VRF tag name or slug) still defines the zone within the site.
+        The caller allocates a new non-conflicting RD, so this returns every one
+        already taken by a VRF tagged ``namespace_tag``. NetBox VRFs have no
+        native site link, so ``site`` filters on the ``nvcm_site`` custom field
+        (when defined) to keep multi-site deployments from drawing candidates
+        across sites.
 
-        ``site`` is resolved to the Site slug before filtering, because that is what
-        ``cf_nvcm_site`` holds — both from the plugin's loader and from
-        ``provision_spectrum_x_vrf``. NVCM sends the pk it got from
-        ``list_locations``, which would match no zone.
+        ``site`` is resolved to the Site slug first: that is what ``cf_nvcm_site``
+        holds, while NVCM sends the pk from ``list_locations``.
         """
         params: list[tuple[str, str]] = []
         if site:

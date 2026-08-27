@@ -298,7 +298,7 @@ def validate(config_path: Path, extra: tuple[str, ...], nvcm_repo: Path | None) 
 def generate_values(config_path: Path, extra: tuple[str, ...], nvcm_repo: Path | None) -> None:
     """Generate Helm values from a config. Same as NVCM's `generate-values`.
 
-    Note that `--output-dir` is theirs, so a relative one resolves against the
+    `--output-dir` is theirs, so a relative one resolves against the
     NVCM checkout. Pass an absolute path to write elsewhere.
     """
     _passthrough("generate-values", config_path, extra, _resolve_nvcm_repo(nvcm_repo))

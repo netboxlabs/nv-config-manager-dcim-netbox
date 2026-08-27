@@ -94,18 +94,20 @@ class NetBoxDHCPMixin:
         # Warm the interface/device/status caches in three bulk queries rather than
         # letting _resolve_interface_ip fetch each one individually (it still falls
         # back to a single fetch for anything not prefetched).
-        device_cache, interface_cache, status_cache = await self._prefetch_ip_owners(
-            [ip for ips in pools_by_subnet.values() for ip in ips]
-            + [ip for ips in reserves_by_subnet.values() for ip in ips]
+        (device_cache, interface_cache, status_cache), gateway_cache = await asyncio.gather(
+            self._prefetch_ip_owners(
+                [ip for ips in pools_by_subnet.values() for ip in ips]
+                + [ip for ips in reserves_by_subnet.values() for ip in ips]
+            ),
+            self._prefetch_gateway_addresses([prefix for prefix, _ in candidates]),
         )
 
         subnets: list[dict[str, object]] = []
         for prefix, network in candidates:
-            gateway = await self._gateway_address(prefix)
+            gateway = await self._gateway_address(prefix, gateway_cache)
             if not gateway:
-                # Unreachable in practice (malformed CIDRs are filtered above), but
-                # kea stringifies the gateway unconditionally and would emit the
-                # literal 'None', which it then rejects.
+                # kea stringifies the gateway unconditionally and rejects the
+                # literal 'None'.
                 continue
             pools = pools_by_subnet.get(prefix["id"], [])
             reserves = reserves_by_subnet.get(prefix["id"], [])
@@ -254,7 +256,36 @@ class NetBoxDHCPMixin:
                 best_len = network.prefixlen
         return best_id
 
-    async def _gateway_address(self, prefix: dict) -> str | None:
+    async def _prefetch_gateway_addresses(self, prefixes: list[dict]) -> dict[str, str]:
+        """Resolve the nvcm_gateway ids across ``prefixes`` in one query each chunk.
+
+        The field comes back as an id rather than an expanded object, so without
+        this the subnet loop fetches one address per prefix.
+        """
+        ids = {
+            str(gateway)
+            for prefix in prefixes
+            if (gateway := (prefix.get("custom_fields") or {}).get("nvcm_gateway"))
+            and not isinstance(gateway, dict)
+        }
+        if not ids:
+            return {}
+        pages = await asyncio.gather(
+            *(
+                self.rest_list(IP_ADDRESSES_PATH, [("id", i) for i in chunk])
+                for chunk in chunked(sorted(ids))
+            )
+        )
+        return {
+            str(row["id"]): address
+            for page in pages
+            for row in page
+            if row.get("id") is not None and (address := strip_mask(row.get("address")))
+        }
+
+    async def _gateway_address(
+        self, prefix: dict, gateway_cache: dict[str, str] | None = None
+    ) -> str | None:
         try:
             network = ipaddress.ip_network(prefix.get("prefix"), strict=False)
         except (ValueError, TypeError):
@@ -265,8 +296,10 @@ class NetBoxDHCPMixin:
         if isinstance(gateway, dict):
             explicit = strip_mask(gateway.get("address"))
         elif gateway:
-            ip = await self.rest_request("GET", f"{IP_ADDRESSES_PATH}{gateway}/")
-            explicit = strip_mask((ip or {}).get("address"))
+            explicit = (gateway_cache or {}).get(str(gateway))
+            if explicit is None:
+                ip = await self.rest_request("GET", f"{IP_ADDRESSES_PATH}{gateway}/")
+                explicit = strip_mask((ip or {}).get("address"))
         if explicit:
             # Validate the override actually lies within the subnet, matching the
             # reference DCIM provider — a gateway outside the prefix is a data error

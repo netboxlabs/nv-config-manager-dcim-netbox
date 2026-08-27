@@ -441,15 +441,18 @@ async def test_location_topology_route_servers_and_wan_routers():
             starts_with = [v for k, v in (params or []) if k == "name__isw"]
             if not starts_with:
                 return rest.get(path, [])
-            device_ids = [v for k, v in (params or []) if k == "device_id"]
-            if device_ids == ["5"]:
-                return [{"id": 50, "name": "lo"}]
-            return []
+            # One query covers every device, so the rows carry their own device.
+            device_ids = {v for k, v in (params or []) if k == "device_id"}
+            return [{"id": 50, "name": "lo", "device": {"id": 5}} for _ in [1] if "5" in device_ids]
         if path == "ipam/ip-addresses/":
             ip_queries.append(list(params or []))
             selected = {v for k, v in (params or []) if k == "interface_id"}
             addresses = {"50": "10.9.9.9/32", "51": "10.1.1.0/31"}
-            return [{"address": addresses[i]} for i in sorted(selected) if i in addresses]
+            return [
+                {"address": addresses[i], "assigned_object_id": int(i)}
+                for i in sorted(selected)
+                if i in addresses
+            ]
         return rest.get(path, [])
 
     client.graphql_query = fake_graphql
@@ -486,7 +489,8 @@ async def test_location_device_with_no_loopback_interface_has_no_loopbacks():
 
     client.rest_list = fake_rest_list
     try:
-        device = await client._location_device({"id": 5, "name": "rs-1"})
+        by_device = await client._loopback_addresses_by_device(["5"])
+        device = client._location_device({"id": 5, "name": "rs-1"}, by_device.get("5", []))
     finally:
         await client.close()
     assert device.loopback_addresses == ()

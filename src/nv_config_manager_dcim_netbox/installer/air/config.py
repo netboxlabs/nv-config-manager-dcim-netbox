@@ -30,8 +30,8 @@ class NetBoxSimConfig(SimConfig):
     config_manager_ref: str = base_config.NVCM_BRANCH
 
     # Build the simulated fabric from the shared blueprint, but do not register
-    # the bundled Nautobot population job. NetBox loads the blueprint through
-    # its own management command during provider deployment.
+    # the bundled DCIM's population job. NetBox loads the blueprint through its
+    # own management command during provider deployment.
     generate_fabric_from_mock_context: bool | None = True
     run_mock_topology_job: bool = False
 

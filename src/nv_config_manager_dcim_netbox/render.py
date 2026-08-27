@@ -774,8 +774,7 @@ class NetBoxRenderMixin:
         carrying that overlay's VRF.
 
         ``assigned_object_id`` is multi-valued (repeated params OR), so the device
-        and all its interfaces are resolved in one query rather than one per
-        interface — a switch with 64 ports made 65 round trips here.
+        and all its interfaces resolve in one query rather than one per interface.
         """
         object_ids = [str(device_id), *sorted(interface_ids)]
         rows = await self._safe_list(
@@ -825,9 +824,8 @@ class NetBoxRenderMixin:
             self._safe_list(self.VXLANS_PATH, vxlan_params),
         )
         overlays = {str(o["id"]): o for o in overlay_rows if o.get("id") is not None}
-        # Belt-and-braces: keep the client-side scope check in case an endpoint
-        # ignores the filter (the whole point is that a device must not receive
-        # every fabric VNI).
+        # Re-checked here in case an endpoint ignores the filter: a device must
+        # not receive every fabric VNI.
         vxlans = [v for v in vxlan_rows if str(fk_id(v.get("overlay"))) in overlay_ids]
         vrf_map, vlan_map = await asyncio.gather(
             self._id_map(VRFS_PATH, {str(fk_id(v.get("vrf"))) for v in vxlans if v.get("vrf")}),
@@ -897,25 +895,48 @@ class NetBoxRenderMixin:
             l2_vnis=tuple(l2), l3_vnis=tuple(l3), l2_vni_vrfs=tuple(l2_vni_vrfs)
         )
 
-    async def _loopback_addresses(self, device_id: str) -> list[dict[str, Any]]:
-        """Return the IP addresses on the device's loopback interfaces.
+    async def _loopback_addresses_by_device(
+        self, device_ids: list[str]
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Loopback IP addresses for several devices, keyed by device id.
 
-        Two queries because the IPAddress filterset has no interface-name filter —
-        only ``interface`` (exact name) and ``interface_id``. Resolve the loopbacks
-        first, where ``name__isw`` is real, then select their addresses by id.
-        ``interface__name__isw`` is not a filter NetBox knows, and it drops unknown
-        params rather than rejecting them, so it matched every address.
+        Two queries whatever the device count: ``device_id`` and ``interface_id``
+        are both multi-valued. The IPAddress filterset has no interface-name
+        filter, so the loopbacks are resolved first -- ``interface__name__isw`` is
+        not a filter NetBox knows, and it drops unknown params rather than
+        rejecting them.
         """
+        if not device_ids:
+            return {}
         interfaces = await self._safe_list(
-            INTERFACES_PATH, [("device_id", device_id), ("name__isw", _LOOPBACK_PREFIX)]
+            INTERFACES_PATH,
+            [("device_id", i) for i in sorted(set(device_ids))] + [("name__isw", _LOOPBACK_PREFIX)],
         )
-        interface_ids = sorted({str(i["id"]) for i in interfaces if i.get("id") is not None})
-        if not interface_ids:
-            return []
-        # Repeated interface_id params OR, so one query covers every loopback.
-        return await self._safe_list(
-            IP_ADDRESSES_PATH, [("interface_id", i) for i in interface_ids]
+        device_by_interface = {
+            str(i["id"]): str(fk_id(i.get("device")))
+            for i in interfaces
+            if i.get("id") is not None and fk_id(i.get("device")) is not None
+        }
+        if not device_by_interface:
+            return {}
+        addresses = await self._safe_list(
+            IP_ADDRESSES_PATH, [("interface_id", i) for i in sorted(device_by_interface)]
         )
+        out: dict[str, list[dict[str, Any]]] = {}
+        for address in addresses:
+            # Nested when the serializer expands it, a bare id otherwise.
+            owner = (address.get("assigned_object") or {}).get("id") or address.get(
+                "assigned_object_id"
+            )
+            device_id = device_by_interface.get(str(owner))
+            if device_id is not None:
+                out.setdefault(device_id, []).append(address)
+        return out
+
+    async def _loopback_addresses(self, device_id: str) -> list[dict[str, Any]]:
+        """Loopback IP addresses for one device."""
+        by_device = await self._loopback_addresses_by_device([str(device_id)])
+        return by_device.get(str(device_id), [])
 
     async def _location_topology(self, site_id: str | None) -> RenderLocationTopology:
         """Route servers and WAN routers at the site, for inter-site peering.
@@ -952,13 +973,8 @@ class NetBoxRenderMixin:
         # _location_device costs its own loopback lookup.
         by_id = {str(d["id"]): d for d in (*route_servers, *wan_routers) if d.get("id") is not None}
         order = sorted(by_id)
-        mapped = dict(
-            zip(
-                order,
-                await asyncio.gather(*(self._location_device(by_id[i]) for i in order)),
-                strict=True,
-            )
-        )
+        loopbacks = await self._loopback_addresses_by_device(order)
+        mapped = {i: self._location_device(by_id[i], loopbacks.get(i, [])) for i in order}
 
         def selected(devices: list[dict[str, Any]]) -> tuple[RenderLocationDevice, ...]:
             return tuple(mapped[str(d["id"])] for d in devices if str(d.get("id")) in mapped)
@@ -968,11 +984,12 @@ class NetBoxRenderMixin:
             wan_routers=selected(wan_routers),
         )
 
-    async def _location_device(self, device: dict[str, Any]) -> RenderLocationDevice:
+    def _location_device(
+        self, device: dict[str, Any], addresses: list[dict[str, Any]]
+    ) -> RenderLocationDevice:
         """One routing-relevant device: its name, BGP ASN and loopback addresses."""
         context = device.get("config_context") or {}
         bgp = context.get("bgp") if isinstance(context.get("bgp"), dict) else {}
-        addresses = await self._loopback_addresses(str(device["id"]))
         loopbacks: list[str] = []
         for entry in addresses:
             address = _str_or_none(entry.get("address"))

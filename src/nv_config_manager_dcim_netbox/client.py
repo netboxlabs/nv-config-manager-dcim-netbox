@@ -10,6 +10,7 @@ queries, payloads, and SDK-model construction.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import ssl
@@ -368,9 +369,37 @@ class BaseNetBoxClient:
         accumulating duplicate rows.
         """
         base = list(params or [])
-        offset = 0
-        out: list[dict[str, Any]] = []
-        for _ in range(_MAX_LIST_PAGES):
+        first = await self.rest_request(
+            "GET", path, params=base + [("limit", str(page_size)), ("offset", "0")]
+        )
+        if not isinstance(first, dict):
+            return []
+        out: list[dict[str, Any]] = list(first.get("results") or [])
+        count = first.get("count")
+        if not first.get("next") or not out:
+            return out
+
+        # The first page reports the total, so the rest are fetched together
+        # instead of walked. Rows added or removed mid-read can shift the offset
+        # window either way -- the serial walk had the same exposure.
+        if isinstance(count, int) and 0 < count <= _MAX_LIST_PAGES * page_size:
+            offsets = range(page_size, count, page_size)
+            pages = await asyncio.gather(
+                *(
+                    self.rest_request(
+                        "GET", path, params=base + [("limit", str(page_size)), ("offset", str(o))]
+                    )
+                    for o in offsets
+                )
+            )
+            for page in pages:
+                if isinstance(page, dict):
+                    out.extend(page.get("results") or [])
+            return out
+
+        # No usable count: walk it.
+        offset = len(out)
+        for _ in range(_MAX_LIST_PAGES - 1):
             page = await self.rest_request(
                 "GET",
                 path,
@@ -381,9 +410,6 @@ class BaseNetBoxClient:
             results = page.get("results") or []
             out.extend(results)
             if not page.get("next") or not results:
-                break
-            count = page.get("count")
-            if isinstance(count, int) and len(out) >= count:
                 break
             offset += len(results)
         else:

@@ -372,7 +372,7 @@ class NetBoxAirCallback:
           check and waits forever; a periodic line makes that timeout real.
 
         Neither helps if the connection itself dies -- that needs a keepalive on
-        their side, which is why the failure message says so.
+        their side, and the failure message says so.
         """
         # Pod READY/STATUS on every beat, so a first boot grinding through
         # migrations is distinguishable from a stall without opening a session.

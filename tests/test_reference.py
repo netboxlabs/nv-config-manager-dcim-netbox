@@ -22,16 +22,44 @@ async def test_list_locations():
 async def test_get_location_metadata():
     # NVCM resolves a workflow's location reference through this, then uses the
     # returned name as the canonical location, so the id space must match
-    # list_locations.
-    client = _client(gql={"location": {"id": 1, "name": "Row 1"}})
+    # list_locations. lvl1 is `location`, second in _LOCATION_RESOLUTION_ORDER.
+    client = _client(gql={"lvl1": [{"id": 1, "name": "Row 1"}]})
     location = await client.get_location_metadata("1")
     assert location is not None and (location.id, location.name) == ("1", "Row 1")
 
 
+async def test_get_location_metadata_resolves_every_level_in_one_query():
+    """A list query filtered to a missing id returns [], so all levels fit in one
+    document -- the singular form errors and forced one round-trip per level."""
+    client = _client()
+    queries = []
+
+    async def _record(query, variables=None):
+        queries.append(query)
+        return {"lvl0": [], "lvl1": [], "lvl2": [{"id": 7, "name": "West"}], "lvl3": []}
+
+    client.graphql_query = _record
+    found = await client.get_location_metadata("7")
+
+    assert found is not None and (found.id, found.name) == ("7", "West")
+    assert len(queries) == 1
+    for field in ("site_list", "location_list", "region_list", "site_group_list"):
+        assert field in queries[0]
+
+
 async def test_get_location_metadata_missing_returns_none():
-    # NetBox signals the missing location as a GraphQL error, which the transport
-    # classifies as DCIMNotFoundError; the contract wants None so NVCM reports
-    # "Unknown location" (422) rather than failing the request.
+    client = _client()
+
+    async def _empty(query, variables=None):
+        return {"lvl0": [], "lvl1": [], "lvl2": [], "lvl3": []}
+
+    client.graphql_query = _empty
+    assert await client.get_location_metadata("999999") is None
+
+
+async def test_get_location_metadata_tolerates_a_not_found_error():
+    # Kept for a NetBox that reports an unknown id as a GraphQL error rather than
+    # an empty list: the contract wants None so NVCM reports "Unknown location".
     client = _client()
 
     async def _missing(query, variables=None):
@@ -134,15 +162,14 @@ async def test_get_location_metadata_resolves_every_level():
     """A region id comes back from `list_locations(("Region",))`, so it has to
     resolve here too.
 
-    Only `site` then `location` were tried, so an explicitly-typed region or
-    site-group selection resolved to None -- NVCM reports that as "Unknown
-    location" -- or, worse, to whichever Site happened to hold the same PK.
+    All four levels are in _LOCATION_RESOLUTION_ORDER; omitting one resolves an
+    explicitly-typed selection to None, or to whichever Site holds the same PK.
     """
-    client = _client(gql={"region": {"id": 7, "name": "DSX Air Trial"}})
+    client = _client(gql={"lvl2": [{"id": 7, "name": "DSX Air Trial"}]})
     found = await client.get_location_metadata("7")
     assert found is not None and (found.id, found.name) == ("7", "DSX Air Trial")
 
-    client = _client(gql={"site_group": {"id": 8, "name": "Trial Group"}})
+    client = _client(gql={"lvl3": [{"id": 8, "name": "Trial Group"}]})
     found = await client.get_location_metadata("8")
     assert found is not None and found.name == "Trial Group"
 
@@ -172,6 +199,6 @@ async def test_an_unknown_location_type_is_skipped_not_fatal():
 
 async def test_get_location_metadata_resolves_a_site_id():
     # Same id space as list_locations, so a site chosen in a form round-trips.
-    client = _client(gql={"site": {"id": 1, "name": "TRIAL01 - demo"}})
+    client = _client(gql={"lvl0": [{"id": 1, "name": "TRIAL01 - demo"}]})
     found = await client.get_location_metadata("1")
     assert found is not None and found.name == "TRIAL01 - demo"

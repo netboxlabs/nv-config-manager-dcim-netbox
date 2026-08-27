@@ -91,6 +91,20 @@ class FabricCommonMixin:
     ASSIGNMENTS_PATH = "plugins/nv-config-manager/overlay-assignments/"
     PKEYS_PATH = "plugins/nv-config-manager/ib-pkeys/"
 
+    @property
+    def _scope_cache(self) -> dict[tuple[str, str], dict | None]:
+        """Resolved Site/Location rows, for this client's lifetime.
+
+        A scope is resolved several times per operation -- once for `scope_id`,
+        again for the site slug -- and Sites and Locations do not move underneath
+        a running workflow.
+        """
+        cache = getattr(self, "_scope_cache_store", None)
+        if cache is None:
+            cache = {}
+            self._scope_cache_store = cache
+        return cache
+
     # -- NVCM per-device management flags ------------------------------------
     #
     # The flags live on the plugin's DeviceConfigStatus model, not on device custom
@@ -204,23 +218,15 @@ class FabricCommonMixin:
     async def _resolve_scope(self, value: str | int | None, *, scope_type: str) -> dict | None:
         """Resolve a selection value to the NetBox Site or Location row it names.
 
-        *scope_type* says which model to look in, and every caller knows: SpectrumX
-        anchors overlays at a Site, InfiniBand at a sub-Site Location. Searching
-        both would be guessing, and PKs are per-model — Site 1 and Location 1 are
-        different objects.
+        *scope_type* picks the model: SpectrumX anchors at a Site, InfiniBand at a
+        sub-Site Location. PKs are per-model, so searching both would be guessing.
 
-        The primary key is the contract: NVCM round-trips the id
-        ``list_locations`` handed out, and ``is_valid_location_id`` accepts only a
-        canonical NetBox PK. The reference provider forwards that id to Nautobot
-        directly, its ``location`` being a plain FK; NetBox anchors the Overlay on a
-        GFK, so the id has to be resolved to a row here.
+        The pk is the contract -- NVCM round-trips the id ``list_locations`` gave
+        out, and NetBox anchors the Overlay on a GFK, so it is resolved to a row
+        here. Slug and name are also accepted, for ``cf_nvcm_site`` (which stores
+        the slug) and for a Location named rather than selected.
 
-        Slug and name are additional to that contract, for ``cf_nvcm_site`` (which
-        stores the site slug) and the InfiniBand anchor (a Location, which may be
-        named rather than selected).
-
-        Returns the row so callers can take the pk for ``scope_id`` and the slug for
-        ``cf_nvcm_site`` from one lookup. ``None`` when unresolved.
+        Returns the row so one lookup yields both ``scope_id`` and the slug.
         """
         if value is None or value == "":
             return None
@@ -229,16 +235,24 @@ class FabricCommonMixin:
         except KeyError:
             raise DCIMInvalidDataError(f"Unknown overlay scope type {scope_type!r}") from None
         val = str(value)
+        cache_key = (scope_type, val)
+        if cache_key in self._scope_cache:
+            return self._scope_cache[cache_key]
+
         # Only a canonical PK is worth an id lookup; NetBox rejects a non-numeric
         # `id` outright rather than simply not matching it.
         keys = ("id", "slug", "name") if is_netbox_pk(val) else ("slug", "name")
-        for key in keys:
-            rows = await self.rest_list(path, [(key, val)])
+        # Concurrently: the lookups are independent, and the serial version cost
+        # three round-trips for a value matched by the last key tried.
+        pages = await asyncio.gather(*(self.rest_list(path, [(key, val)]) for key in keys))
+        found = None
+        for key, rows in zip(keys, pages, strict=True):
             if len(rows) > 1:
                 raise DCIMConflictError(f"Multiple {path} entries with {key}={val!r}")
-            if rows:
-                return rows[0]
-        return None
+            if rows and found is None:
+                found = rows[0]
+        self._scope_cache[cache_key] = found
+        return found
 
     async def _site_field_value(self, site: str) -> str:
         """Normalize a site selection to what ``cf_nvcm_site`` stores: the slug.
@@ -258,8 +272,9 @@ class FabricCommonMixin:
         filtered by isolation type, which may be either. Sites before Locations,
         the order ``reference.get_location_metadata`` uses.
         """
-        for scope_type in (SITE_SCOPE_TYPE, LOCATION_SCOPE_TYPE):
-            row = await self._resolve_scope(value, scope_type=scope_type)
+        types = (SITE_SCOPE_TYPE, LOCATION_SCOPE_TYPE)
+        rows = await asyncio.gather(*(self._resolve_scope(value, scope_type=t) for t in types))
+        for scope_type, row in zip(types, rows, strict=True):
             if row is not None:
                 return scope_type, row
         return None, None

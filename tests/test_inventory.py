@@ -233,6 +233,37 @@ async def test_a_slug_filter_is_passed_through_unchanged():
     assert ("role", "tan-hleaf") in params_for(queries, "dcim/devices/")
 
 
+# Generated from django.utils.text.slugify, which is what NetBox fills its slug
+# field with. Regenerate with:
+#   python -c "from django.utils.text import slugify; print(slugify(NAME))"
+_DJANGO_SLUGS = (
+    ("DSX Air (DC1)", "dsx-air-dc1"),
+    ("DSX_Air", "dsx_air"),
+    ("Site_01 East", "site_01-east"),
+    ("Rack 4.2", "rack-42"),
+    ("Caf\u00e9 DC", "cafe-dc"),
+    ("A--B", "a-b"),
+    ("TAN-HLEAF", "tan-hleaf"),
+    ("  spaced  ", "spaced"),
+    ("a_", "a"),
+    ("\u00dcn\u00efcod\u00e9", "unicode"),
+    ("DC1/Row-3", "dc1row-3"),
+    ("100G Spine", "100g-spine"),
+    ("xxx!!!", "xxx"),
+)
+
+
+def test_slugify_matches_django():
+    """A slug that differs by one character filters to an empty list, not an error.
+
+    Underscores, dots and non-ASCII are where a naive regex diverges.
+    """
+    from nv_config_manager_dcim_netbox._mappers import slugify
+
+    for name, expected in _DJANGO_SLUGS:
+        assert slugify(name) == expected, name
+
+
 def test_slug_or_id_covers_the_name_and_id_forms():
     from nv_config_manager_dcim_netbox._mappers import slug_or_id
 
@@ -256,12 +287,13 @@ def test_slug_or_id_slugifies_punctuation_the_way_netbox_does():
     assert slug_or_id("site", "DSX Air (DC1)") == ("site", "dsx-air-dc1")
     assert slug_or_id("site", "TRIAL01 - demo") == ("site", "trial01-demo")
     assert slug_or_id("tenant", "Acme, Inc.") == ("tenant", "acme-inc")
-    assert slug_or_id("role", "spine/leaf") == ("role", "spine-leaf")
-    # Every derived slug is one NetBox would accept: [-a-zA-Z0-9_]+ with no
-    # leading or trailing separator.
-    for name in ("DSX Air (DC1)", "  padded  ", "Acme, Inc.", "a--b"):
+    # Slash is dropped, not hyphenated -- see _DJANGO_SLUGS.
+    assert slug_or_id("role", "spine/leaf") == ("role", "spineleaf")
+    # Every derived slug is one NetBox would accept: [-a-z0-9_]+ with no leading
+    # or trailing separator.
+    for name in ("DSX Air (DC1)", "  padded  ", "Acme, Inc.", "a--b", "Site_01 East"):
         key, value = slug_or_id("site", name)
-        assert re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", value), (name, value)
+        assert re.fullmatch(r"[a-z0-9_]+(-[a-z0-9_]+)*", value), (name, value)
 
 
 async def test_a_platform_netbox_does_not_have_is_dropped_not_sent():

@@ -214,21 +214,17 @@ def install_netbox(
 ) -> None:
     """helm upgrade --install the NetBox release.
 
-    Called once. ``nats_password`` is resolved before this runs -- adopted from a
-    deployed NVCM, or minted -- so the publisher is configured at install time
-    rather than the release being upgraded a second time to switch it on.
+    Called once, with ``nats_password`` already resolved, so the publisher is
+    configured at install time rather than by a second upgrade.
 
-    ``chart_ref`` is a path as the *runner* sees it, so the Air path passes the
-    chart's location on the sim box rather than a local one.
+    ``chart_ref`` is a path as the *runner* sees it -- on the sim box, for Air.
 
-    An empty ``image_tag`` omits the flag, leaving the chart's own
-    ``netbox.image.tag``. Passing ``--set netbox.image.tag=`` would override it with
-    an empty string, and the subchart then falls back to its appVersion — a tag that
-    was never built.
+    An empty ``image_tag`` omits the flag rather than setting it empty, which
+    would drop the subchart back to its appVersion, a tag never built.
 
-    ``extra_set`` carries caller-supplied ``key=value`` overrides, appended last so
-    they win over the ones built here. Values that may contain `,` or `\\` must be
-    passed through ``helm_set_value`` by the caller, which knows where the key ends.
+    ``extra_set`` holds ``key=value`` overrides, appended last so they win.
+    Values that may contain `,` or `\\` must be passed through
+    ``helm_set_value`` by the caller, which knows where the key ends.
     """
     argv = [
         "helm",
@@ -343,12 +339,10 @@ def load_topology(
     This is NVCM's `make topology` for NetBox. Without it NetBox comes up empty,
     and an empty DCIM renders nothing.
 
-    The blueprint is streamed as a tar over ``exec`` rather than copied with
-    ``kubectl cp``, because cp needs a pod *name*: resolving one races a rollout
-    and can land on a pod that is terminating, which surfaces as a bare exit 137.
-    ``exec deploy/...`` always picks a ready pod. It also keeps this to two
-    commands with no intermediate value, so the Air path can render it into a
-    script instead of a series of round trips.
+    Streamed as a tar over ``exec`` rather than ``kubectl cp``: cp needs a pod
+    *name*, and resolving one races a rollout onto a terminating pod (a bare exit
+    137). ``exec deploy/...`` always picks a ready pod, and it keeps this to two
+    commands the Air path can render into a script.
     """
     remote_dir = "/tmp/blueprint"
     unpack = f"rm -rf {remote_dir} && mkdir -p {remote_dir} && tar -xf - -C {remote_dir}"
@@ -543,7 +537,7 @@ def publish_test_event(
 def dcim_consumer_logs(namespace: str, since: str = "60s", runner: Runner | None = None) -> str:
     """Return recent DCIM render-consumer logs.
 
-    The upstream label is `consumer-nautobot` for legacy reasons; the container it
+    The upstream label is `consumer-nautobot`; the container it
     selects runs NATS_CONSUMER=dcim and is the DCIM consumer.
     """
     try:

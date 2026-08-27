@@ -270,18 +270,13 @@ class NetBoxInventoryMixin:
     async def _known_platform_slugs(self) -> set[str]:
         """The platform slugs this NetBox actually defines.
 
-        NetBox's ``platform`` filter is a choice field over existing slugs, so a
-        value it does not have is rejected with HTTP 400 ("Select a valid choice")
-        and the whole device query fails.
+        ``platform`` is a choice field over existing slugs, so an unknown value
+        fails the whole device query with HTTP 400. It is the only selection
+        filter where that is reachable: site, tenant and role values come from
+        our own list endpoints, while ``Platform`` is a fixed SDK enum a workflow
+        sends regardless of what the DCIM holds.
 
-        Platforms are the only selection filter where that is reachable. Site,
-        tenant and role values come from NVCM forms that our own
-        ``list_locations``/``list_tenants``/``list_roles`` populated, so they exist
-        by construction; ``Platform`` is a fixed enum in the SDK and a workflow
-        sends whichever members it supports regardless of what the DCIM holds.
-
-        Cached for the client's lifetime — reference data, on the path of every
-        device selection.
+        Cached for the client's lifetime -- reference data on every selection.
         """
         if self._platform_slugs is None:
             data = await self.graphql_query("query { platform_list { slug } }")

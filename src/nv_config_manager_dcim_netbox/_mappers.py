@@ -12,6 +12,7 @@ NetBox specifics reflected here:
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any
 
 import netaddr
@@ -125,51 +126,40 @@ def slug_of(obj: Any) -> str:
 
 
 def status_slug(value: Any) -> str:
-    """Normalize a device-status filter value to the NetBox slug.
+    """Normalize a status filter value to the NetBox slug.
 
-    NetBox's ``status`` query filter matches the status *slug*, which for device
-    statuses is the lowercased single-word label (``active``, ``provisioned``,
-    ``planned`` …). NVCM workflows, however, default their status filter to the
-    display label the reference DCIM provider uses (e.g. ``["Active",
-    "Provisioned"]``); forwarding that verbatim makes NetBox reject the request
-    with HTTP 400 (``"Active is not one of the available choices"``), which stalls
-    every site-scoped selection (cable/hardware validation, site backup, site
-    password rotation). Lowercasing maps label -> slug and is idempotent for a
-    value that is already a slug.
+    NVCM sends display labels ("Active"); NetBox filters on the slug. Idempotent
+    for a value that is already a slug.
     """
     return str(value).lower()
+
+
+def slugify(value: Any) -> str:
+    """Derive a NetBox slug from a display name.
+
+    Reproduces ``django.utils.text.slugify``, which is what NetBox's UI prefills
+    the slug field with. Must stay byte-identical to it: a slug that differs by
+    one character filters to an empty list rather than an error, so a mismatch is
+    silent. See ``test_slugify_matches_django``.
+    """
+    text = unicodedata.normalize("NFKD", str(value)).encode("ascii", "ignore").decode("ascii")
+    text = re.sub(r"[^\w\s-]", "", text.strip().lower())
+    return re.sub(r"[-\s]+", "-", text).strip("-_")
 
 
 def slug_or_id(key: str, value: Any) -> tuple[str, str]:
     """Return the NetBox query param and value for a name-or-id filter.
 
-    NetBox's ``site``/``role``/``tenant``/``platform``/``manufacturer`` filters
-    match the *slug*; the id is a separate ``<key>_id`` param. NVCM sends
-    whichever it holds: a site id taken from ``list_locations`` (a NetBox PK), and
-    a role as its display name (``TAN-HLEAF``). Forwarding either verbatim makes
-    NetBox reject the whole request with HTTP 400 ("Select a valid choice"),
-    which fails device discovery for Multi-Deploy and anything else scoped by
-    site or role.
-
-    A value that is already a slug is unchanged, so this is idempotent. Same
-    class of problem as :func:`status_slug`, generalized to the id/slug split.
-
-    The name -> slug step reproduces NetBox's own slugify, which is what its UI
-    prefills the field with: lowercase, every run of non-alphanumerics collapsed
-    to one hyphen, ends trimmed. So ``DSX Air (DC1)`` becomes ``dsx-air-dc1``.
-
-    A slug edited away from its name (a site named ``DSX Air Demo`` slugged
-    ``demo``) cannot be derived; NetBox answers such a filter with 200 and an
-    empty list rather than an error. Deriving the slug is a best effort on NVCM
-    sending a display name where NetBox wants a key; sending the id avoids the
-    guess entirely.
+    NetBox matches ``site``/``role``/``tenant``/``platform``/``manufacturer`` on
+    the slug and takes the pk as a separate ``<key>_id``; NVCM sends whichever it
+    holds. A slug edited away from its name cannot be derived -- sending the id
+    avoids the guess.
     """
     text = str(value)
     if text.isdigit() and int(text) > 0:
-        # Ambiguous only for an all-digit slug, which NetBox permits but its
-        # slugify never produces from a name. A PK is by far the likelier meaning.
+        # An all-digit slug is legal but slugify never produces one from a name.
         return (f"{key}_id", text)
-    return (key, re.sub(r"[^a-z0-9]+", "-", text.strip().lower()).strip("-"))
+    return (key, slugify(text))
 
 
 def name_of(obj: Any) -> str | None:

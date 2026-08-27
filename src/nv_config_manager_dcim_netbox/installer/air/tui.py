@@ -96,7 +96,7 @@ class NetBoxTopologyScreen(TopologyScreen):
 
 
 class NetBoxAirSimulationManager(AirSimulationManager):
-    """Report switch provisioning through NetBox rather than Nautobot."""
+    """Report switch provisioning through NetBox."""
 
     def get_provisioning_status(
         self,

@@ -40,11 +40,10 @@ TOKEN_PLACEHOLDER = "REPLACED_BY_INSTALLER"
 # the `provider` field the plugin stamps on every change event.
 PROVIDER_NAME = "netbox"
 
-# The JetStream stream and subject NetBox publishes change events on. Both sides
-# must agree: NVCM creates the stream with this subject filter, and the chart
-# renders the plugin's nats_subject from the same value. Left at NVCM's defaults
-# the stream filters on `nautobot` while NetBox publishes to `netbox.change`, so
-# every event is dropped by the broker and the consumer simply never sees one.
+# The JetStream stream and subject NetBox publishes change events on. Three
+# things must agree -- this, the chart's nvcm.eventSubject, and the plugin's
+# nats_subject -- or the broker drops every event silently. NVCM's own default
+# filters on `nautobot`, which matches nothing NetBox publishes.
 EVENT_STREAM = "netbox"
 EVENT_SUBJECT = "netbox.change"
 
