@@ -155,8 +155,10 @@ class NetBoxReferenceMixin:
             f"lvl{index}": _LOCATION_MODELS[kind][0]
             for index, kind in enumerate(_LOCATION_RESOLUTION_ORDER)
         }
+        # `id` on a list filter is an IDComparisonFilterLookup, not a bare ID --
+        # passing the scalar makes NetBox reject the whole document.
         selections = " ".join(
-            f"{alias}: {field}(filters: {{id: $id}}) {{ id name }}"
+            f"{alias}: {field}(filters: {{id: {{exact: $id}}}}) {{ id name }}"
             for alias, field in aliases.items()
         )
         try:

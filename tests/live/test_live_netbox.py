@@ -99,3 +99,24 @@ def test_dhcp_reads_the_bootstrap_and_topology_data(live_client, run):
 def test_ztp_device_resolves(live_client, run, trial_devices):
     ztp = run(live_client.get_ztp_device(trial_devices[_LEAF].id))
     assert ztp is not None
+
+
+def test_location_metadata_query_is_valid_against_a_real_schema(live_client, run):
+    """The aliased list query must satisfy NetBox's own filter types.
+
+    A unit test mocking graphql_query cannot catch this: `id` on a list filter
+    is an IDComparisonFilterLookup, and passing a bare ID! made NetBox reject
+    the whole document, failing every site-scoped workflow.
+    """
+    site = run(live_client.list_locations(("site",)))
+    assert site, "the trial blueprint defines a site"
+
+    found = run(live_client.get_location_metadata(site[0].id))
+
+    assert found is not None
+    assert found.id == site[0].id
+    assert found.name == site[0].name
+
+
+def test_location_metadata_returns_none_for_an_unknown_id(live_client, run):
+    assert run(live_client.get_location_metadata("999999")) is None
