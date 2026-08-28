@@ -93,7 +93,10 @@ _REST = {
         {
             "prefix": "10.0.0.0/24",
             "role": {"name": "Loopback", "slug": "loopback"},
-            "tags": [{"name": "mgmt"}],
+            # The aggregate tag the reference filters location prefixes by; the
+            # two untagged prefixes below stay out of address_space but must still
+            # be found as parents of the loopback address.
+            "tags": [{"name": "role-aggregate"}, {"name": "mgmt"}],
         },
         {"prefix": "10.0.0.4/31"},
         {"prefix": "10.0.1.0/31"},

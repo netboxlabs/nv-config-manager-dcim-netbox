@@ -99,6 +99,9 @@ from nv_config_manager_dcim_netbox.fabric_common import (
 if TYPE_CHECKING:
     from nv_config_manager_dcim import RenderDataRequest
 
+# Tag the reference filters location prefixes by.
+_AGGREGATE_TAG = "role-aggregate"
+
 logger = logging.getLogger(__name__)
 
 # How the reference provider selects a location's routing-relevant devices.
@@ -1018,6 +1021,11 @@ class NetBoxRenderMixin:
             return RenderLocationAddressSpace()
         if prefixes is None:
             prefixes = await self._safe_list(PREFIXES_PATH, [("site_id", site_id)])
+        # The reference scopes this to the aggregates
+        # (`prefixes(tags: "role-aggregate", location: $location)`), and the
+        # consuming template only looks at those. Unfiltered, superpod put all 164
+        # site prefixes into every device's render payload instead of 12.
+        prefixes = [p for p in prefixes if _AGGREGATE_TAG in _tags(p)]
         vlans = await self._safe_list(VLANS_PATH, [("site_id", site_id)])
         render_prefixes = tuple(
             RenderPrefix(

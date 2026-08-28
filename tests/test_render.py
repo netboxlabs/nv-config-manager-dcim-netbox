@@ -112,7 +112,10 @@ _REST_MAP = {
         {
             "prefix": "10.0.0.0/24",
             "role": {"name": "Loopback", "slug": "loopback"},
-            "tags": [{"name": "mgmt"}],
+            # `role-aggregate` is what the reference filters location prefixes by;
+            # `10.0.0.4/31` below stands for the site's non-aggregate prefixes,
+            # which must not reach the render payload.
+            "tags": [{"name": "role-aggregate"}, {"name": "mgmt"}],
         },
         {"prefix": "10.0.0.4/31"},
     ],
@@ -208,7 +211,9 @@ async def test_get_render_data_assembles_typed_sections():
     assert rd.location.location.kind == "Site" and rd.location.location.name == "DM-Akron"
     prefixes = rd.location.address_space.prefixes
     assert str(prefixes[0].prefix) == "10.0.0.0/24"
-    assert prefixes[0].role == "Loopback" and prefixes[0].tags == ("mgmt",)
+    assert prefixes[0].role == "Loopback" and prefixes[0].tags == ("role-aggregate", "mgmt")
+    # Only the aggregates: the untagged 10.0.0.4/31 in the fixture is excluded.
+    assert len(prefixes) == 1
     data_vlan = next(v for v in rd.location.address_space.vlans if v.vlan.vid == 100)
     assert tuple(str(h) for h in data_vlan.helper_addresses) == ("10.0.0.53",)
     assert rd.location.routing.site_asn == "65000"
