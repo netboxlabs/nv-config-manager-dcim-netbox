@@ -187,6 +187,13 @@ topology:
 # the simulation by the `simulation_name` in that file. Without it the CLI reads
 # $NVCM_AIR_CONFIG, then ~/.nvcm-air-sim.yaml, and looking up a name no running
 # sim has reports "No running simulation for ...".
+# NVCM ships a mock UFM (development/ufm_mock) but no way to deploy it: the
+# README's `make ufm-mock-up` target and inject-ufm-creds.sh are both absent.
+# This supplies both, and SIM=1 targets a DSX Air cluster over SSH.
+#   make ufm-mock-up SIM=1 CONFIG=air-superpod.yaml
+ufm-mock-up ufm-mock-down ufm-mock-state ufm-mock-reset:
+	scripts/ufm-mock.sh $(subst ufm-mock-,,$@) $(if $(SIM),--sim,) $(if $(CONFIG),-c $(CONFIG),)
+
 tunnel:
 	$(VENV)/bin/nvcm-netbox air tunnel $(if $(CONFIG),-c $(CONFIG),) \
 	  $(if $(PRINT),--print,) $(if $(BROWSER),--browser,) \

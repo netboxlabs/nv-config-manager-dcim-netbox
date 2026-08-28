@@ -346,6 +346,42 @@ def test_register_render_event_handlers_registers() -> None:
     assert "dcim.interface" in registry.registered
 
 
+def test_parameter_lists_match_the_sdk_protocol():
+    """Every method must take the SDK's own parameters, in order.
+
+    Return types were checked here but parameters were not, so a method could
+    silently omit one. `reconcile_spectrum_x_overlay_assignments` was missing
+    `device_interface_ids`; NVCM passed it positionally and the activity died
+    with
+
+        TypeError: ...() takes 5 positional arguments but 6 were given
+
+    after the workflow had already created assignments -- so the failure landed
+    mid-reconcile, not at startup.
+    """
+    import inspect
+
+    from nv_config_manager_dcim import api as sdk_api
+
+    from nv_config_manager_dcim_netbox.provider import NetBoxDCIMClient
+
+    mismatched = []
+    for name, protocol_method in inspect.getmembers(sdk_api.DCIMClient, inspect.isfunction):
+        if name.startswith("_"):
+            continue
+        ours = getattr(NetBoxDCIMClient, name, None)
+        if ours is None:
+            continue
+        expected = list(inspect.signature(protocol_method).parameters)
+        actual = list(inspect.signature(ours).parameters)
+        if expected != actual:
+            mismatched.append(f"{name}: SDK takes {expected}, we take {actual}")
+
+    assert not mismatched, "parameters diverge from the DCIM contract:\n  " + "\n  ".join(
+        mismatched
+    )
+
+
 def test_return_annotations_match_the_sdk_protocol():
     """Every method must declare the SDK's own return type.
 

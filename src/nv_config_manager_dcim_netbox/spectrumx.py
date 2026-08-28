@@ -261,34 +261,101 @@ class NetBoxSpectrumXMixin:
         return True
 
     async def reconcile_spectrum_x_overlay_assignments(
-        self, overlay_name: str, site: str, device_id: str, interface_ids: list[str]
+        self,
+        overlay_name: str | None,
+        site: str,
+        device_id: str,
+        interface_ids: list[str],
+        device_interface_ids: list[str],
     ) -> tuple[int, int]:
-        overlay = await self._find_overlay(overlay_name, site, scope_type=SITE_SCOPE_TYPE)
-        if not overlay:
-            raise DCIMInvalidDataError(f"Spectrum-X overlay {overlay_name!r} not found")
-        if overlay.get("isolation_type") != _SPECTRUMX_ISOLATION:
-            raise DCIMInvalidDataError(f"Overlay {overlay_name!r} is not a Spectrum-X overlay")
-        overlay_id = overlay["id"]
-        existing = await self._overlay_assignments(overlay_id)
-        present = {
-            (str(a.get("assigned_object_type")), str(a["assigned_object_id"])) for a in existing
+        """Make the device's Spectrum-X assignments match intent.
+
+        ``overlay_name`` of ``None`` means remove: the selected ports leave
+        whatever Spectrum-X overlay they are in and none is joined.
+
+        ``device_interface_ids`` is every interface on the device, not just the
+        selected ones. The device-level assignment is what carries the overlay's
+        VRF, so it may only be dropped once no interface still uses that overlay
+        -- which needs the whole device's state, and lets a retry clean up after
+        a partial attempt.
+        """
+        target_overlay_id: str | None = None
+        if overlay_name is not None:
+            overlay = await self._find_overlay(overlay_name, site, scope_type=SITE_SCOPE_TYPE)
+            if not overlay:
+                raise DCIMInvalidDataError(f"Spectrum-X overlay {overlay_name!r} not found")
+            if overlay.get("isolation_type") != _SPECTRUMX_ISOLATION:
+                raise DCIMInvalidDataError(f"Overlay {overlay_name!r} is not a Spectrum-X overlay")
+            target_overlay_id = str(overlay["id"])
+
+        created = 0
+        removed = 0
+        isolation_cache: dict[int, str | None] = {}
+
+        # One query per object; the device and its interfaces are independent.
+        selected = [str(i) for i in interface_ids]
+        every = list(dict.fromkeys([*selected, *(str(i) for i in device_interface_ids)]))
+        device_rows, *interface_rows = await asyncio.gather(
+            self.rest_list(self.ASSIGNMENTS_PATH, [("assigned_object_id", str(device_id))]),
+            *(self.rest_list(self.ASSIGNMENTS_PATH, [("assigned_object_id", i)]) for i in every),
+        )
+        by_interface = dict(zip(every, interface_rows, strict=True))
+
+        if target_overlay_id is not None:
+            if not any(
+                str(self._fk_id(r.get("overlay"))) == target_overlay_id
+                for r in device_rows
+                if str(r.get("assigned_object_type")) == "dcim.device"
+            ):
+                await self._create_overlay_assignment(target_overlay_id, "dcim.device", device_id)
+                created += 1
+            for interface_id in selected:
+                rows = by_interface.get(interface_id, [])
+                if not any(str(self._fk_id(r.get("overlay"))) == target_overlay_id for r in rows):
+                    await self._create_overlay_assignment(
+                        target_overlay_id, "dcim.interface", interface_id
+                    )
+                    created += 1
+                    rows.append({"id": "created", "overlay": target_overlay_id})
+
+        # Selected ports leave every other Spectrum-X overlay. With no target
+        # that is the whole operation.
+        stale = []
+        for interface_id in selected:
+            for row in by_interface.get(interface_id, []):
+                other = self._fk_id(row.get("overlay"))
+                if str(row.get("assigned_object_type")) != "dcim.interface":
+                    continue
+                if target_overlay_id is not None and str(other) == target_overlay_id:
+                    continue
+                if await self._overlay_isolation(other, isolation_cache) == _SPECTRUMX_ISOLATION:
+                    stale.append(row)
+        stale_ids = {str(r["id"]) for r in stale}
+        removed += len(await self._delete_assignments(stale))
+        for interface_id in selected:
+            by_interface[interface_id] = [
+                r for r in by_interface.get(interface_id, []) if str(r.get("id")) not in stale_ids
+            ]
+
+        # A device assignment survives only while some interface still uses it.
+        active = {
+            str(overlay)
+            for rows in by_interface.values()
+            for row in rows
+            if (overlay := self._fk_id(row.get("overlay"))) is not None
         }
-        missing: list[tuple[str, str]] = []
-        if ("dcim.device", str(device_id)) not in present:
-            missing.append(("dcim.device", device_id))
-        missing.extend(
-            ("dcim.interface", interface_id)
-            for interface_id in interface_ids
-            if ("dcim.interface", str(interface_id)) not in present
-        )
-        await asyncio.gather(
-            *(
-                self._create_overlay_assignment(overlay_id, object_type, object_id)
-                for object_type, object_id in missing
-            )
-        )
-        removed = await self._remove_stale_spx_interface_assignments(overlay_id, interface_ids)
-        return len(missing), removed
+        orphaned = []
+        for row in device_rows:
+            if str(row.get("assigned_object_type")) != "dcim.device":
+                continue
+            overlay = self._fk_id(row.get("overlay"))
+            if overlay is None or str(overlay) in active:
+                continue
+            if await self._overlay_isolation(overlay, isolation_cache) == _SPECTRUMX_ISOLATION:
+                orphaned.append(row)
+        removed += len(await self._delete_assignments(orphaned))
+
+        return created, removed
 
     # -- helpers -------------------------------------------------------------
 

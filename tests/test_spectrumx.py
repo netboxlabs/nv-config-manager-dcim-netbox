@@ -181,16 +181,25 @@ async def test_reconcile_creates_missing_assignments():
         overlay={"id": 10, "isolation_type": "spectrum_x_vrf"},
     )
 
-    async def no_stale(overlay_id, interface_ids):
-        return 0
-
-    client._remove_stale_spx_interface_assignments = no_stale
     created, removed = await client.reconcile_spectrum_x_overlay_assignments(
-        "nvcm-spx", "DM-Akron", "1", ["11", "12"]
+        "nvcm-spx", "DM-Akron", "1", ["11", "12"], ["11", "12", "13"]
     )
     assert (created, removed) == (3, 0)  # 1 device + 2 interfaces
     posts = [body for method, path, body in record if method == "POST" and path == _ASSIGN]
     assert len(posts) == 3
+
+
+async def test_reconcile_with_no_overlay_removes_and_creates_nothing():
+    """`overlay_name=None` is the remove case -- the form's "leave blank to remove"."""
+    record = []
+    client = _client(rest_list={_ASSIGN: []}, record=record)
+
+    created, removed = await client.reconcile_spectrum_x_overlay_assignments(
+        None, "DM-Akron", "1", ["11"], ["11"]
+    )
+
+    assert created == 0
+    assert not [m for m, path, _ in record if m == "POST" and path == _ASSIGN]
 
 
 async def test_provision_rollback_does_not_mask_the_original_failure():
