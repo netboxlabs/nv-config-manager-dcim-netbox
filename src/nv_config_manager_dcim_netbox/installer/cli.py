@@ -4,8 +4,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import shutil
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -541,6 +544,27 @@ def netbox_group() -> None:
     """Manage the NetBox side on its own."""
 
 
+@contextlib.contextmanager
+def _merged_blueprint(path: Path):
+    """Yield the blueprint with the shared `common/` defaults merged in.
+
+    NVCM's own context loader globs `common/*.yaml` into every context
+    (`mock_topology/context/__init__.py`), so a context that defines no
+    `global_defaults` of its own inherits them. Shipping the named directory
+    alone drops that: `superpod` then resolves no default tenant and the loader
+    skips its IB PKey overlays. A context's own file wins on a name clash.
+    """
+    common = path.parent / "common"
+    if not common.is_dir():
+        yield path
+        return
+    with tempfile.TemporaryDirectory(prefix="nvcm-blueprint-") as tmp:
+        merged = Path(tmp) / path.name
+        shutil.copytree(common, merged)
+        shutil.copytree(path, merged, dirs_exist_ok=True)
+        yield merged
+
+
 @netbox_group.command("load-topology")
 @click.option(
     "--blueprint",
@@ -579,9 +603,10 @@ def load_topology(
             )
 
     click.echo(f"Loading {path.name} into NetBox ...")
-    output = cluster.load_topology(
-        str(path), namespace, deployment_name=deployment_name or path.name
-    )
+    with _merged_blueprint(path) as merged:
+        output = cluster.load_topology(
+            str(merged), namespace, deployment_name=deployment_name or path.name
+        )
     click.echo(output.strip() or "done")
     click.secho(f"Loaded {path.name}.", fg="green")
 

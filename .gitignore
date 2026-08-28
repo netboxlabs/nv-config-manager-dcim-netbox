@@ -36,6 +36,7 @@ netbox-provider.toml
 # ignores the working copies written next to it.
 /air-trial.yaml
 /air-superpod.yaml
+/air-ib.yaml
 /nvcm-air-sim.yaml
 /.nvcm-air-sim.yaml
 rd.json
