@@ -68,6 +68,7 @@ async def test_list_devices_requires_primary_ip_and_maps_every_filter():
         )
     )
     params = params_for(queries, _DEVICES)
+    # Parity: hardcoded in the reference provider's ListDeviceSelections query.
     assert ("has_primary_ip", "true") in params
     for expected in (
         ("site", "dc1"),

@@ -48,3 +48,8 @@ generated/
 
 # Working notes on upstream issues, not part of the deliverable.
 /NVIDIA.md
+
+# Parity captures. The Nautobot corpus is the golden reference and IS committed;
+# the NetBox side is regenerated on every run, as are the pulled artifacts.
+parity/corpus/*/netbox/
+parity/artifacts/

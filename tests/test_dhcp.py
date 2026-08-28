@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import pytest
+from nv_config_manager_dcim import DCIMInvalidDataError
 
 from nv_config_manager_dcim_netbox.fabric_common import STATUS_PATH
 from tests._fake import fake_client
@@ -153,6 +154,77 @@ async def test_get_dhcp_auto_subnets_resolves_interface_reservation():
     # device_id is the NetBox pk the confgen's ZTP boot-file URL resolves against
     # in the config-store.
     assert reservations[0]["device_id"] == "2"
+
+
+async def test_a_reservation_without_mac_or_serial_is_rejected():
+    """Parity with the reference provider: a dhcp-reserve IP whose interface has
+    no MAC and whose device has no serial is invalid data, because kea has no
+    identifier to key the host reservation on.
+
+    Real case: the superpod blueprint's UFM appliances carry an eth0 address but
+    no MAC and an empty serial, and eth0 is tagged dhcp-reserve. Passing the
+    entry through instead crash-looped dhcp-refresh inside NVCM's config
+    generator, which named the generator rather than the DCIM.
+    """
+    reserve_ip = {
+        "address": "192.0.2.39/24",
+        "assigned_object_type": "dcim.interface",
+        "assigned_object": {"id": 11},
+        "_tags": ["dhcp-reserve"],
+    }
+    client = fake_client(
+        rest_list={
+            "ipam/prefixes/": [
+                {
+                    "id": 1,
+                    "prefix": "192.0.2.0/24",
+                    "family": {"value": 4},
+                    "custom_fields": {"nvcm_gateway": {"address": "192.0.2.1/24"}},
+                }
+            ],
+            "ipam/ip-addresses/": [reserve_ip],
+            "plugins/nv-config-manager/device-config-statuses/": [],
+        },
+        rest_get={
+            "dcim/interfaces/11/": {"id": 11, "name": "eth0", "device": {"id": 2}},
+            "dcim/devices/2/": {"id": 2, "name": "ufm-02", "serial": ""},
+        },
+    )
+    with pytest.raises(DCIMInvalidDataError) as caught:
+        await client.get_dhcp_auto_subnets()
+    assert "eth0" in str(caught.value)
+    assert "192.0.2.39" in str(caught.value)
+
+
+async def test_an_option_candidate_without_mac_or_serial_is_skipped():
+    """The same missing identity on a dhcp-pool IP is skipped, not an error --
+    also matching the reference provider, which only raises for reservations."""
+    pool_ip = {
+        "address": "192.0.2.40/24",
+        "assigned_object_type": "dcim.interface",
+        "assigned_object": {"id": 12},
+        "_tags": ["dhcp-pool"],
+    }
+    client = fake_client(
+        rest_list={
+            "ipam/prefixes/": [
+                {
+                    "id": 1,
+                    "prefix": "192.0.2.0/24",
+                    "family": {"value": 4},
+                    "custom_fields": {"nvcm_gateway": {"address": "192.0.2.1/24"}},
+                }
+            ],
+            "ipam/ip-addresses/": [pool_ip],
+            "plugins/nv-config-manager/device-config-statuses/": [],
+        },
+        rest_get={
+            "dcim/interfaces/12/": {"id": 12, "name": "swp1", "device": {"id": 2}},
+            "dcim/devices/2/": {"id": 2, "name": "gpu-01", "serial": ""},
+        },
+    )
+    subnets = await client.get_dhcp_auto_subnets()
+    assert subnets[0]["option_candidates"] == []
 
 
 async def test_get_dhcp_auto_subnets_builds_option_candidate_from_pool_ip():

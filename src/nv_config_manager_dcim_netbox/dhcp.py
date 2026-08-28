@@ -432,9 +432,10 @@ class NetBoxDHCPMixin:
 
         Both kinds share their eligibility rules, matching the reference DCIM
         provider: the IP must resolve to a device, ZTP must not be *explicitly*
-        disabled, and the aggregate-managed flag must match. ``require_identity``
-        adds the option-candidate rule that the interface carry a MAC or the device
-        a serial. Returns ``None`` when the IP is not eligible.
+        disabled, and the aggregate-managed flag must match. Both also need a MAC
+        or a serial, but disagree on what its absence means -- ``require_identity``
+        marks the option-candidate path, which skips; a reservation raises.
+        Returns ``None`` when the IP is not eligible.
         """
         resolved = await self._resolve_interface_ip(ip, device_cache, interface_cache, status_cache)
         if resolved is None:
@@ -447,6 +448,16 @@ class NetBoxDHCPMixin:
             return None
         if not self._aggregate_matches(status, is_aggregate_managed):
             return None
-        if require_identity and not interface.get("mac_address") and not device.get("serial"):
-            return None
+        if not interface.get("mac_address") and not device.get("serial"):
+            if require_identity:
+                # An option candidate with no addressable identity is skipped.
+                return None
+            # A reservation with none is invalid data -- kea has nothing to key
+            # the host on. The reference provider raises here rather than letting
+            # the config generator fail further downstream, where the error names
+            # the generator instead of the DCIM.
+            raise DCIMInvalidDataError(
+                f"Interface {interface.get('name')} on IP {ip.get('address')} has no MAC "
+                "address or serial number"
+            )
         return self._entry_dict(interface, device, address, device_id)

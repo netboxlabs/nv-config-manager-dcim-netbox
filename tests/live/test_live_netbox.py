@@ -39,7 +39,8 @@ def test_selection_returns_the_addressable_blueprint_devices(trial_devices):
 
 
 def test_selection_applies_has_primary_ip(trial_devices):
-    # list_devices always sends has_primary_ip=true. The blueprint's
+    # list_devices always sends has_primary_ip=true, matching the filter the
+    # reference provider hardcodes in ListDeviceSelections. The blueprint's
     # oob-mgmt-server has none, so it must not come back -- if it does, the
     # filter stopped being applied or NetBox renamed it.
     assert "oob-mgmt-server" not in trial_devices

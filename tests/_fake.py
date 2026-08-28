@@ -29,7 +29,8 @@ def fake_client(
     * ``gql`` — dict returned by ``graphql_query`` (single canned payload).
     * ``rest_list`` — ``{path: [rows]}`` for ``rest_list``; rows are filtered by
       the ``assigned_object_id`` query param when present (so per-object lookups
-      like IB assignment resolution behave faithfully).
+      like IB assignment resolution behave faithfully), and by ``tag`` when a row
+      declares ``_tags``.
     * ``rest_get`` — ``{path: obj}`` returned by ``rest_request('GET', path)``.
     * ``post`` — ``{path: obj}`` returned by non-GET ``rest_request`` (default
       ``{'id': 99}``) so ``["id"]`` reads on create succeed.
@@ -56,6 +57,16 @@ def fake_client(
         wanted = {str(value) for key, value in params or [] if key == "assigned_object_id"}
         if wanted:
             rows = [r for r in rows if str(r.get("assigned_object_id")) in wanted]
+        # A row may declare `_tags` to answer only the matching tag query; rows
+        # without it answer every one, which is what most fixtures want. The DHCP
+        # reads issue three tag queries against one path and need to differ.
+        tags = {str(value) for key, value in params or [] if key == "tag"}
+        if tags:
+            rows = [
+                {k: v for k, v in r.items() if k != "_tags"}
+                for r in rows
+                if "_tags" not in r or tags & set(r["_tags"])
+            ]
         return rows
 
     async def _rest_request(method, path, **kwargs):
