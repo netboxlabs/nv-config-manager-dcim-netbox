@@ -151,10 +151,9 @@ class NetBoxInventoryMixin:
         # Every value is coerced to str: aiohttp requires string query params (see
         # ``rest_request``), and the SDK's filter fields are only str by convention.
         #
-        # has_primary_ip is not an SDK filter field; it is hardcoded in the
-        # reference provider's own selection query (dcim-nautobot-2x,
-        # graphql/provider/parameters.graphql, `ListDeviceSelections`), so
-        # dropping it here would return devices its pickers never offer.
+        # Not an SDK filter field, but hardcoded in the reference's own
+        # `ListDeviceSelections` query -- dropping it offers devices its pickers
+        # never show.
         params: list[tuple[str, str]] = [("has_primary_ip", "true")]
         for key, values in (
             ("site", filters.sites),

@@ -430,12 +430,11 @@ class NetBoxDHCPMixin:
     ) -> dict | None:
         """Build one reservation / option-candidate entry for an interface-assigned IP.
 
-        Both kinds share their eligibility rules, matching the reference DCIM
-        provider: the IP must resolve to a device, ZTP must not be *explicitly*
-        disabled, and the aggregate-managed flag must match. Both also need a MAC
-        or a serial, but disagree on what its absence means -- ``require_identity``
-        marks the option-candidate path, which skips; a reservation raises.
-        Returns ``None`` when the IP is not eligible.
+        Shared eligibility, matching the reference: the IP must resolve to a
+        device, ZTP must not be *explicitly* disabled, and the aggregate-managed
+        flag must match. Both need a MAC or serial; ``require_identity`` marks the
+        option-candidate path, which skips where a reservation raises. ``None``
+        when the IP is not eligible.
         """
         resolved = await self._resolve_interface_ip(ip, device_cache, interface_cache, status_cache)
         if resolved is None:
@@ -452,10 +451,8 @@ class NetBoxDHCPMixin:
             if require_identity:
                 # An option candidate with no addressable identity is skipped.
                 return None
-            # A reservation with none is invalid data -- kea has nothing to key
-            # the host on. The reference provider raises here rather than letting
-            # the config generator fail further downstream, where the error names
-            # the generator instead of the DCIM.
+            # Invalid data: kea has nothing to key the host on. The reference
+            # raises here rather than letting the config generator fail later.
             raise DCIMInvalidDataError(
                 f"Interface {interface.get('name')} on IP {ip.get('address')} has no MAC "
                 "address or serial number"

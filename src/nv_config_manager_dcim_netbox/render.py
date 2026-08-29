@@ -1022,9 +1022,8 @@ class NetBoxRenderMixin:
         if prefixes is None:
             prefixes = await self._safe_list(PREFIXES_PATH, [("site_id", site_id)])
         # The reference scopes this to the aggregates
-        # (`prefixes(tags: "role-aggregate", location: $location)`), and the
-        # consuming template only looks at those. Unfiltered, superpod put all 164
-        # site prefixes into every device's render payload instead of 12.
+        # (`prefixes(tags: "role-aggregate", location: $location)`); unfiltered,
+        # superpod put 164 prefixes in every render payload instead of 12.
         prefixes = [p for p in prefixes if _AGGREGATE_TAG in _tags(p)]
         vlans = await self._safe_list(VLANS_PATH, [("site_id", site_id)])
         render_prefixes = tuple(
