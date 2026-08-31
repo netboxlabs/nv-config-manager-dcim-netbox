@@ -223,10 +223,10 @@ class FabricCommonMixin:
 
         The pk is the contract -- NVCM round-trips the id ``list_locations`` gave
         out, and NetBox anchors the Overlay on a GFK, so it is resolved to a row
-        here. Slug and name are also accepted, for ``cf_nvcm_site`` (which stores
-        the slug) and for a Location named rather than selected.
+        here. Slug and name are also accepted, for a Location named rather than
+        selected.
 
-        Returns the row so one lookup yields both ``scope_id`` and the slug.
+        Returns the row, so one lookup serves both ``scope_id`` and ``cf_nvcm_site``.
         """
         if value is None or value == "":
             return None
@@ -255,15 +255,14 @@ class FabricCommonMixin:
         return found
 
     async def _site_field_value(self, site: str) -> str:
-        """Normalize a site selection to what ``cf_nvcm_site`` stores: the slug.
+        """Normalize a site selection to what ``cf_nvcm_site`` stores: the Site pk.
 
-        The plugin's loader seeds namespace zones with ``site.slug``, so a filter
-        has to use the slug too. NVCM sends the pk from ``list_locations``; a value
-        that resolves to no Site is passed through unchanged, since a caller
-        filtering on an unknown site should get no rows rather than an error.
+        NVCM sends a pk, name or slug depending on the caller. A value resolving to
+        no Site is passed through unchanged, so filtering on an unknown site
+        returns no rows rather than raising.
         """
         row = await self._resolve_scope(site, scope_type=SITE_SCOPE_TYPE)
-        return str(row["slug"]) if row else str(site)
+        return str(row["id"]) if row else str(site)
 
     async def _resolve_any_scope(self, value: str | int | None) -> tuple[str | None, dict | None]:
         """Resolve a value to ``(scope_type, row)`` when the model is not known.

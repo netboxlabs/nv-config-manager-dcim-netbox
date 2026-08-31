@@ -94,7 +94,7 @@ async def test_resolve_scope_looks_only_in_the_model_the_caller_named():
 
 
 async def test_resolve_scope_takes_a_slug_or_a_name():
-    # cf_nvcm_site stores the slug, and the InfiniBand anchor may be named.
+    # cf_nvcm_site stores the Site pk, and the InfiniBand anchor may be named.
     client = _client(sites=[{"id": 7, "name": "SPO01", "slug": "spo01"}])
     try:
         assert (await client._resolve_scope("spo01", scope_type=SITE_SCOPE_TYPE))["id"] == 7
@@ -144,15 +144,17 @@ async def test_resolve_any_scope_is_only_for_callers_that_cannot_know():
 # -- cf_nvcm_site --------------------------------------------------------------
 
 
-async def test_site_field_value_normalizes_a_pk_to_the_slug():
-    """``cf_nvcm_site`` holds the Site slug -- what the plugin's loader seeds.
+async def test_site_field_value_normalizes_any_selector_to_the_site_pk():
+    """``cf_nvcm_site`` is an object field, so it holds the Site pk.
 
-    NVCM sends the pk from list_locations, which matches no namespace zone.
+    NVCM sends a pk, name or slug depending on the caller; all three must reach
+    the same value the plugin's loader seeds.
     """
     client = _client(sites=[{"id": 1, "name": "SPO01", "slug": "spo01"}])
     try:
-        assert await client._site_field_value("1") == "spo01"
-        assert await client._site_field_value("spo01") == "spo01"
+        assert await client._site_field_value("1") == "1"
+        assert await client._site_field_value("spo01") == "1"
+        assert await client._site_field_value("SPO01") == "1"
     finally:
         await client.close()
 

@@ -29,7 +29,12 @@ _VRFS = "ipam/vrfs/"
 _DEVICE = "dcim/devices/1/"
 
 
-def _spx_client(*, gql=None, rest_list=None, record=None, overlay="unset", tenant=7, location=3):
+SITE_PK = 3  # the stub Site's pk, and so the value cf_nvcm_site carries
+
+
+def _spx_client(
+    *, gql=None, rest_list=None, record=None, overlay="unset", tenant=7, location=SITE_PK
+):
     patch = {}
     if overlay != "unset":
 
@@ -42,10 +47,9 @@ def _spx_client(*, gql=None, rest_list=None, record=None, overlay="unset", tenan
         return tenant
 
     async def fake_resolve_scope(value, *, scope_type):
-        # ``location`` is the scope pk. The slug is derived from the value the
-        # way NetBox relates the two, so the round-trip these tests check --
-        # what provision writes to cf_nvcm_site is what the RD allocator
-        # filters on -- is exercised rather than hidden behind a constant.
+        # ``location`` is the scope pk, and cf_nvcm_site is an object field, so
+        # that pk is also what provision writes and the RD allocator filters on.
+        # Derived rather than constant so the round-trip is exercised.
         return {
             "id": location,
             "name": str(value),
@@ -116,7 +120,7 @@ async def test_provision_fans_out_per_namespace_and_tags_vrf():
     assert {t["name"] for b in tag_patches for t in b["tags"]} == {"ns1", "ns2", "spectrumx"}
     assert all({t["name"] for t in b["tags"]} >= {"spectrumx"} for b in tag_patches)
     # And scoped to the site, the other half of that read's filter.
-    assert all(b["custom_fields"] == {"nvcm_site": "rack-1"} for b in vrf_posts)
+    assert all(b["custom_fields"] == {"nvcm_site": SITE_PK} for b in vrf_posts)
 
 
 async def test_provisioned_vrf_is_visible_to_the_rd_allocator():
@@ -151,11 +155,14 @@ async def test_provisioned_vrf_is_visible_to_the_rd_allocator():
     async def rest_list(path, params=None, **kwargs):
         seen_params.extend(params or [])
         site = dict(params or []).get("cf_nvcm_site")
-        return [written] if site == written["custom_fields"]["nvcm_site"] else []
+        # An object field filters through MultiValueNumberFilter, so NetBox coerces
+        # the query param; compare as strings rather than str-vs-int.
+        stored = written["custom_fields"]["nvcm_site"]
+        return [written] if site is not None and str(site) == str(stored) else []
 
     client.rest_list = rest_list
     result = await client.get_namespace_route_distinguishers("dm-akron", "spectrumx")
-    assert ("cf_nvcm_site", "dm-akron") in seen_params
+    assert ("cf_nvcm_site", str(SITE_PK)) in seen_params
     assert {r.namespace_id: r.route_distinguishers for r in result} == {"ns1": ("65001:3",)}
 
 

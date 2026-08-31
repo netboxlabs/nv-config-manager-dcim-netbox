@@ -223,7 +223,7 @@ class NetBoxReferenceMixin:
         field: when ``location`` is omitted no scoping is applied, and where the
         field is undefined the query is simply unconstrained.
 
-        Resolved to the Site slug first, which is what that field holds. See
+        Resolved to the Site pk first, which is what that field holds. See
         :meth:`_site_field_value`.
         """
         params: list[tuple[str, str]] = []

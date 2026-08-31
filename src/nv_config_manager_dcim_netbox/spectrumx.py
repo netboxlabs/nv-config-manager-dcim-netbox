@@ -136,13 +136,12 @@ class NetBoxSpectrumXMixin:
         created: list[tuple[str, int]] = []
 
         # Resolved once, and before the overlay lookup so an unknown site is
-        # reported whether or not the overlay already exists. The row carries both
-        # things needed below: the pk for the overlay's scope, and the slug for the
-        # VRFs' cf_nvcm_site.
+        # reported whether or not the overlay already exists. The pk serves both the
+        # overlay's scope and the VRFs' cf_nvcm_site.
         site_row = await self._resolve_scope(site, scope_type=SITE_SCOPE_TYPE)
         if site_row is None:
             raise DCIMInvalidDataError(f"NetBox has no Site {site!r} for the Spectrum-X overlay")
-        site_slug = site_row["slug"]
+        site_pk = site_row["id"]
 
         overlay = await self._find_overlay(overlay_name, site, scope_type=SITE_SCOPE_TYPE)
         if overlay:
@@ -182,11 +181,9 @@ class NetBoxSpectrumXMixin:
                         "name": vrf_name,
                         "rd": route_distinguisher,
                         "tenant": tenant_id,
-                        # The Site *slug*, which is what the plugin's loader seeds on
-                        # namespace zones and what get_namespace_route_distinguishers
-                        # filters cf_nvcm_site by. Writing the raw incoming value
-                        # would store a pk here and never match those zones.
-                        "custom_fields": {_SITE_FIELD: site_slug},
+                        # An object field: the Site pk, matching what the plugin's
+                        # loader seeds on namespace zones.
+                        "custom_fields": {_SITE_FIELD: site_pk},
                     },
                 )
                 created.append((VRFS_PATH, vrf["id"]))

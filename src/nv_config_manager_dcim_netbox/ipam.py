@@ -99,7 +99,7 @@ class NetBoxIPAMMixin:
         (when defined) to keep multi-site deployments from drawing candidates
         across sites.
 
-        ``site`` is resolved to the Site slug first: that is what ``cf_nvcm_site``
+        ``site`` is resolved to the Site pk first: that is what ``cf_nvcm_site``
         holds, while NVCM sends the pk from ``list_locations``.
         """
         params: list[tuple[str, str]] = []

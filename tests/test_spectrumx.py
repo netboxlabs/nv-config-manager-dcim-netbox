@@ -132,14 +132,15 @@ async def test_provision_spectrum_x_vrf_creates_overlay_vrf_assignment_vxlan():
     assert posts[_OVERLAYS]["name"] == "SpX"
     assert posts[_OVERLAYS]["scope_type"] == "dcim.site" and posts[_OVERLAYS]["scope_id"] == 3
     assert posts[_OVERLAYS]["tenant"] == 7
-    # nvcm_site is the *resolved* Site slug, not the value NVCM passed in: that is
+    # nvcm_site is the *resolved* Site pk, not the value NVCM passed in: that is
     # what the plugin's loader seeds on namespace zones, and what the RD allocator
-    # filters on. Here `site="rack-1"` resolves to the stub Site slugged "spo01".
+    # filters on. Here `site="rack-1"` resolves to the stub Site with pk 3, the
+    # same pk the overlay is scoped on above.
     assert posts["ipam/vrfs/"] == {
         "name": "SpXTenant1500",
         "rd": "65001:1500",
         "tenant": 7,
-        "custom_fields": {"nvcm_site": "spo01"},
+        "custom_fields": {"nvcm_site": 3},
     }
     assert posts[_ASSIGN]["assigned_object_type"] == "ipam.vrf"
     assert posts[_VXLANS]["vnid"] == 1500 and posts[_VXLANS]["name"] == "SpXTenant1500"
