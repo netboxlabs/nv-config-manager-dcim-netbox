@@ -21,6 +21,7 @@ from nv_config_manager_dcim import RenderEventRequest
 from nv_config_manager_dcim_netbox._mappers import fk_id as _fk_id
 from nv_config_manager_dcim_netbox.client import is_netbox_pk
 from nv_config_manager_dcim_netbox.fabric_common import (
+    BGP_ASN_FIELD,
     BGP_SESSIONS_PATH,
     DEVICES_PATH,
     INTERFACES_PATH,
@@ -181,15 +182,29 @@ async def _prefix_devices(event, client):
 
 
 async def _bgp_asn_devices(event, client):
-    # An ASN change arrives as ``ipam.asn`` and must re-render every device whose
-    # BGP session references it. local_as_id and remote_as_id AND when combined, so
-    # query each separately and union the owners.
+    # An ASN change arrives as ``ipam.asn`` and must re-render every device using
+    # it. local_as_id and remote_as_id AND when combined, so query each separately
+    # and union the owners.
+    #
+    # Sessions alone are not enough: they only cover devices that peer with
+    # someone, so a spine holding an ASN and no sessions would never re-render.
+    # The device's own ASN lives in a custom field for exactly this reason -- it
+    # is also in config context, which is computed and cannot be filtered.
     asn_id = str(event.object_id)
-    local, remote = await asyncio.gather(
+    local, remote, owners = await asyncio.gather(
         client.rest_list(BGP_SESSIONS_PATH, [("local_as_id", asn_id)]),
         client.rest_list(BGP_SESSIONS_PATH, [("remote_as_id", asn_id)]),
+        client.rest_list(DEVICES_PATH, [(f"cf_{BGP_ASN_FIELD}", asn_id)]),
     )
-    return {_fk_id(session.get("device")) for session in (*local, *remote)}
+    # NetBox drops an unknown query param rather than rejecting it, so before the
+    # bootstrap creates the field this filter matches the whole fabric. Re-checking
+    # the value degrades that to the session-only answer instead of a fleet-wide
+    # render burst.
+    return {_fk_id(session.get("device")) for session in (*local, *remote)} | {
+        device.get("id")
+        for device in owners
+        if str(_fk_id((device.get("custom_fields") or {}).get(BGP_ASN_FIELD))) == asn_id
+    }
 
 
 async def _bgp_peer_group_devices(event, client):

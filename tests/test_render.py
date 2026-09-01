@@ -48,8 +48,8 @@ _DEVICE = {
             "description": "uplink",
             "mac_addresses": [{"mac_address": "aa:bb:cc:00:00:01"}],
             "vrf": {"name": "Tenant-A", "rd": "65000:1"},
-            "untagged_vlan": {"vid": 100, "name": "Data"},
-            "tagged_vlans": [{"vid": 200, "name": "Voice"}],
+            "untagged_vlan": {"id": "100", "vid": 100, "name": "Data"},
+            "tagged_vlans": [{"id": "200", "vid": 200, "name": "Voice"}],
             "ip_addresses": [{"address": "10.0.0.5/31", "role": None}],
             "tags": [{"name": "uplink"}],
         },
@@ -72,8 +72,22 @@ _REST_MAP = {
             "status": {"value": "active"},
             "local_as": {"asn": 65000},
             "remote_as": {"asn": 65001},
-            "remote_address": {"address": "10.0.0.4/31"},
+            "remote_address": {"id": 40, "address": "10.0.0.4/31"},
             "peer_group": {"name": "underlay"},
+        }
+    ],
+    # The remote address identifies the peer: netbox-bgp records the session's far
+    # side as an address, and the interface holding it names the device.
+    "ipam/ip-addresses/": [
+        {
+            "id": 40,
+            "address": "10.0.0.4/31",
+            "assigned_object_type": "dcim.interface",
+            "assigned_object": {
+                "id": 41,
+                "name": "Ethernet1",
+                "device": {"id": 42, "name": "spine-01"},
+            },
         }
     ],
     "plugins/nv-config-manager/overlay-assignments/": [
@@ -586,6 +600,32 @@ async def test_l2_vni_vrfs_excludes_interface_only_overlays():
     assert rd.device.overlays.l2_vni_vrfs == ()
 
 
+async def test_l2_vnis_include_attached_vlans_whose_overlay_is_unassigned():
+    """The reference admits an L2 VNI on overlay assignment *or* VLAN attachment.
+
+    Assignment alone drops a VLAN trunked to a port whose overlay was never
+    assigned, and ``vni_mappings`` raises on the first VLAN it cannot resolve.
+    """
+    rest = copy.deepcopy(_REST_MAP)
+    # VLAN 200 is tagged on swp1; overlay #77 is assigned to nothing on this device.
+    rest["plugins/nv-config-manager/vxlans/"].append(
+        {"id": 8, "vnid": 10030, "vni_type": "l2", "vlan": 200, "overlay": 77}
+    )
+    rest["plugins/nv-config-manager/overlays/"].append({"id": 77, "name": "green"})
+    client = _client_with(_DEVICE, rest)
+    try:
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+    by_vid = {v.vlan.vid: v for v in rd.device.overlays.l2_vnis}
+    assert by_vid[200].vni == 10030 and by_vid[200].overlay_name == "green"
+    # Overlay #77 also carries an L3 VNI for VRF 9, which this device does not have.
+    assert [v.vrf.name for v in rd.device.overlays.l3_vnis] == ["Tenant-A"]
+    # ...nor make the device carry that overlay's VRF, which it was never assigned.
+    assert [v.name for v in rd.device.overlays.l2_vni_vrfs] == ["blue"]
+
+
 async def test_peer_groups_are_scoped_to_the_ids_the_sessions_reference():
     # Unfiltered, this paginated the whole fabric's peer-group table per render.
     rest = copy.deepcopy(_REST_MAP)
@@ -617,6 +657,9 @@ async def test_peer_groups_are_scoped_to_the_ids_the_sessions_reference():
 async def test_no_peer_group_read_when_no_session_references_one():
     rest = copy.deepcopy(_REST_MAP)
     rest["plugins/bgp/session/"][0].pop("peer_group", None)
+    # With no peer group of its own, the session falls back to the peer's role,
+    # which no brief serializer carries -- hence the devices read.
+    rest["dcim/devices/"] = [{"id": 42, "name": "spine-01", "role": {"name": "Spine"}}]
     client = create_dcim_client("netbox", _SETTINGS)
 
     async def fake_rest_list(path, params=None):
@@ -630,9 +673,11 @@ async def test_no_peer_group_read_when_no_session_references_one():
     client.graphql_query = fake_graphql
     client.rest_list = fake_rest_list
     try:
-        await client.get_render_data(RenderDataRequest(device_id="1"))
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
     finally:
         await client.close()
+
+    assert rd.device.routing.bgp_instances[0].peers[0].peer_group == "SPINE"
 
 
 async def test_topology_device_in_both_lists_is_fetched_once_and_appears_in_both():

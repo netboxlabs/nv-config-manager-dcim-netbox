@@ -138,6 +138,110 @@ def test_bgp_instances_tolerates_missing_remote_address():
     assert peer.peer_ipv4 is None and peer.peer_ipv6 is None and peer.asn == "65001"
 
 
+# The session names neither interface nor VRF. The local address is on this
+# device, so the interface holding it gives the source VRF; the remote address is
+# on the peer, so resolving it names the neighbour.
+_BGP_INTERFACES = [
+    {"name": "lo", "vrf": None, "ip_addresses": [{"address": "10.78.151.224/32"}]},
+    {
+        "name": "swp21s0",
+        "vrf": {"name": "EXIT", "rd": "*:4000"},
+        "ip_addresses": [{"address": "10.76.245.73/31"}],
+    },
+]
+
+_BGP_PEER_ENDPOINTS = {
+    "9": {
+        "interface_name": "Ethernet49",
+        "device_name": "example-wan-2",
+        "device_role": "TAN-BBR",
+    }
+}
+
+_BGP_SESSION = {
+    "id": 1,
+    "name": "oobspine-example-wan-2",
+    "status": {"value": "active", "label": "Active"},
+    "local_as": {"asn": 4265355097},
+    "remote_as": {"asn": 4265355123},
+    "local_address": {"id": 8, "address": "10.76.245.73/31"},
+    "remote_address": {"id": 9, "address": "10.76.245.72/31"},
+}
+
+
+def test_bgp_peer_identity_derived_from_the_remote_address():
+    (instance,) = _bgp_instances([_BGP_SESSION], _BGP_INTERFACES, "lo", None, _BGP_PEER_ENDPOINTS)
+    peer = instance.peers[0]
+    assert (peer.name, peer.description) == ("example-wan-2", "example-wan-2")
+    assert peer.source_interface == "Ethernet49"
+    # The VRF is the *local* address's interface, not the peer's.
+    assert peer.source_vrf == "EXIT"
+    # No peer group on the session, so the peer device's role names it.
+    assert (peer.peer_role, peer.peer_group) == ("TAN-BBR", "TAN-BBR")
+    assert (peer.status, instance.status) == ("Active", "Active")
+
+
+def test_bgp_peer_identity_survives_an_uncabled_source_interface():
+    """An iBGP/EVPN session is sourced from a loopback, which has no cable to follow.
+
+    Deriving the neighbour from cabling leaves ``peer_group`` blank here, and the
+    default-VRF template writes it out unguarded.
+    """
+    session = {
+        **_BGP_SESSION,
+        "local_address": {"id": 8, "address": "10.78.151.224/32"},
+    }
+    (instance,) = _bgp_instances([session], _BGP_INTERFACES, "lo", None, _BGP_PEER_ENDPOINTS)
+    peer = instance.peers[0]
+    assert (peer.name, peer.peer_group) == ("example-wan-2", "TAN-BBR")
+    assert (peer.source_vrf, instance.vrfs) == ("default", ("default",))
+
+
+def test_bgp_instance_vrfs_span_router_id_and_peer_vrfs():
+    """``bgp_routing_instance()`` selects by VRF: omit one and its neighbour vanishes."""
+    (instance,) = _bgp_instances([_BGP_SESSION], _BGP_INTERFACES, "lo", None, _BGP_PEER_ENDPOINTS)
+    assert instance.vrfs == ("EXIT", "default")
+
+
+def test_bgp_session_peer_group_wins_over_the_peer_role():
+    session = {**_BGP_SESSION, "peer_group": {"id": 3, "name": "underlay"}}
+    (instance,) = _bgp_instances([session], _BGP_INTERFACES, "lo", None, _BGP_PEER_ENDPOINTS)
+    assert instance.peers[0].peer_group == "underlay"
+
+
+def test_bgp_unidentifiable_peer_without_a_peer_group_raises():
+    """A blank peer_group renders ``peer-group:`` with no value -- invalid, not partial."""
+    with pytest.raises(DCIMInvalidDataError, match="assigned to no interface"):
+        _bgp_instances([_BGP_SESSION], _BGP_INTERFACES, "lo", None, {})
+
+
+def test_bgp_unidentifiable_peer_named_by_its_own_peer_group_still_renders():
+    """Narrower than the reference, which requires the peer endpoint unconditionally."""
+    session = {**_BGP_SESSION, "peer_group": {"id": 3, "name": "underlay"}}
+    (instance,) = _bgp_instances([session], _BGP_INTERFACES, "lo", None, {})
+    peer = instance.peers[0]
+    assert (peer.peer_group, peer.peer_role) == ("underlay", "")
+    assert peer.name == "oobspine-example-wan-2" and peer.source_interface is None
+
+
+def test_peerless_device_asn_still_reports_a_routing_instance():
+    """netbox-bgp has no per-device instance object; the contract (and Nautobot) do.
+
+    Without this, a device that has an ASN and peers with nobody reports no BGP at
+    all, and only the ``bgp_routing_instance()`` fallback keeps its render honest.
+    """
+    (instance,) = _bgp_instances([], _BGP_INTERFACES, "lo", None, None, "4230000001")
+    assert (instance.asn, instance.status) == ("4230000001", "Active")
+    assert (instance.router_id_interface, instance.vrfs, instance.peers) == ("lo", ("default",), ())
+
+
+def test_device_asn_does_not_duplicate_an_instance_a_session_already_carries():
+    instances = _bgp_instances(
+        [_BGP_SESSION], _BGP_INTERFACES, "lo", None, _BGP_PEER_ENDPOINTS, "4265355097"
+    )
+    assert len(instances) == 1 and len(instances[0].peers) == 1
+
+
 def test_bgp_instances_group_by_local_asn():
     instances = _bgp_instances(
         [

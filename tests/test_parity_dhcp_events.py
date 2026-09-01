@@ -247,19 +247,39 @@ def _event(object_type, object_id, operation="update"):
     )
 
 
-async def test_asn_change_fans_out_to_local_and_remote_sessions():
+async def test_asn_change_fans_out_to_sessions_and_to_the_devices_holding_it():
     # A session references an ASN as local_as OR remote_as; both are queried and
-    # the owning devices unioned.
+    # the owning devices unioned. Sessions alone miss a device that holds the ASN
+    # and peers with nobody, so its own cf_nvcm_bgp_asn is queried too.
     client = _BGPSessionClient(
         {
             ("local_as_id", "7"): [{"device": {"id": 1}}],
             ("remote_as_id", "7"): [{"device": {"id": 2}}, {"device": {"id": 1}}],
+            ("cf_nvcm_bgp_asn", "7"): [
+                {"id": 3, "custom_fields": {"nvcm_bgp_asn": {"id": 7}}},
+                {"id": 1, "custom_fields": {"nvcm_bgp_asn": 7}},
+            ],
         }
     )
     requests = await _HANDLERS["ipam.asn"](_event("ipam.asn", "7"), client)
-    assert sorted(r.device_id for r in requests) == ["1", "2"]
+    assert sorted(r.device_id for r in requests) == ["1", "2", "3"]
     queried = {key for _, params in client.calls for key, _ in params}
-    assert queried == {"local_as_id", "remote_as_id"}
+    assert queried == {"local_as_id", "remote_as_id", "cf_nvcm_bgp_asn"}
+
+
+async def test_asn_change_ignores_devices_an_unknown_custom_field_filter_returned():
+    """NetBox drops an unknown query param, so before the bootstrap the cf filter
+    matches every device. Re-checking the value keeps that from re-rendering the
+    whole fabric."""
+    client = _BGPSessionClient(
+        {
+            ("local_as_id", "7"): [{"device": {"id": 1}}],
+            # No nvcm_bgp_asn: the field does not exist, so the filter was ignored.
+            ("cf_nvcm_bgp_asn", "7"): [{"id": 8, "custom_fields": {}}, {"id": 9}],
+        }
+    )
+    requests = await _HANDLERS["ipam.asn"](_event("ipam.asn", "7"), client)
+    assert sorted(r.device_id for r in requests) == ["1"]
 
 
 async def test_peer_group_change_fans_out_to_referencing_devices():

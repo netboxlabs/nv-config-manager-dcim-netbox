@@ -56,6 +56,10 @@ BGP_SESSIONS_PATH = "plugins/bgp/session/"
 # Peer groups are fetched separately: a session nests only a brief peer_group
 # (id/name/description/url), without the extra_attributes carrying the TTL.
 BGP_PEER_GROUPS_PATH = "plugins/bgp/peer-group/"
+# The device's own ASN, as an ipam.asn reference. NetBox has no device ASN field,
+# and the loader's other copy (config_context.bgp.asn) is computed and therefore
+# unfilterable, so this is what resolves an ASN back to the devices using it.
+BGP_ASN_FIELD = "nvcm_bgp_asn"
 
 _PKEY_RE = re.compile(r"\A0[xX]([0-9a-fA-F]{1,4})\Z")
 
