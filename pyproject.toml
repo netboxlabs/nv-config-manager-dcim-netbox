@@ -50,14 +50,17 @@ dev = [
     "ruff>=0.15.11",
 ]
 
-# The SDK is not yet published to an index. For local development, point uv at a
-# sibling checkout of nv-config-manager, e.g.:
+# The SDK is not yet published to an index. Install it directly from the Git
+# repository without a checkout (pin a tag or commit instead of main when
+# reproducibility is required):
+#   uv pip install \
+#     "nv-config-manager-dcim @ git+https://github.com/NVIDIA/nv-config-manager.git@main#subdirectory=packages/dcim" \
+#     -e .
+#
+# When developing both repositories, use an editable sibling checkout instead:
 #
 # [tool.uv.sources]
 # nv-config-manager-dcim = { path = "../nv-config-manager/packages/dcim", editable = true }
-#
-# or install it explicitly:
-#   uv pip install ../nv-config-manager/packages/dcim -e .
 
 [build-system]
 requires = ["hatchling"]
