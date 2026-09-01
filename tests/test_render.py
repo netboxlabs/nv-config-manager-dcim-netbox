@@ -105,7 +105,10 @@ _REST_MAP = {
             "export_targets": [],
         },
         # overlay #77 is not assigned to this device -> excluded from scope
-        {"id": 7, "vnid": 10099, "vni_type": "l3", "vrf": 8, "overlay": 77},
+        # VRF 9 is not on any of this device's interfaces, so this L3 VNI is out
+        # of scope: the reference scopes L3 by the device's VRFs, not by overlay
+        # assignment (L3 overlays are never assigned to devices).
+        {"id": 7, "vnid": 10099, "vni_type": "l3", "vrf": 9, "overlay": 77},
     ],
     "ipam/vrfs/": [{"id": 8, "name": "Tenant-A", "rd": "65000:1"}],
     "ipam/prefixes/": [
@@ -197,7 +200,7 @@ async def test_get_render_data_assembles_typed_sections():
     assert rd.device.routing.site_asn == "65000"
 
     # --- overlays: scoped to the device's assigned overlays only ---
-    assert len(rd.device.overlays.l3_vnis) == 1  # vnid 10010; the overlay-77 vxlan is excluded
+    assert len(rd.device.overlays.l3_vnis) == 1  # vnid 10010; the VRF-9 vxlan is out of scope
     assert rd.device.overlays.l3_vnis[0].vrf.name == "Tenant-A"
     assert len(rd.device.overlays.l2_vnis) == 1
     l2 = rd.device.overlays.l2_vnis[0]

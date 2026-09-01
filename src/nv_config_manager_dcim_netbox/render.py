@@ -151,7 +151,7 @@ query ($id: ID!) {
       description
       mode
       mac_addresses { mac_address }
-      vrf { name rd import_targets { name } export_targets { name } }
+      vrf { id name rd import_targets { name } export_targets { name } }
       parent { name }
       lag { id }
       custom_fields
@@ -801,6 +801,15 @@ class NetBoxRenderMixin:
                         device_assignments[str(overlay_id)] = assignment
         return overlay_ids, device_assignments
 
+    async def _l3_vxlans_for_vrfs(self, vrf_ids: set[str]) -> list[dict[str, Any]]:
+        """L3 VXLANs whose VRF this device carries -- the reference's scoping."""
+        if not vrf_ids:
+            return []
+        rows = await self._safe_list(
+            self.VXLANS_PATH, [("vrf_id", i) for i in sorted(vrf_ids)]
+        )
+        return [r for r in rows if r.get("vni_type") == "l3"]
+
     async def _id_map(self, path: str, ids: set[str]) -> dict[str, dict[str, Any]]:
         """Fetch objects by id into an ``{id: obj}`` map (empty ids → no fetch)."""
         if not ids:
@@ -809,14 +818,19 @@ class NetBoxRenderMixin:
         rows = await self._safe_list(path, params)
         return {str(row["id"]): row for row in rows if row.get("id") is not None}
 
-    async def _overlays(self, device_id: str, interface_ids: set[str]) -> RenderOverlayData:
+    async def _overlays(
+        self, device_id: str, interface_ids: set[str], vrf_ids: set[str] | None = None
+    ) -> RenderOverlayData:
         """Build device-scoped L2/L3 VNI inventory from the plugin's overlays.
 
-        Scoped via overlay *assignments* (which overlays reach this device), never
-        the global VXLAN table -- a device must not receive every fabric VNI.
+        L2 VNIs are scoped by overlay *assignment*; L3 VNIs by the device's own
+        VRFs, matching the reference (`_l3_vnis` takes `device_vrf_ids`). L3
+        overlays are not assigned to devices, so assignment-only scoping dropped
+        every L3 VNI and with it the rendered `evpn` block.
         """
         overlay_ids, device_assignments = await self._assigned_overlays(device_id, interface_ids)
-        if not overlay_ids:
+        l3_rows = await self._l3_vxlans_for_vrfs(vrf_ids or set())
+        if not overlay_ids and not l3_rows:
             return RenderOverlayData()
         # Scope both reads to the assigned overlays server-side; fetching the whole
         # overlay and VXLAN tables to filter in Python does not scale with fabric size.
@@ -825,7 +839,21 @@ class NetBoxRenderMixin:
         overlay_rows, vxlan_rows = await asyncio.gather(
             self._safe_list(self.OVERLAYS_PATH, overlay_params),
             self._safe_list(self.VXLANS_PATH, vxlan_params),
-        )
+        ) if overlay_ids else ([], [])
+        # The L3 rows carry overlays of their own, which the name lookup needs.
+        seen = {str(v.get("id")) for v in vxlan_rows}
+        vxlan_rows = [*vxlan_rows, *(r for r in l3_rows if str(r.get("id")) not in seen)]
+        extra_overlay_ids = {
+            str(fk_id(v.get("overlay"))) for v in l3_rows if v.get("overlay")
+        } - overlay_ids
+        if extra_overlay_ids:
+            overlay_rows = [
+                *overlay_rows,
+                *await self._safe_list(
+                    self.OVERLAYS_PATH, [("id", i) for i in sorted(extra_overlay_ids)]
+                ),
+            ]
+            overlay_ids = overlay_ids | extra_overlay_ids
         overlays = {str(o["id"]): o for o in overlay_rows if o.get("id") is not None}
         # Re-checked here in case an endpoint ignores the filter: a device must
         # not receive every fabric VNI.
@@ -1063,6 +1091,10 @@ class NetBoxRenderMixin:
         device_type = _require(device.get("device_type"), "device type")
         interfaces = list(device.get("interfaces") or [])
         interface_ids = {str(i["id"]) for i in interfaces if i.get("id")}
+        # The device's VRFs, which scope its L3 VNIs.
+        device_vrf_ids = {
+            str(fk_id(i.get("vrf"))) for i in interfaces if i.get("vrf") is not None
+        }
         context = device.get("config_context") or {}
 
         device_location, site_location = _location_hierarchy(device)
@@ -1090,7 +1122,7 @@ class NetBoxRenderMixin:
             nvlink_domains,
         ) = await asyncio.gather(
             self._safe_list(BGP_SESSIONS_PATH, [("device_id", str(device_id))]),
-            self._overlays(device_id, interface_ids),
+            self._overlays(device_id, interface_ids, device_vrf_ids),
             self._location_address_space(site_id, site_prefixes if site_id else None),
             self._location_topology(site_id),
             # NVLink topology comes from the device's NVLink domain (plugin model).
