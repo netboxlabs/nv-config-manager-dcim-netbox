@@ -27,6 +27,8 @@ PLATFORM_ARG := $(if $(PLATFORM),--platform $(PLATFORM),)
 # every base tag against the registry even when the image is cached, so a 429
 # fails the build outright. Point the Hub bases at a mirror to get around it:
 #   make images NVCM_NETBOX_BASE_MIRROR=mirror.gcr.io/library
+# netbox-image.sh reads the same variable for netbox-docker's ubuntu base, and
+# skips the build entirely when NETBOX_BASE_IMAGE is already present locally.
 # `nvcm-netbox air up` does this automatically on a 429.
 NVCM_NETBOX_BASE_MIRROR ?=
 MIRROR_ARGS := $(foreach img,python:3.13-slim alpine:3.20,\

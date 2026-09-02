@@ -85,6 +85,24 @@ case "${NETBOX_BASE_IMAGE}" in
   *)   base_name="${NETBOX_BASE_IMAGE}";    base_tag="latest" ;;
 esac
 
+# The tag carries the NetBox version, so an existing image of the *requested
+# platform* is by definition the one versions.env asks for. Rebuilding re-pulls
+# ubuntu/uv from Docker Hub, which anonymous pulls get rate-limited (429) on.
+#
+# Platform-matched, not just present: this host builds arm64 while the AIR path
+# asks for amd64, and BuildKit cannot satisfy an amd64 FROM from an arm64 local
+# image -- it falls through to the registry and fails on a name that was never
+# pushed anywhere. Set NETBOX_BASE_REBUILD=1 to force a rebuild.
+have_platform="$(docker image inspect "${NETBOX_BASE_IMAGE}" \
+  --format '{{.Os}}/{{.Architecture}}' 2>/dev/null || true)"
+if [ -z "${NETBOX_BASE_REBUILD:-}" ] && [ "${have_platform}" = "${BUILDX_PLATFORM}" ]; then
+  echo "==> ${NETBOX_BASE_IMAGE} already built for ${BUILDX_PLATFORM}; skipping (NETBOX_BASE_REBUILD=1 to force)"
+  exit 0
+fi
+if [ -n "${have_platform}" ] && [ "${have_platform}" != "${BUILDX_PLATFORM}" ]; then
+  echo "==> ${NETBOX_BASE_IMAGE} is ${have_platform}, rebuilding for ${BUILDX_PLATFORM}"
+fi
+
 echo "==> building ${base_name}:${base_tag} for ${BUILDX_PLATFORM}"
 (
   cd "${docker_dir}"
@@ -96,6 +114,18 @@ echo "==> building ${base_name}:${base_tag} for ${BUILDX_PLATFORM}"
   #
   # SKIP_GIT: use the tree we pinned above. The ref argument then only supplies
   # a default TAG, which DOCKER_TAG overrides.
+  # netbox-docker's base is ubuntu from Docker Hub, which anonymous pulls get
+  # rate-limited (429) on. DOCKER_FROM is its own override hook; NVCM_NETBOX_BASE_MIRROR
+  # is the same variable the Makefile and the AIR image builder already use for
+  # the other Hub bases, so one setting covers every build.
+  #
+  # A real assignment, not a `${VAR:+DOCKER_FROM=...}` command prefix: that
+  # expands to a *word*, which bash then tries to execute as the command.
+  if [ -n "${NVCM_NETBOX_BASE_MIRROR:-}" ]; then
+    DOCKER_FROM="${NVCM_NETBOX_BASE_MIRROR%/}/ubuntu:26.04"
+    export DOCKER_FROM
+    echo "==> ubuntu base via ${DOCKER_FROM}"
+  fi
   SKIP_GIT=1 NETBOX_PATH="${netbox_rel}" \
     IMAGE_NAMES="${base_name}" \
     DOCKER_TAG="${base_tag}" \
