@@ -99,6 +99,21 @@ paths.
 
 ## Local Development Setup
 
+For provider-only development, install the DCIM SDK directly from the NVCM Git
+repository; a separate checkout is not required:
+
+```bash
+uv venv --python 3.13
+uv pip install --python .venv/bin/python \
+  "nv-config-manager-dcim @ git+https://github.com/dsx-ai-factory/nv-config-manager.git@main#subdirectory=packages/dcim" \
+  -e .
+```
+
+Replace `main` with a release tag or commit SHA for a reproducible install. A
+sibling NVCM checkout is still useful when changing both repositories, and is
+required for the full local deployment because it supplies the installer,
+templates, Helm chart, and image build context:
+
 ```bash
 make setup     # venv + SDK, templates, provider, dev tools
 make check     # ruff + unit tests
