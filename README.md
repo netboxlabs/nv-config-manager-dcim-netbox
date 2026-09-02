@@ -42,7 +42,7 @@ make kind-up       # builds the images, then deploys NetBox and NVCM
 ```
 
 `make setup` rather than `pip install -e .` because the `nv-config-manager-dcim`
-SDK is not published; it is installed from `$NVCM_REPO/components/dcim`.
+SDK is not published; it is installed from `$NVCM_REPO/packages/dcim`.
 
 It puts `nvcm-netbox` in the repo's virtualenv rather than on your PATH, which is
 why the commands below are written `.venv/bin/nvcm-netbox`. Run

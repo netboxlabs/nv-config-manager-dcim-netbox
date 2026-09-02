@@ -53,11 +53,11 @@ jobs:
       - name: Fetch DCIM SDK
         run: |
           git clone --depth 1 \
-            https://github.com/NVIDIA/nv-config-manager.git ../nv-config-manager
+            https://github.com/dsx-ai-factory/nv-config-manager.git ../nv-config-manager
       - name: Build
         run: |
           docker build --platform linux/amd64 \
-            --build-context sdk=../nv-config-manager/components/dcim \
+            --build-context sdk=../nv-config-manager/packages/dcim \
             -t nv-config-manager-dcim-netbox:ci .
       - name: Offline /plugin-wheels contract
         run: build/check-provider-image.sh nv-config-manager-dcim-netbox:ci linux/amd64
@@ -74,7 +74,7 @@ jobs:
       - name: Fetch DCIM SDK
         run: |
           git clone --depth 1 \
-            https://github.com/NVIDIA/nv-config-manager.git ../nv-config-manager
+            https://github.com/dsx-ai-factory/nv-config-manager.git ../nv-config-manager
       # Into a venv, not `--system`: the interpreter setup-uv provisions is
       # uv-managed and externally managed, so `uv pip install --system` errors.
       # `--clear` because setup-uv already creates (and exports) a .venv itself;
@@ -91,7 +91,7 @@ jobs:
           # and test_air.py import click and PyYAML at module scope. The `air`
           # extra is not installed; those imports are guarded with importorskip.
           uv pip install \
-            ../nv-config-manager/components/dcim \
+            ../nv-config-manager/packages/dcim \
             -e ../nv-config-manager/installer \
             -e '.[installer]' \
             pytest pytest-asyncio
@@ -159,7 +159,7 @@ jobs:
         if: steps.gate.outputs.enabled == 'true'
         run: |
           git clone --depth 1 \
-            https://github.com/NVIDIA/nv-config-manager.git ../nv-config-manager
+            https://github.com/dsx-ai-factory/nv-config-manager.git ../nv-config-manager
 
       - uses: actions/setup-python@v5
         if: steps.gate.outputs.enabled == 'true'
@@ -175,7 +175,7 @@ jobs:
           pip install 'netbox==4.7.0b1'
           pip install "https://github.com/netbox-community/netbox-bgp/archive/refs/heads/0.20.0.tar.gz"
           pip install -e _plugin
-          pip install ../nv-config-manager/components/dcim
+          pip install ../nv-config-manager/packages/dcim
           pip install -e '.[installer]'
           pip install pytest pytest-asyncio
 

@@ -16,7 +16,7 @@
 # The SDK (`nv-config-manager-dcim`) is not yet on an index, so it is supplied
 # via a named build context. Build with:
 #
-#   docker build --build-context sdk=../nv-config-manager/components/dcim \
+#   docker build --build-context sdk=../nv-config-manager/packages/dcim \
 #     -t nv-config-manager-dcim-netbox:0.1.0 .
 #
 # or `make image`.

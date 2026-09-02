@@ -54,10 +54,10 @@ dev = [
 # sibling checkout of nv-config-manager, e.g.:
 #
 # [tool.uv.sources]
-# nv-config-manager-dcim = { path = "../nv-config-manager/components/dcim", editable = true }
+# nv-config-manager-dcim = { path = "../nv-config-manager/packages/dcim", editable = true }
 #
 # or install it explicitly:
-#   uv pip install ../nv-config-manager/components/dcim -e .
+#   uv pip install ../nv-config-manager/packages/dcim -e .
 
 [build-system]
 requires = ["hatchling"]

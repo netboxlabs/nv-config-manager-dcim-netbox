@@ -55,7 +55,7 @@ help:
 	@echo "probe           call get_device_metadata against SERVER/TOKEN/DEVICE_ID"
 	@echo "cache-query     template-cli: query provider for render data -> rd.json"
 	@echo "render-cli      template-cli: render from rd.json"
-	@echo "test-sdk        run the SDK (components/dcim) tests"
+	@echo "test-sdk        run the SDK (packages/dcim) tests"
 	@echo "test-templates  run the templates library tests"
 	@echo "check           lint + test"
 	@echo "image           build the provider-package OCI image (IMAGE=..., SDK from NVCM=...)"
@@ -76,8 +76,8 @@ help:
 setup:
 	uv venv --python 3.13
 	uv pip install --python $(PY) \
-	  $(NVCM)/components/dcim \
-	  $(NVCM)/components/network-templates \
+	  $(NVCM)/packages/dcim \
+	  $(NVCM)/packages/templates \
 	  -e $(NVCM)/installer \
 	  -e ".[installer]" pytest pytest-asyncio ruff
 
@@ -122,7 +122,7 @@ INTEGRATION_TESTS ?= $(NVCM)/src/tests/integration/
 
 test-integration:
 	uv run --project $(NVCM) \
-	  --with-editable $(NVCM)/components/dcim --with-editable . pytest \
+	  --with-editable $(NVCM)/packages/dcim --with-editable . pytest \
 	  $(INTEGRATION_TESTS) -v --timeout=900 \
 	  --dcim-provider netbox \
 	  --dcim-integration-adapter \
@@ -135,7 +135,7 @@ check: lint version-check test
 # The SDK is not yet published, so it is passed as a named build context.
 # Requires Docker Buildx (bundled with modern Docker). Override IMAGE / NVCM.
 image:
-	docker build $(PLATFORM_ARG) $(MIRROR_ARGS) --build-context sdk=$(NVCM)/components/dcim -t $(IMAGE) .
+	docker build $(PLATFORM_ARG) $(MIRROR_ARGS) --build-context sdk=$(NVCM)/packages/dcim -t $(IMAGE) .
 
 # The offline /plugin-wheels contract NVCM's init container relies on. Defaults
 # to this host's architecture, matching what `make image` just built.
@@ -229,10 +229,10 @@ spx: spectrumx
 
 # --- per-package test suites ---
 test-sdk:
-	cd $(NVCM)/components/dcim && uv run pytest
+	cd $(NVCM)/packages/dcim && uv run pytest
 
 test-templates:
-	cd $(NVCM)/components/network-templates && uv run pytest
+	cd $(NVCM)/packages/templates && uv run pytest
 
 # --- housekeeping ---
 clean:
