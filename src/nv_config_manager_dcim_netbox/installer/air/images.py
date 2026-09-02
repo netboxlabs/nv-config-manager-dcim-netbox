@@ -40,7 +40,7 @@ def _resolve_nvcm_repo() -> Path:
             )
         candidate = Path(package.origin).resolve().parents[3]
 
-    if not (candidate / "components" / "dcim" / "pyproject.toml").is_file():
+    if not (candidate / "packages" / "dcim" / "pyproject.toml").is_file():
         raise RuntimeError(
             f"Could not find the NVCM source checkout at {candidate}. "
             "Set NVCM_REPO to the checkout used to install the AIR TUI."
@@ -206,7 +206,7 @@ def ensure_air_images(
             "--platform",
             TARGET_PLATFORM,
             "--build-context",
-            f"sdk={nvcm_repo / 'components' / 'dcim'}",
+            f"sdk={nvcm_repo / 'packages' / 'dcim'}",
             "-t",
             provider_image,
             ".",
