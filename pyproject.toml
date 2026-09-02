@@ -54,7 +54,7 @@ dev = [
 # repository without a checkout (pin a tag or commit instead of main when
 # reproducibility is required):
 #   uv pip install \
-#     "nv-config-manager-dcim @ git+https://github.com/NVIDIA/nv-config-manager.git@main#subdirectory=packages/dcim" \
+#     "nv-config-manager-dcim @ git+https://github.com/dsx-ai-factory/nv-config-manager.git@main#subdirectory=packages/dcim" \
 #     -e .
 #
 # When developing both repositories, use an editable sibling checkout instead:

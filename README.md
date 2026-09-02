@@ -105,7 +105,7 @@ repository; a separate checkout is not required:
 ```bash
 uv venv --python 3.13
 uv pip install --python .venv/bin/python \
-  "nv-config-manager-dcim @ git+https://github.com/NVIDIA/nv-config-manager.git@main#subdirectory=packages/dcim" \
+  "nv-config-manager-dcim @ git+https://github.com/dsx-ai-factory/nv-config-manager.git@main#subdirectory=packages/dcim" \
   -e .
 ```
 
