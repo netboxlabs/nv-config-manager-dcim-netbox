@@ -750,6 +750,13 @@ def up(
             image_repository=netbox_image,
             image_tag=netbox_tag or DEFAULT_NETBOX_TAG,
             nats_password=nats_password,
+            # From the profile, which is what `apply_options` writes the install
+            # config from below -- so the Deploy / See Diff links point at the
+            # same gateway hostname NVCM routes its own UI at.
+            workflow_url=cluster.workflow_url(
+                (profile.get("cluster") or {}).get("hostname"),
+                (profile.get("infrastructure") or {}).get("tls", True),
+            ),
         )
         cluster.wait_for_netbox(namespace)
         _ok("NetBox rolled out")

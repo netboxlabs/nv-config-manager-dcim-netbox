@@ -88,6 +88,9 @@ class NetBoxDeployer(Deployer):
             image_repository=self.netbox.image_repository,
             image_tag=self.netbox.image_tag,
             nats_password=self._secrets_state["nats_password"],
+            workflow_url=cluster.workflow_url(
+                self.config.cluster.hostname, self.config.infrastructure.tls
+            ),
             extra_set=list(self.netbox.extra_set),
             timeout=self.options.helm_timeout,
         )

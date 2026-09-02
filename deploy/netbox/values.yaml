@@ -33,6 +33,17 @@ nvcm:
   # consumes them.
   eventSubject: netbox.change
 
+  # Base URL of NVCM's workflow UI, e.g. https://config-manager.local. The
+  # Deploy and See Diff controls link to prefilled workflow forms under
+  # `<workflowUrl>/workflows/<name>/form`; while it is empty they render as
+  # plain status text rather than links to nowhere, which is what lets NetBox
+  # be installed standalone.
+  #
+  # `nvcm-netbox up` derives it from the install config's cluster hostname --
+  # the same value NVCM's own chart renders its gateway routes from. Set it
+  # yourself if you are driving helm directly.
+  workflowUrl: ""
+
   # Browser access through NVCM's Gateway, so NetBox is reachable the same way
   # NVCM's own services are rather than only through `kubectl port-forward`.
   # See templates/httproute.yaml.

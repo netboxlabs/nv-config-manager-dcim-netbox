@@ -209,6 +209,7 @@ def install_netbox(
     image_repository: str,
     image_tag: str | None = None,
     nats_password: str | None = None,
+    workflow_url: str | None = None,
     extra_set: list[str] | None = None,
     timeout: str = "10m",
     runner: Runner | None = None,
@@ -248,6 +249,8 @@ def install_netbox(
         argv += ["--set", f"netbox.image.tag={image_tag}"]
     if nats_password:
         argv += ["--set", f"nvcm.natsPassword={nats_password}"]
+    if workflow_url:
+        argv += ["--set", f"nvcm.workflowUrl={workflow_url}"]
     for override in extra_set or ():
         argv += ["--set", override]
     (runner or LocalRunner()).stream(argv)
@@ -473,6 +476,24 @@ def run_nvcm_init(
         stdin=script,
         runner=runner,
     )
+
+
+def workflow_url(hostname: str | None, tls: bool = True) -> str:
+    """NVCM's workflow-UI base URL for a cluster hostname, or "" if there is none.
+
+    The plugin's Deploy / See Diff controls link to prefilled workflow forms
+    under this base. NVCM's own chart routes its UI at the gateway hostname
+    (`https://{{ .Values.gateway.baseHostname }}` in the Nautobot configmap), so
+    the same value serves both and neither side has to read it back from the
+    other.
+
+    Returns "" rather than a scheme-only URL when the hostname is unset, which is
+    what keeps the controls rendering as status text instead of dead links.
+    """
+    host = (hostname or "").strip().strip("/")
+    if not host:
+        return ""
+    return f"{'https' if tls else 'http'}://{host}"
 
 
 def read_nats_password(namespace: str, runner: Runner | None = None) -> str | None:

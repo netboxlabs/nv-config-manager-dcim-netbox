@@ -570,6 +570,31 @@ def test_install_netbox_sets_an_explicit_image_tag():
     assert "netbox.image.tag=1.2.3" in _install_argv(image_tag="1.2.3")
 
 
+def test_install_netbox_passes_the_workflow_url_through():
+    assert "nvcm.workflowUrl=https://cm.local" in _install_argv(workflow_url="https://cm.local")
+
+
+def test_install_netbox_omits_an_unset_workflow_url():
+    # The chart guards on it, and an empty --set would render `workflow_url: ""`,
+    # which the plugin reads as configured and turns into links to nowhere.
+    assert not any(arg.startswith("nvcm.workflowUrl") for arg in _install_argv(workflow_url=""))
+
+
+def test_workflow_url_is_the_cluster_hostname_under_the_gateway_scheme():
+    assert cluster.workflow_url("config-manager.local") == "https://config-manager.local"
+    assert cluster.workflow_url("config-manager.local", tls=False) == "http://config-manager.local"
+    # Trailing slashes would double up against the `/workflows/...` the plugin appends.
+    assert cluster.workflow_url("cm.local/") == "https://cm.local"
+
+
+def test_workflow_url_is_empty_without_a_hostname():
+    # Not "https://": the plugin treats any non-empty value as configured, so a
+    # scheme-only URL would render Deploy as a link to nowhere instead of text.
+    assert cluster.workflow_url(None) == ""
+    assert cluster.workflow_url("") == ""
+    assert cluster.workflow_url("   ") == ""
+
+
 # -- chart --------------------------------------------------------------------
 
 
@@ -612,6 +637,32 @@ def test_chart_renders_and_wires_the_publisher():
     # renders LOGIN_REQUIRED unconditionally. Turning it off buys the *louder*
     # warning and an open instance. See deploy/netbox/values.yaml.
     assert "LOGIN_REQUIRED: true" in rendered
+    # Not set here, so the Deploy / See Diff controls stay inert rather than
+    # linking into a workflow UI this release knows nothing about.
+    assert "workflow_url" not in rendered
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
+@pytest.mark.skipif(
+    not (_CHART / "charts").is_dir(), reason="chart deps not fetched (helm dependency build)"
+)
+def test_chart_wires_the_workflow_url_into_the_plugin_config():
+    rendered = subprocess.run(
+        [
+            "helm",
+            "template",
+            "nb",
+            str(_CHART),
+            "--set",
+            f"netbox.superuser.apiToken={generate_api_token()}",
+            "--set",
+            "nvcm.workflowUrl=https://config-manager.local",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert 'workflow_url: "https://config-manager.local"' in rendered
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
