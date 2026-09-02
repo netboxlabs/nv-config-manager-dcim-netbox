@@ -271,6 +271,7 @@ class NetBoxAirCallback:
             image_repository=self.cfg.netbox_image,
             image_tag=self.cfg.netbox_image_tag,
             nats_password=self.nats_password,
+            workflow_url=self.cfg.workflow_url(),
             extra_set=[
                 *self.cfg.gateway_overrides(),
                 f"netbox.superuser.name={cluster.helm_set_value(self.cfg.netbox_superuser_name)}",

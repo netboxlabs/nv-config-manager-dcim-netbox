@@ -87,6 +87,17 @@ class NetBoxSimConfig(SimConfig):
             return []
         return [f"nvcm.gateway.baseHostname={CONFIG_MANAGER_HOSTNAME}"]
 
+    def workflow_url(self) -> str:
+        """Base URL of NVCM's workflow UI on the sim.
+
+        The same hostname `gateway_overrides` publishes NVCM at, so the plugin's
+        Deploy / See Diff links resolve to the workflow forms this sim is
+        actually serving rather than a kind cluster's `config-manager.local`.
+        """
+        from nv_config_manager_installer.air_sim.constants import CONFIG_MANAGER_HOSTNAME
+
+        return f"https://{CONFIG_MANAGER_HOSTNAME}"
+
     def netbox_hostname(self) -> str:
         """The name NetBox is published under on the sim."""
         from nv_config_manager_installer.air_sim.constants import CONFIG_MANAGER_HOSTNAME
