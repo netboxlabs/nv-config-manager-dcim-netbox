@@ -1,24 +1,18 @@
 # NetBox image carrying the NV Config Manager plugin, for the in-cluster deploy.
 #
-# The base is built by build/netbox-image.sh from the commit pinned in
-# build/versions.env (4.7.0-beta1). Everything NetBox-specific -- interpreter,
-# dependencies, entrypoints, static -- comes from there; this file only adds the
-# two plugins.
+# The base is netbox-docker's published image, pinned in build/versions.env.
+# Everything NetBox-specific -- interpreter, dependencies, entrypoints, static --
+# comes from there; this file only adds the two plugins.
 #
 # Build via `make netbox-image`, or directly:
 #
 #   docker build -f build/netbox.Dockerfile \
-#     --build-arg NETBOX_BASE_IMAGE=nv-config-manager-netbox-base:4.7.0-beta1 \
+#     --build-arg NETBOX_BASE_IMAGE=ghcr.io/netbox-community/netbox:v4.7.0 \
 #     --build-arg NETBOX_BGP_REF=da40b401055ce489d66a1a33c5d97f91100f303e \
 #     --build-context plugin=../netbox-nv-config-manager \
 #     -t nv-config-manager-netbox:0.1.0 .
-#
-# ONCE A 4.7 IMAGE IS PUBLISHED: replace the ARG/FROM pair below with
-#   FROM ghcr.io/netbox-community/netbox:v4.7.x
-# and delete build/netbox-image.sh + build/versions.env. Nothing else here
-# changes.
 
-ARG NETBOX_BASE_IMAGE=nv-config-manager-netbox-base:4.7.0-beta1
+ARG NETBOX_BASE_IMAGE=ghcr.io/netbox-community/netbox:v4.7.0
 
 # The plugin is not published to an index, so it arrives as a named build context
 # and is built to a wheel here rather than pip-installed from a path (keeps the

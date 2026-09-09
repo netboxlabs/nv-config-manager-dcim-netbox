@@ -92,7 +92,7 @@ def _resolve_plugin_repo(log: Callable[[str], None], ref: str) -> Path:
 
 
 def _load_versions() -> dict[str, str]:
-    """Read the checked-in image pins used by the existing build scripts."""
+    """Read the checked-in image pins from build/versions.env."""
     values: dict[str, str] = {}
     for line in (_REPO_ROOT / "build" / "versions.env").read_text().splitlines():
         key, separator, value = line.partition("=")
@@ -214,14 +214,6 @@ def ensure_air_images(
         cwd=_REPO_ROOT,
         log=log,
         env=build_env,
-    )
-
-    log("Building the pinned NetBox base image for linux/amd64...")
-    _stream(
-        [str(_REPO_ROOT / "build" / "netbox-image.sh")],
-        cwd=_REPO_ROOT,
-        log=log,
-        env={**build_env, "BUILDX_PLATFORM": TARGET_PLATFORM},
     )
 
     log("Building the NetBox plugin image for linux/amd64...")

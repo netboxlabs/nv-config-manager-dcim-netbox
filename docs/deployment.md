@@ -67,20 +67,19 @@ installer commands.
 
 ## NetBox image
 
-`make netbox-image` builds NetBox 4.7.0-beta1 and layers on the plugin and
-`netbox-bgp`. The pins are in [`build/versions.env`](../build/versions.env).
+`make netbox-image` layers the plugin and `netbox-bgp` onto netbox-docker's
+published NetBox image. The pins are in
+[`build/versions.env`](../build/versions.env).
 
-This is temporary. The plugin needs a GraphQL feature that ships in NetBox 4.7,
-and no 4.7 image is published on ghcr.io or Docker Hub yet. Once one is, delete
-`build/netbox-image.sh` and `build/versions.env` and change the first line of
-`build/netbox.Dockerfile` to `FROM ghcr.io/netbox-community/netbox:v4.7.x`.
+The base must be a **released** 4.7 tag. A `-betaN` tag still satisfies the
+plugin's `min_version` -- NetBox compares `RELEASE.version`, and a beta reports a
+plain `4.7.0` -- but the betas differ from the release in ways the plugin depends
+on, so its migrations do not apply there. CI's `netbox-pin` job rejects a
+pre-release tag and asserts the one pinned exists upstream.
 
-NetBox is also on PyPI now (`netbox`, `4.7.0b1`). It is not used here;
-netbox-docker installs a source tree.
-
-`make version-check` asserts that the pinned ref's version sits inside the
-plugin's `min_version`/`max_version`, so bumping one without the other fails
-before a build starts rather than at the image's plugin-import assert.
+`make version-check` asserts that the pinned version sits inside the plugin's
+`min_version`/`max_version`, so bumping one without the other fails before a
+build starts rather than at the image's plugin-import assert.
 
 ## Doing it by hand
 

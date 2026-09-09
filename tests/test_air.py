@@ -722,10 +722,13 @@ def test_air_image_preparation_builds_without_make(monkeypatch, tmp_path):
 
     air_images.ensure_air_images("provider:tag", "netbox:tag", lambda line: None)
 
-    assert len(commands) == 3
+    # Two docker builds and nothing else: the NetBox base is netbox-docker's
+    # published image, so there is no base-image build step to run.
+    assert len(commands) == 2
     assert commands[0][:4] == ["docker", "build", "--platform", "linux/amd64"]
-    assert commands[1] == [str(tmp_path / "build" / "netbox-image.sh")]
-    assert commands[2][:4] == ["docker", "build", "--platform", "linux/amd64"]
+    assert commands[1][:4] == ["docker", "build", "--platform", "linux/amd64"]
+    assert "--build-arg" in commands[1]
+    assert "NETBOX_BASE_IMAGE=netbox-base:4.7" in commands[1]
     assert all("make" not in command for command in commands)
 
 

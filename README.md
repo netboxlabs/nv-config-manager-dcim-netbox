@@ -51,9 +51,9 @@ why the commands below are written `.venv/bin/nvcm-netbox`. Run
 Running `up` again is safe.
 
 > **NetBox version.** The plugin needs a GraphQL feature that ships in NetBox
-> 4.7, so the NetBox image is built from 4.7.0-beta1. There is no published image
-> for it yet; that first build takes a while, later ones are cached. The pins are
-> in [`build/versions.env`](build/versions.env).
+> 4.7, and requires a released 4.7 -- not one of the 4.7.0 pre-releases. The
+> image layers the plugin onto netbox-docker's published NetBox 4.7 image; the
+> pins are in [`build/versions.env`](build/versions.env).
 
 ### Step by Step
 

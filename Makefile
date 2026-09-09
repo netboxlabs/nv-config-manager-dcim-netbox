@@ -27,8 +27,6 @@ PLATFORM_ARG := $(if $(PLATFORM),--platform $(PLATFORM),)
 # every base tag against the registry even when the image is cached, so a 429
 # fails the build outright. Point the Hub bases at a mirror to get around it:
 #   make images NVCM_NETBOX_BASE_MIRROR=mirror.gcr.io/library
-# netbox-image.sh reads the same variable for netbox-docker's ubuntu base, and
-# skips the build entirely when NETBOX_BASE_IMAGE is already present locally.
 # `nvcm-netbox air up` does this automatically on a 429.
 NVCM_NETBOX_BASE_MIRROR ?=
 MIRROR_ARGS := $(foreach img,python:3.13-slim alpine:3.20,\
@@ -44,7 +42,7 @@ TEMPLATE := $(VENV)/bin/template-cli
 
 .PHONY: help setup setup-air lint version-check test test-netbox test-integration discovery probe provider-config \
         cache-query render-cli test-sdk test-templates check clean image check-image \
-        netbox-base netbox-image images kind-up kind-down topology tunnel airgapped airgapped-images \
+        netbox-image images kind-up kind-down topology tunnel airgapped airgapped-images \
         inventory reference ipam hosts dhcp ztp firmware state secrets render \
         spectrumx ib infiniband spx lifecycle events
 
@@ -144,13 +142,9 @@ image:
 check-image:
 	build/check-provider-image.sh $(IMAGE) $(if $(PLATFORM),$(PLATFORM),linux/$(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'))
 
-# NetBox + our plugin. netbox-base is a TEMPORARY step: it builds NetBox from a
-# pinned `feature` commit because 4.7 (which the plugin's GraphQL extensions
-# need) is unreleased. See build/versions.env.
-netbox-base:
-	$(if $(PLATFORM),BUILDX_PLATFORM=$(PLATFORM)) build/netbox-image.sh
-
-netbox-image: netbox-base
+# NetBox + our plugin, layered on netbox-docker's published image (pinned in
+# build/versions.env).
+netbox-image:
 	docker build $(PLATFORM_ARG) $(MIRROR_ARGS) -f build/netbox.Dockerfile \
 	  --build-arg NETBOX_BASE_IMAGE=$(NETBOX_BASE_IMAGE) \
 	  --build-arg NETBOX_BGP_REF=$(NETBOX_BGP_REF) \

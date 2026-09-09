@@ -21,27 +21,48 @@ jobs:
         run: uvx ruff@0.15.11 format --check src/ tests/
 
   # NETBOX_VERSION is what `make version-check` compares against the plugin's
-  # min_version, so it drifting from NETBOX_REF makes that check assert the wrong
-  # thing. Only upstream knows what the ref reports.
+  # min_version, so it drifting from the base image makes that check assert the
+  # wrong thing.
   netbox-pin:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Pinned ref reports the version we record
+      - name: Base image tag matches the version we record
         run: |
           set -euo pipefail
           . build/versions.env
-          url="https://raw.githubusercontent.com/netbox-community/netbox/${NETBOX_REF}/netbox/release.yaml"
-          release=$(curl -fsSL "$url")
-          echo "$release"
-          # `version` alone, not the designation: PluginConfig.validate() is
-          # handed RELEASE.version, so a beta's "4.7.0" is what gates the plugin.
-          actual=$(printf '%s\n' "$release" | sed -n 's/^version: *"\(.*\)"/\1/p')
-          if [ "$actual" != "${NETBOX_VERSION}" ]; then
-            echo "::error::NETBOX_REF ${NETBOX_REF} reports NetBox ${actual}," \
-                 "but build/versions.env records NETBOX_VERSION=${NETBOX_VERSION}."
+          tag="${NETBOX_BASE_IMAGE##*:}"
+          echo "NETBOX_BASE_IMAGE=${NETBOX_BASE_IMAGE}"
+          # netbox-docker tags a NetBox release as `vX.Y.Z`, so the tag carries
+          # the version PluginConfig.validate() will see at runtime.
+          if [ "${tag}" != "v${NETBOX_VERSION}" ]; then
+            echo "::error::NETBOX_BASE_IMAGE is tagged ${tag}, but build/versions.env" \
+                 "records NETBOX_VERSION=${NETBOX_VERSION}."
             exit 1
           fi
+          # A pre-release tag would satisfy min_version -- validate() compares
+          # RELEASE.version, and a beta reports a plain 4.7.0 -- while differing
+          # from the release in ways the plugin depends on. Reject it here.
+          case "${tag}" in
+            *-alpha*|*-beta*|*-rc*)
+              echo "::error::NETBOX_BASE_IMAGE ${tag} is a pre-release; pin a released tag."
+              exit 1
+              ;;
+          esac
+      - name: Base image tag exists upstream
+        run: |
+          set -euo pipefail
+          . build/versions.env
+          repo="${NETBOX_BASE_IMAGE%:*}"; repo="${repo#ghcr.io/}"
+          tag="${NETBOX_BASE_IMAGE##*:}"
+          token=$(curl -fsSL \
+            "https://ghcr.io/token?scope=repository:${repo}:pull&service=ghcr.io" \
+            | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+          curl -fsSL -o /dev/null \
+            -H "Authorization: Bearer ${token}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json" \
+            -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+            "https://ghcr.io/v2/${repo}/manifests/${tag}"
 
   # NVCM installs the provider by copying /plugin-wheels out of this image and
   # running `pip install --no-index --find-links` in an init container. Nothing
@@ -172,7 +193,7 @@ jobs:
       - name: Install NetBox, plugin and provider
         if: steps.gate.outputs.enabled == 'true'
         run: |
-          pip install 'netbox==4.7.0b1'
+          pip install 'netbox==4.7.0'
           pip install "https://github.com/netbox-community/netbox-bgp/archive/refs/heads/0.20.0.tar.gz"
           pip install -e _plugin
           pip install ../nv-config-manager/packages/dcim
