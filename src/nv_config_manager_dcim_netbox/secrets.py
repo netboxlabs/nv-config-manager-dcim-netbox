@@ -54,7 +54,7 @@ class NetBoxSecretsMixin:
         }
 
     async def get_device_password_secret_names(self, device_id: str) -> Mapping[str, str]:
-        """Map device config-context password mappings to username→secret-name intent."""
+        """Map device config-context password mappings to username->secret-name intent."""
         password_mappings = await self._device_password_mappings(device_id)
         result: dict[str, str] = {}
         for username, user_config in password_mappings.items():

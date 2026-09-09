@@ -8,7 +8,7 @@ through the portable cache, and drives the real ``nv_config_manager_templates``
 
 * entrypoint **discovery** works from the provider's identity + firmware output
   (`Renderer.list_entrypoints`), and
-* every discovered entrypoint is **structurally consumable** — rendering either
+* every discovered entrypoint is **structurally consumable** -- rendering either
   produces a string or raises ``FilterException`` (the expected signal for a
   ``RenderData`` section this provider does not yet populate; see
   ``docs/netbox-data-mapping.mdx``). Any other exception means the provider
@@ -16,7 +16,7 @@ through the portable cache, and drives the real ``nv_config_manager_templates``
 
 Fully rendering every reference entrypoint to golden config for every mock device
 additionally requires populating the currently-defaulted sections (firmware
-bundles, users, EVPN, …) — tracked as the remaining part of item 6.
+bundles, users, EVPN, …) -- tracked as the remaining part of item 6.
 """
 
 from __future__ import annotations

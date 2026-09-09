@@ -98,8 +98,7 @@ async def test_get_spectrum_x_vrfs_namespace_prefers_the_tag_name_over_its_slug(
 
 async def test_provision_spectrum_x_vrf_creates_overlay_vrf_assignment_vxlan():
     """Happy path (overlay does not exist yet): create the overlay, then the VRF,
-    assignment, and VXLAN — asserting each write's path + body. Previously only the
-    location-unresolved error branch was covered."""
+    assignment, and VXLAN, asserting each write's path + body."""
     record = []
 
     async def no_overlay(name, scope=None, *, scope_type=None):
@@ -205,7 +204,7 @@ async def test_reconcile_with_no_overlay_removes_and_creates_nothing():
 
 async def test_provision_rollback_does_not_mask_the_original_failure():
     """If cleanup itself fails, the caller must still see the exception that caused
-    the rollback — not the cleanup error, which hides the real cause."""
+    the rollback -- not the cleanup error, which hides the real cause."""
     record = []
 
     async def no_overlay(name, scope=None, *, scope_type=None):

@@ -66,7 +66,7 @@ def _reserve_prefix_client(statuses):
 
 async def test_reservation_defaults_ztp_enabled_when_status_missing():
     # No DeviceConfigStatus row: ZTP defaults to enabled, so the reservation is
-    # kept (previously ``not status.get("ztp_enabled")`` wrongly dropped it).
+    # kept; a bare ``not status.get("ztp_enabled")`` would drop it.
     client = _reserve_prefix_client(statuses=[])
     reservations = (await client.get_dhcp_auto_subnets())[0]["reservations"]
     assert [r["serial"] for r in reservations] == ["SN2"]

@@ -302,7 +302,7 @@ async def test_a_platform_netbox_does_not_have_is_dropped_not_sent():
 
     NetBox's `platform` filter is a choice field over existing slugs, so an absent
     one fails the *whole* query with HTTP 400 ("Select a valid choice.
-    juniper-junos is not one of the available choices") — which killed Site
+    juniper-junos is not one of the available choices"), which fails Site
     Configuration Backup outright on a Cumulus-only fabric.
 
     NetBox ORs a repeated param, so the platforms that do exist still select
@@ -374,8 +374,8 @@ async def test_site_backup_survives_a_platform_the_fabric_does_not_have():
 
     `site_backup.py` calls get_network_devices, which builds its params through a
     different path than list_devices. NetBox answered the whole query with
-    HTTP 400 — {"platform":["Select a valid choice. juniper-junos is not one of
-    the available choices."]} — so the workflow died instead of backing up the
+    HTTP 400 -- {"platform":["Select a valid choice. juniper-junos is not one of
+    the available choices."]} -- so the workflow died instead of backing up the
     Cumulus devices it could see.
     """
     from nv_config_manager_dcim import DeviceInventoryFilter, Platform
@@ -402,8 +402,8 @@ async def test_site_backup_survives_a_platform_the_fabric_does_not_have():
 async def test_an_unreadable_platform_list_forwards_the_filter_unchecked():
     """Fail open, not closed.
 
-    An empty platform list means either a NetBox with no platforms — where a
-    platform filter cannot match anyway — or a `platform_list` read that came back
+    An empty platform list means either a NetBox with no platforms -- where a
+    platform filter cannot match anyway -- or a `platform_list` read that came back
     empty. Treating the second as "nothing matches" would silently empty the
     result of every platform-scoped workflow, which is worse than the 400 this
     check exists to prevent.

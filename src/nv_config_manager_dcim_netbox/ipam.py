@@ -38,7 +38,7 @@ class NetBoxIPAMMixin:
     async def assign_vrf_to_device(self, device_id: str, vrf_id: str) -> None:
         """Assign a VRF to a device by setting it on the device's interfaces.
 
-        NetBox has no device→VRF relationship (VRFs attach to interfaces /
+        NetBox has no device->VRF relationship (VRFs attach to interfaces /
         prefixes / IPs, never devices), so "the device's VRF" is represented as
         the VRF on its interfaces -- which is exactly how ``get_device_vrfs``
         reads it back. Interfaces already in the target VRF are skipped so repeat

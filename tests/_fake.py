@@ -26,17 +26,17 @@ def fake_client(
 ):
     """Return a NetBox client with a routable, stubbed transport.
 
-    * ``gql`` — dict returned by ``graphql_query`` (single canned payload).
-    * ``rest_list`` — ``{path: [rows]}`` for ``rest_list``; rows are filtered by
+    * ``gql`` -- dict returned by ``graphql_query`` (single canned payload).
+    * ``rest_list`` -- ``{path: [rows]}`` for ``rest_list``; rows are filtered by
       the ``assigned_object_id`` query param when present (so per-object lookups
       like IB assignment resolution behave faithfully), and by ``tag`` when a row
       declares ``_tags``.
-    * ``rest_get`` — ``{path: obj}`` returned by ``rest_request('GET', path)``.
-    * ``post`` — ``{path: obj}`` returned by non-GET ``rest_request`` (default
+    * ``rest_get`` -- ``{path: obj}`` returned by ``rest_request('GET', path)``.
+    * ``post`` -- ``{path: obj}`` returned by non-GET ``rest_request`` (default
       ``{'id': 99}``) so ``["id"]`` reads on create succeed.
-    * ``record`` — a list that receives ``(method, path, json)`` for every write.
-    * ``patch`` — ``{attr: async_callable}`` to override provider helper methods.
-    * ``queries`` — a list that receives ``(path, params)`` for every ``rest_list``
+    * ``record`` -- a list that receives ``(method, path, json)`` for every write.
+    * ``patch`` -- ``{attr: async_callable}`` to override provider helper methods.
+    * ``queries`` -- a list that receives ``(path, params)`` for every ``rest_list``
       call. Use it to assert the NetBox *filter names* a read depends on: those
       spellings (``cf_ib_guid__ie``, ``has_primary_ip``, ``name__isw``, …) are this
       provider's contract with NetBox, and a typo in one is invisible to a fake that
@@ -53,7 +53,7 @@ def fake_client(
         rows = list((rest_list or {}).get(path, []))
         # NetBox ORs a repeated param, so collect the values and match with `in`.
         # Re-filtering per value ANDed them, so any multi-value query returned
-        # nothing — including the batched shape render._assigned_overlays relies on.
+        # nothing -- including the batched shape render._assigned_overlays relies on.
         wanted = {str(value) for key, value in params or [] if key == "assigned_object_id"}
         if wanted:
             rows = [r for r in rows if str(r.get("assigned_object_id")) in wanted]

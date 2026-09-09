@@ -216,7 +216,7 @@ async def test_graphql_mixed_errors_still_map_to_invalid_data():
 
 
 class _RaisingCM:
-    """Async context manager whose entry raises — models a transport failure."""
+    """Async context manager whose entry raises -- models a transport failure."""
 
     def __init__(self, exc):
         self._exc = exc
@@ -239,7 +239,7 @@ class _RaisingSession:
         return _RaisingCM(self._exc)
 
 
-# A connection error and a timeout — the two native transport failures. Timeout is
+# A connection error and a timeout -- the two native transport failures. Timeout is
 # a builtin TimeoutError (== asyncio.TimeoutError), NOT an aiohttp.ClientError, so
 # it would leak unmapped without the widened except.
 _TRANSPORT_FAILURES = [aiohttp.ClientError("connection refused"), TimeoutError()]
@@ -285,7 +285,7 @@ class _FakeResponse:
 
 async def test_malformed_json_maps_to_invalid_data():
     """A 200 with a non-JSON body (e.g. an HTML error page) is contract-invalid,
-    not a transport error — it must surface as DCIMInvalidDataError, not leak a
+    not a transport error -- it must surface as DCIMInvalidDataError, not leak a
     raw ValueError."""
     client = create_dcim_client("netbox", _OK)
     response = _FakeResponse(
@@ -337,7 +337,7 @@ async def test_rest_list_walks_every_page_and_advances_the_offset():
 
 async def test_rest_list_stops_when_count_is_reached():
     """An endpoint that reports ``next`` past the end of its own ``count`` must not
-    be followed — otherwise a paginator that ignores ``offset`` loops forever
+    be followed -- otherwise a paginator that ignores ``offset`` loops forever
     accumulating duplicate rows."""
     client, calls = _paginating_client(
         [{"count": 2, "next": "?offset=0", "results": [{"id": 1}, {"id": 2}]}] * 5

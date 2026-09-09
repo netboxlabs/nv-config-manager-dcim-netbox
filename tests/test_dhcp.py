@@ -110,8 +110,7 @@ async def test_get_dhcp_auto_subnets_derives_gateway_when_unset():
 
 async def test_get_dhcp_auto_subnets_resolves_interface_reservation():
     """A dhcp-reserve IP assigned to a device interface resolves through
-    interface -> device into a reservation entry (the device-resolution branch,
-    previously uncovered)."""
+    interface -> device into a reservation entry (the device-resolution branch)."""
     reserve_ip = {
         "address": "10.0.0.60/24",
         "assigned_object_type": "dcim.interface",
@@ -231,7 +230,7 @@ async def test_get_dhcp_auto_subnets_builds_option_candidate_from_pool_ip():
     """A dhcp-pool IP assigned to an interface becomes an option candidate
     carrying the interface role (read from the nvcm_interface_role custom field,
     since NetBox has no native interface role). This is what lets a pool/DHCP
-    client — e.g. an OOB management leaf's Uplink — receive subnet-level ZTP
+    client -- e.g. an OOB management leaf's Uplink -- receive subnet-level ZTP
     options it can't get from a reservation."""
     pool_ip = {
         "address": "10.0.0.5/24",

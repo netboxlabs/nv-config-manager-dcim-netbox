@@ -410,7 +410,7 @@ def _render_interface(
 
 
 def _lag_member_map(interfaces: list[dict[str, Any]]) -> dict[str, tuple[str, ...]]:
-    """Map each LAG interface id → the names of its member interfaces.
+    """Map each LAG interface id -> the names of its member interfaces.
 
     NetBox stores the relation as the child's ``lag`` FK; the render contract
     (and the spine ``bond`` templates) want the inverse -- the parent's member
@@ -517,8 +517,8 @@ def _normalize_vrf_name(vrf: Any) -> str:
 def _status_label(value: Any) -> str:
     """Return a NetBox choice's human label (``Active``), not its value (``active``).
 
-    The render contract carries the label -- Nautobot statuses are named objects,
-    so the reference emits ``Active`` and the parity corpus compares against it.
+    The render contract carries the label -- the reference provider's statuses are
+    named objects, so it emits ``Active`` and the parity corpus compares against it.
     """
     if isinstance(value, dict) and value.get("label"):
         return str(value["label"])
@@ -604,10 +604,10 @@ def _bgp_peer(
     if remote.get("address") and not peer_group:
         # The default-VRF neighbour block interpolates peer_group unguarded, so an
         # unidentifiable peer does not render a partial config, it renders an
-        # invalid one. The reference refuses the same case (it requires the peer
-        # endpoint's interface, "the Nautobot BGP plugin does not expose the VRF
-        # association on source_ip"); this is narrower, refusing only when the
-        # field the templates need cannot be produced.
+        # invalid one. The reference provider refuses the same case (it requires the
+        # peer endpoint's interface, its BGP plugin not exposing the VRF association
+        # on source_ip); this is narrower, refusing only when the field the templates
+        # need cannot be produced.
         raise DCIMInvalidDataError(
             f"netbox-bgp session {session.get('id')} has remote address "
             f"{remote.get('address')}, which is assigned to no interface, so its peer "
@@ -663,8 +663,8 @@ def _bgp_instances(
     the instance omits renders no neighbour at all.
 
     netbox-bgp has no per-device routing-instance object -- only sessions -- but
-    the contract does, and Nautobot's exists whether or not the device peers with
-    anyone. ``device_asn`` (the device's own ASN) therefore seeds a peerless
+    the contract does, and the reference provider's exists whether or not the device
+    peers with anyone. ``device_asn`` (the device's own ASN) therefore seeds a peerless
     instance where no session already carries it, so a device that has an ASN and
     no neighbours reports what the reference reports rather than nothing at all.
     """
@@ -1033,7 +1033,7 @@ class NetBoxRenderMixin:
         ]
 
     async def _id_map(self, path: str, ids: set[str]) -> dict[str, dict[str, Any]]:
-        """Fetch objects by id into an ``{id: obj}`` map (empty ids → no fetch)."""
+        """Fetch objects by id into an ``{id: obj}`` map (empty ids -> no fetch)."""
         if not ids:
             return {}
         params = [("id", i) for i in sorted(ids)]

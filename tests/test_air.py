@@ -938,7 +938,7 @@ def test_a_sim_still_booting_has_no_ssh_service_yet():
 
 
 def test_the_password_never_reaches_the_command_line():
-    """sshpass's own help calls `-p` "security unwise" — any same-user `ps` reads
+    """sshpass's own help calls `-p` "security unwise" -- any same-user `ps` reads
     argv.
 
     NVCM's ProxyInfo.start_tunnel uses it; this uses `-d <fd>` and a pipe, so the
@@ -1115,8 +1115,8 @@ def test_the_bring_up_waits_out_a_settling_sshd(monkeypatch):
     """The uploads prove the box is reachable; the bring-up then opens a fresh
     connection, and a settling sshd refuses the odd one with 255.
 
-    SshRunner retries that, but the bring-up used to hand the command straight to
-    NVCM's `_ssh_run_and_tail`, which does not retry and reports a refused
+    SshRunner retries that. Handing the command straight to NVCM's
+    `_ssh_run_and_tail` would not: it does not retry, and reports a refused
     connection exactly like a failed script.
     """
     cb = _callback_for_script()

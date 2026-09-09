@@ -3,9 +3,9 @@
 """NetBox data shapes that are legal but awkward, and must not crash a read.
 
 ``Device.name`` is nullable, related FKs arrive nested or bare, and records can be
-deleted between a list and the follow-up fetch. Each of those used to escape as a
-``KeyError`` / ``AttributeError`` / unhandled 404 rather than an SDK error or a
-skipped row.
+deleted between a list and the follow-up fetch. None of those may escape as a
+``KeyError`` / ``AttributeError`` / unhandled 404; each must surface as an SDK
+error or a skipped row.
 """
 
 from __future__ import annotations

@@ -4,7 +4,7 @@
 
 These spellings are the provider's real contract with NetBox: several reads are
 only correctly scoped because of one exact parameter name. A typo in any of them
-silently changes what NetBox returns — and is invisible to a fake transport that
+silently changes what NetBox returns -- and is invisible to a fake transport that
 routes on path alone, so assert them directly.
 
 The NVCM management flags are ``DeviceConfigStatus`` fields, never ``cf_nvcm_*``

@@ -109,7 +109,7 @@ async def test_get_host_device():
     client = _client(gql={"device": _HOST_GQL})
     host = await client.get_host_device("1")
     assert host.name == "dpu-01" and host.serial == "S1"
-    # Validate the embedded DeviceBayData (previously never populated by a fixture).
+    # Validate the embedded DeviceBayData.
     bay = host.device_bays[0]
     assert (bay.name, bay.id, bay.installed_device_id) == ("bay0", "5", "2")
 

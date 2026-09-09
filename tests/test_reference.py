@@ -142,7 +142,7 @@ async def test_locations_never_offer_two_entries_under_one_id():
     anything else) and sends only that back, so two choices sharing an id are
     indistinguishable -- and `get_location_metadata` would resolve both to the
     Site, silently returning a different object than the one that was picked.
-    Dedup used to key on (id, name), which let the pair through.
+    Dedup therefore keys on the id alone, not on (id, name).
     """
     client = _client(
         gql={
