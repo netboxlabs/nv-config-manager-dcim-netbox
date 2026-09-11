@@ -7,7 +7,7 @@ affected-device fan-out for each native event type the provider registers.
 from __future__ import annotations
 
 import pytest
-from nv_config_manager_dcim import DCIMChangeEvent
+from nv_config_manager_dcim import DCIMChangeEvent, DCIMConnectivityError, DCIMInvalidDataError
 
 from nv_config_manager_dcim_netbox.events import (
     _HANDLERS,
@@ -159,7 +159,10 @@ async def test_overlay_assignment_to_interface_resolves_device_via_client():
     assert [r.device_id for r in requests] == ["8"]
 
 
-async def test_overlay_assignment_interface_resolution_error_is_noop():
+async def test_overlay_assignment_interface_resolution_error_raises():
+    """See test_cross_object_resolution_error_raises: a handler that returns
+    normally is recorded as a processed event, so a failure must not."""
+
     class FakeClient:
         async def rest_request(self, *args, **kwargs):
             raise RuntimeError("boom")
@@ -167,8 +170,8 @@ async def test_overlay_assignment_interface_resolution_error_is_noop():
     event = _event(
         _OVERLAY_TYPE, "1", {"assigned_object_type": "dcim.interface", "assigned_object_id": 12}
     )
-    requests = await _overlay_assignment_changed(event, FakeClient())
-    assert requests == ()
+    with pytest.raises(DCIMInvalidDataError):
+        await _overlay_assignment_changed(event, FakeClient())
 
 
 async def test_overlay_assignment_without_assigned_id_is_noop():
@@ -268,7 +271,15 @@ async def test_cross_object_delete_is_noop():
     assert await _dispatch(_event("ipam.vrf", "9", operation="delete"), None) == ()
 
 
-async def test_cross_object_resolution_error_is_noop():
+async def test_cross_object_resolution_error_raises():
+    """A swallowed resolution failure is worse than a noisy one.
+
+    The dispatcher counts a handler that returns normally as processed and
+    acknowledges the message, so returning () here would file a lost render under
+    EVENT_PROCESSED_COUNTER: the change never renders and the failure metric shows
+    nothing wrong. The reference provider raises on the same paths.
+    """
+
     class _Boom:
         async def rest_list(self, *args, **kwargs):
             raise RuntimeError("boom")
@@ -276,7 +287,23 @@ async def test_cross_object_resolution_error_is_noop():
         async def rest_request(self, *args, **kwargs):
             raise RuntimeError("boom")
 
-    assert await _dispatch(_event("ipam.vrf", "9"), _Boom()) == ()
+    with pytest.raises(DCIMInvalidDataError):
+        await _dispatch(_event("ipam.vrf", "9"), _Boom())
+
+
+async def test_cross_object_dcim_errors_propagate_unchanged():
+    """A DCIMError already carries the right classification for the dispatcher's
+    failure counter; only unexpected exceptions are wrapped."""
+
+    class _Unreachable:
+        async def rest_list(self, *args, **kwargs):
+            raise DCIMConnectivityError("NetBox REST request failed")
+
+        async def rest_request(self, *args, **kwargs):
+            raise DCIMConnectivityError("NetBox REST request failed")
+
+    with pytest.raises(DCIMConnectivityError):
+        await _dispatch(_event("ipam.vrf", "9"), _Unreachable())
 
 
 async def test_a_malformed_device_id_drops_the_fanout_instead_of_raising():

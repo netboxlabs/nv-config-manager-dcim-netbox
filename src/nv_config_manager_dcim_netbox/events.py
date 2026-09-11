@@ -16,7 +16,7 @@ import logging
 from functools import partial
 from typing import TYPE_CHECKING
 
-from nv_config_manager_dcim import RenderEventRequest
+from nv_config_manager_dcim import DCIMError, DCIMInvalidDataError, RenderEventRequest
 
 from nv_config_manager_dcim_netbox._mappers import fk_id as _fk_id
 from nv_config_manager_dcim_netbox.client import is_netbox_pk
@@ -100,9 +100,12 @@ async def _overlay_assignment_changed(event: DCIMChangeEvent, client: DCIMClient
     if assigned_type == "dcim.interface":
         try:
             interface = await client.rest_request("GET", f"dcim/interfaces/{assigned_id}/")
-        except Exception:  # noqa: BLE001 - fan-out resolution is best-effort
-            logger.exception("Failed to resolve interface %s for render fan-out", assigned_id)
-            return ()
+        except DCIMError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - external client
+            raise DCIMInvalidDataError(
+                f"Failed to resolve interface {assigned_id} for render fan-out: {exc}"
+            ) from exc
         device = (interface or {}).get("device") or {}
         return _requests(event, device.get("id") if isinstance(device, dict) else device)
     return ()
@@ -140,13 +143,29 @@ _PREFIX_SCOPE_FILTERS = {
 
 
 async def _cross(event: DCIMChangeEvent, client: DCIMClient, resolver):
+    """Resolve the devices a non-device change affects, and fail loudly if it cannot.
+
+    A failed resolution is *not* swallowed. The dispatcher counts a handler that
+    returns normally as a processed event and acknowledges it, so catching here
+    would file a lost render under EVENT_PROCESSED_COUNTER -- the change is gone
+    and the failure metric says nothing happened. Raising files it under
+    EVENT_FAILED_COUNTER instead, which is what the reference provider does
+    (dcim-nautobot-2x events.py raises DCIMInvalidDataError on the same paths).
+
+    A DCIMError is re-raised as-is; anything else is wrapped in one rather than
+    left to escape the dispatcher, which would nak the message and redeliver a
+    deterministic failure forever.
+    """
     if event.operation == "delete":
         return ()
     try:
         device_ids = await resolver(event, client)
-    except Exception:  # noqa: BLE001 - fan-out resolution is best-effort
-        logger.exception("Render fan-out failed for %s %s", event.object_type, event.object_id)
-        return ()
+    except DCIMError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - external client
+        raise DCIMInvalidDataError(
+            f"Render fan-out failed for {event.object_type} {event.object_id}: {exc}"
+        ) from exc
     return _requests_multi(event, device_ids)
 
 

@@ -299,7 +299,11 @@ async def test_shared_bgp_fanout_delete_is_noop():
     assert await _HANDLERS["ipam.asn"](_event("ipam.asn", "7", operation="delete"), client) == ()
 
 
-async def test_shared_bgp_fanout_resolution_error_is_noop():
+async def test_shared_bgp_fanout_resolution_error_raises():
+    """The reference's equivalent handler (``autonomoussystem``) wraps its client
+    call in no try/except at all, so a failed resolution propagates. Returning ()
+    here would instead record the lost render as a processed event."""
+
     class _Boom:
         async def rest_list(self, *args, **kwargs):
             raise RuntimeError("boom")
@@ -307,7 +311,8 @@ async def test_shared_bgp_fanout_resolution_error_is_noop():
         async def rest_request(self, *args, **kwargs):
             raise RuntimeError("boom")
 
-    assert await _HANDLERS["ipam.asn"](_event("ipam.asn", "7"), _Boom()) == ()
+    with pytest.raises(DCIMInvalidDataError):
+        await _HANDLERS["ipam.asn"](_event("ipam.asn", "7"), _Boom())
 
 
 async def test_registration_includes_shared_bgp_handlers():

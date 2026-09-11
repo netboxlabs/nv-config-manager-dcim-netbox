@@ -149,6 +149,40 @@ _REST_MAP = {
 }
 
 
+# REST filters the fake honours, as `param -> row field`. Scoping is the whole
+# point of several of these queries (a device must not receive every fabric VNI),
+# so a fake that returned the full canned list for every call would let rows reach
+# assembly that production has already filtered out -- and would then exercise
+# error paths that are unreachable against a real NetBox. Filters not listed here
+# are ignored, which is safe: the assembly code re-checks scope in Python.
+_FAKE_FILTERS = {"id": "id", "overlay_id": "overlay", "vrf_id": "vrf", "vlan_id": "vlan"}
+
+
+def _fk(value):
+    """The row's FK as a string id, whether nested (`{"id": 8}`) or bare (`8`)."""
+    if isinstance(value, dict):
+        value = value.get("id")
+    return None if value is None else str(value)
+
+
+def _fake_rows(rest_map, path, params=None):
+    """The rows a NetBox list endpoint would return for *params*.
+
+    Shared by every fake in this module, including the ones that wrap it to spy on
+    the params: a fake that ignored filters would hand assembly rows production has
+    already excluded.
+    """
+    rows = rest_map.get(path, [])
+    # NetBox ANDs across distinct filter names and ORs repeated values.
+    wanted: dict[str, set[str]] = {}
+    for key, value in params or []:
+        if (field := _FAKE_FILTERS.get(key)) is not None:
+            wanted.setdefault(field, set()).add(str(value))
+    for field, values in wanted.items():
+        rows = [row for row in rows if _fk(row.get(field)) in values]
+    return rows
+
+
 def _client_with(device, rest_map):
     client = create_dcim_client("netbox", _SETTINGS)
 
@@ -156,7 +190,7 @@ def _client_with(device, rest_map):
         return {"device": device}
 
     async def fake_rest_list(path, params=None):
-        return rest_map.get(path, [])
+        return _fake_rows(rest_map, path, params)
 
     client.graphql_query = fake_graphql
     client.rest_list = fake_rest_list
@@ -462,7 +496,7 @@ async def test_location_topology_route_servers_and_wan_routers():
         if path == "dcim/interfaces/":
             starts_with = [v for k, v in (params or []) if k == "name__isw"]
             if not starts_with:
-                return rest.get(path, [])
+                return _fake_rows(rest, path, params)
             # One query covers every device, so the rows carry their own device.
             device_ids = {v for k, v in (params or []) if k == "device_id"}
             return [{"id": 50, "name": "lo", "device": {"id": 5}} for _ in [1] if "5" in device_ids]
@@ -475,7 +509,7 @@ async def test_location_topology_route_servers_and_wan_routers():
                 for i in sorted(selected)
                 if i in addresses
             ]
-        return rest.get(path, [])
+        return _fake_rows(rest, path, params)
 
     client.graphql_query = fake_graphql
     client.rest_list = fake_rest_list
@@ -530,7 +564,7 @@ async def test_location_topology_degrades_when_netbox_rejects_the_tag_or_role_sl
     async def fake_rest_list(path, params=None):
         if path == "dcim/devices/" and any(k in ("tag", "role") for k, _ in params or []):
             raise DCIMInvalidDataError("NetBox rejected the request (400)")
-        return rest.get(path, [])
+        return _fake_rows(rest, path, params)
 
     client.graphql_query = fake_graphql
     client.rest_list = fake_rest_list
@@ -600,6 +634,54 @@ async def test_l2_vni_vrfs_excludes_interface_only_overlays():
     assert rd.device.overlays.l2_vni_vrfs == ()
 
 
+async def test_an_unresolvable_l2_vlan_fails_the_render_instead_of_dropping_the_vni():
+    """A VNI missing from a rendered config is deployed to the switch.
+
+    The VXLAN names a VLAN, so the data says the VNI exists; if the follow-up
+    lookup cannot return that VLAN, the device cannot be described correctly and
+    the render must fail rather than emit a config quietly missing it. Matches the
+    reference provider ("L2 VNI is missing its VLAN assignment").
+    """
+    rest = copy.deepcopy(_REST_MAP)
+    rest["ipam/vlans/"] = [v for v in rest["ipam/vlans/"] if str(v.get("id")) != "100"]
+    client = _client_with(_DEVICE, rest)
+    try:
+        with pytest.raises(DCIMInvalidDataError, match="VLAN 100"):
+            await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+
+async def test_an_unresolvable_l3_vrf_fails_the_render():
+    rest = copy.deepcopy(_REST_MAP)
+    rest["ipam/vrfs/"] = []
+    client = _client_with(_DEVICE, rest)
+    try:
+        with pytest.raises(DCIMInvalidDataError, match="VRF 8"):
+            await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+
+async def test_a_vxlan_naming_no_vlan_is_skipped_not_fatal(caplog):
+    """The other half of the split: VXLAN.vlan is nullable and the plugin does not
+    require it per vni_type, so a VXLAN that names nothing is incomplete data --
+    logged and skipped, never a failed render for every device on the overlay."""
+    rest = copy.deepcopy(_REST_MAP)
+    for vxlan in rest["plugins/nv-config-manager/vxlans/"]:
+        if vxlan.get("vni_type") == "l2":
+            vxlan["vlan"] = None
+    client = _client_with(_DEVICE, rest)
+    try:
+        with caplog.at_level("WARNING"):
+            rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+    assert rd.device.overlays.l2_vnis == ()
+    assert "names no VLAN" in caplog.text
+
+
 async def test_l2_vnis_include_attached_vlans_whose_overlay_is_unassigned():
     """The reference admits an L2 VNI on overlay assignment *or* VLAN attachment.
 
@@ -641,7 +723,7 @@ async def test_peer_groups_are_scoped_to_the_ids_the_sessions_reference():
     async def fake_rest_list(path, params=None):
         if path == "plugins/bgp/peer-group/":
             seen.append(list(params or []))
-        return rest.get(path, [])
+        return _fake_rows(rest, path, params)
 
     client.graphql_query = fake_graphql
     client.rest_list = fake_rest_list
@@ -665,7 +747,7 @@ async def test_no_peer_group_read_when_no_session_references_one():
     async def fake_rest_list(path, params=None):
         if path == "plugins/bgp/peer-group/":
             raise AssertionError("must not read peer groups when none are referenced")
-        return rest.get(path, [])
+        return _fake_rows(rest, path, params)
 
     async def fake_graphql(query, variables=None):
         return {"device": _DEVICE}
@@ -699,7 +781,7 @@ async def test_topology_device_in_both_lists_is_fetched_once_and_appears_in_both
             return [{"id": 50, "name": "lo"}]
         if path == "ipam/ip-addresses/":
             return [{"address": "10.9.9.9/32"}]
-        return rest.get(path, [])
+        return _fake_rows(rest, path, params)
 
     client.graphql_query = fake_graphql
     client.rest_list = fake_rest_list
@@ -735,7 +817,7 @@ async def test_one_wan_role_query_per_role_so_an_undefined_role_keeps_the_other(
             return []
         if path == "dcim/interfaces/" and any(k == "name__isw" for k, _ in params or []):
             return []
-        return rest.get(path, [])
+        return _fake_rows(rest, path, params)
 
     client.graphql_query = fake_graphql
     client.rest_list = fake_rest_list

@@ -1108,9 +1108,32 @@ class NetBoxRenderMixin:
             )
             vnid = vxlan.get("vnid")
             if vxlan.get("vni_type") == "l3":
-                vrf = _render_vrf(vrf_map.get(str(fk_id(vxlan.get("vrf")))))
-                if vrf is None:
+                # Two different failures, which must not share an outcome:
+                #
+                # No VRF named at all is legal -- VXLAN.vrf is nullable and the
+                # plugin's clean() does not require it per vni_type -- so it is
+                # incomplete data, logged and skipped.
+                #
+                # A VRF named but *unresolvable* means the follow-up id query did
+                # not return a row the VXLAN points at. Skipping there would emit a
+                # config silently missing this VNI, which is then deployed to the
+                # switch; the reference provider raises in the same place
+                # (dcim-nautobot-2x render.py, "L3 VNI is missing its VRF
+                # assignment") and so do we.
+                vrf_ref = fk_id(vxlan.get("vrf"))
+                if vrf_ref is None:
+                    logger.warning(
+                        "Skipping L3 VNI from VXLAN %s on device %s: it names no VRF",
+                        vxlan.get("id"),
+                        device_id,
+                    )
                     continue
+                vrf = _render_vrf(vrf_map.get(str(vrf_ref)))
+                if vrf is None:
+                    raise DCIMInvalidDataError(
+                        f"NetBox device {device_id} L3 VNI (VXLAN {vxlan.get('id')}) references "
+                        f"VRF {vrf_ref}, which could not be resolved"
+                    )
                 l3.append(
                     RenderL3Vni(
                         vrf=vrf,
@@ -1120,9 +1143,21 @@ class NetBoxRenderMixin:
                     )
                 )
             else:
-                vlan = _render_vlan(vlan_map.get(str(fk_id(vxlan.get("vlan")))))
-                if vlan is None:
+                # Same split as the L3 branch above.
+                vlan_ref = fk_id(vxlan.get("vlan"))
+                if vlan_ref is None:
+                    logger.warning(
+                        "Skipping L2 VNI from VXLAN %s on device %s: it names no VLAN",
+                        vxlan.get("id"),
+                        device_id,
+                    )
                     continue
+                vlan = _render_vlan(vlan_map.get(str(vlan_ref)))
+                if vlan is None:
+                    raise DCIMInvalidDataError(
+                        f"NetBox device {device_id} L2 VNI (VXLAN {vxlan.get('id')}) references "
+                        f"VLAN {vlan_ref}, which could not be resolved"
+                    )
                 l2_vni = RenderL2Vni(
                     vlan=vlan,
                     vni=vnid,
