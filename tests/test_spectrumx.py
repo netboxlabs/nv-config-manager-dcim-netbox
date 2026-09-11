@@ -299,3 +299,40 @@ async def test_stale_assignment_cleanup_compares_overlay_ids_as_strings():
     removed = await client._remove_stale_spx_interface_assignments(7, ["11"])
     assert removed == 0
     assert not [p for m, p, _ in record if m == "DELETE"]
+
+
+async def test_typed_site_survives_the_vrf_site_fallback():
+    """``SpectrumXVRF.site`` is a plain string in the SDK contract.
+
+    NVCM sends a typed reference (spx_overlay builds one from site + site_type),
+    and a VRF with no attached interfaces -- a freshly provisioned overlay, before
+    the assignment workflow runs -- falls back to it, so it must be unwrapped.
+    """
+    from nv_config_manager_dcim import DCIMLocationReference
+
+    async def _overlay(name, scope=None, *, scope_type):
+        return {"id": 10, "name": name}
+
+    client = fake_client(
+        rest_list={
+            "plugins/nv-config-manager/vxlans/": [{"id": 1, "vrf": 1, "overlay": 10}],
+        },
+        gql={
+            "vrf_list": [
+                {
+                    "id": 1,
+                    "name": "SpXTenant5000",
+                    "rd": "*:5000",
+                    "tags": [{"name": "spectrumx"}, {"name": "ns-a"}],
+                    "interfaces": [],
+                }
+            ]
+        },
+        patch={"_find_overlay": _overlay},
+    )
+
+    vrfs = await client.get_spectrum_x_vrfs(
+        "spx-overlay", DCIMLocationReference(id="1", location_type="Site")
+    )
+
+    assert [(v.name, v.site) for v in vrfs] == [("SpXTenant5000", "1")]

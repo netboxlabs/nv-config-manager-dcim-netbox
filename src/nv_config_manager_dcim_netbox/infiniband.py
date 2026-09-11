@@ -620,8 +620,16 @@ class NetBoxInfiniBandMixin:
                 f"Multiple orphan PKeys {pkey_norm!r} ({details}); "
                 "resolve the duplicates before adopting"
             )
-        if location_id is None:
-            raise DCIMInvalidDataError("Device has no location to host an orphan PKey overlay")
+        # Anchor where the read path looks: the device's Location when it has one,
+        # otherwise its Site -- matching the scopes ``resolve_ib_pkey_context``
+        # searches, so an adopted overlay is findable on the next call.
+        scope_type, scope_id = LOCATION_SCOPE_TYPE, location_id
+        if scope_id is None:
+            scope_type, scope_id = SITE_SCOPE_TYPE, self._fk_id(device.get("site") or {})
+        if scope_id is None:
+            raise DCIMInvalidDataError(
+                "Device has no Location or Site to host an orphan PKey overlay"
+            )
         # The reference provider requires a Tenant on the device before it will
         # auto-create an overlay for an orphan PKey; enforce the same guard here.
         tenant_id = self._fk_id(device.get("tenant") or {})
@@ -632,22 +640,21 @@ class NetBoxInfiniBandMixin:
                 "overlay and link the PKey to it."
             )
         overlay_name = f"ib-pkey-overlay-{pkey_norm}"
-        # ``location_id`` is the device's Location PK; scope the overlay to that
-        # Location directly (no name resolution needed since we already have the id).
+        # Scoped by pk directly -- the id is already in hand, so no name resolution.
         existing = await self.rest_list(
             self.OVERLAYS_PATH,
             [
                 ("name", overlay_name),
-                ("scope_id", str(location_id)),
-                ("scope_type", LOCATION_SCOPE_TYPE),
+                ("scope_id", str(scope_id)),
+                ("scope_type", scope_type),
             ],
         )
         overlay = existing[0] if existing else None
         if not overlay:
             body = {
                 "name": overlay_name,
-                "scope_type": LOCATION_SCOPE_TYPE,
-                "scope_id": location_id,
+                "scope_type": scope_type,
+                "scope_id": scope_id,
                 "isolation_type": _IB_PKEY_ISOLATION,
                 "status": FABRIC_STATUS,
                 "tenant": tenant_id,

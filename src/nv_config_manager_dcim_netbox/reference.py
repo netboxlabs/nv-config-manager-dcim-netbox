@@ -161,14 +161,16 @@ class NetBoxReferenceMixin:
         """
         requested = [t.strip() for t in location_types if t and t.strip()]
         models: list[str] = []
-        subtypes: list[str] = []
+        subtypes: set[str] = set()
         for raw in requested or _DEFAULT_LOCATION_TYPES:
             model = _MODEL_KEYS.get(raw.lower().replace(" ", "_"))
             if model is not None:
                 if model not in models:
                     models.append(model)
-            elif raw not in subtypes:
-                subtypes.append(raw)
+            else:
+                # Casefolded, matching the model lookup above: ("module",) and
+                # ("Module",) name the same thing.
+                subtypes.add(raw.casefold())
 
         # A subtype is a Location narrowed by its custom field, so asking for one
         # means reading that model even when it was not named outright.
@@ -184,7 +186,7 @@ class NetBoxReferenceMixin:
                 # Only filter the Location read, and only when the caller asked
                 # for subtypes without asking for the model itself.
                 if kind == "location" and subtypes and "location" not in models:
-                    if location_type not in subtypes:
+                    if location_type.casefold() not in subtypes:
                         continue
                 out.append(
                     DCIMSelection(id=str(row["id"]), name=row["name"], location_type=location_type)
@@ -272,7 +274,9 @@ class NetBoxReferenceMixin:
         data = await self.graphql_query(_DEVICE_ROLES_QUERY)
         return _selections(data.get("device_role_list") or [])
 
-    async def list_namespace_tags(self, location: str | None = None) -> list[str]:
+    async def list_namespace_tags(
+        self, location: DCIMLocationIdentifier | None = None
+    ) -> list[str]:
         """Return the namespace tag names in use across NetBox VRFs.
 
         NetBox has no first-class IPAM namespace: a namespace is a VRF, and a
@@ -303,7 +307,7 @@ class NetBoxReferenceMixin:
         return sorted(tags)
 
     async def list_overlays(
-        self, location: str | None = None, isolation_type: str | None = None
+        self, location: DCIMLocationIdentifier | None = None, isolation_type: str | None = None
     ) -> list[DCIMSelection]:
         params = []
         if isolation_type:

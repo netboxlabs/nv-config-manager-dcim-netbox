@@ -264,3 +264,17 @@ async def test_get_location_metadata_resolves_a_site_id():
     client = _client(gql={"lvl0": [{"id": 1, "name": "TRIAL01 - demo"}]})
     found = await client.get_location_metadata("1")
     assert found is not None and found.name == "TRIAL01 - demo"
+
+
+async def test_subtype_matching_is_case_insensitive():
+    """The model lookup casefolds, so the subtype comparison beside it must too."""
+    client = _client(
+        gql={
+            "location_list": [
+                {"id": 1, "name": "SUPERPOD 1", "custom_fields": {"nvcm_location_type": "Module"}},
+            ]
+        }
+    )
+
+    assert [s.name for s in await client.list_locations(("module",))] == ["SUPERPOD 1"]
+    assert [s.name for s in await client.list_locations(("MODULE",))] == ["SUPERPOD 1"]

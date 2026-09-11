@@ -282,10 +282,12 @@ class FabricCommonMixin:
 
         Returns the row, so one lookup serves both ``scope_id`` and ``cf_nvcm_site``.
         """
-        if value is None or value == "":
-            return None
+        # Unwrapped before the emptiness check: a reference is truthy whatever its
+        # id, so guarding first lets an empty one through into slug=/name= lookups.
         scope_type = scope_type_for(dcim_location_type(value)) or scope_type
         value = dcim_location_id(value) if isinstance(value, DCIMLocationReference) else value
+        if value is None or value == "":
+            return None
         try:
             path = SCOPE_PATHS[scope_type]
         except KeyError:

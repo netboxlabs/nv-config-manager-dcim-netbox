@@ -120,3 +120,24 @@ async def test_resolve_scope_accepts_a_bare_id():
     row = await client._resolve_scope("1", scope_type=LOCATION_SCOPE_TYPE)
 
     assert row is not None and row["name"] == "Module1"
+
+
+async def test_a_reference_with_an_empty_id_resolves_to_none():
+    """A reference is truthy whatever its id, so the unwrap has to precede the
+    emptiness guard -- otherwise an empty id reaches slug=/name= lookups."""
+    seen: list[tuple[str, list]] = []
+    client = _client(rest_list=_ROWS)
+    inner = client.rest_list
+
+    async def spy(path, params=None, **kwargs):
+        seen.append((path, list(params or [])))
+        return await inner(path, params, **kwargs)
+
+    client.rest_list = spy
+
+    row = await client._resolve_scope(
+        DCIMLocationReference(id="", location_type="Site"), scope_type=SITE_SCOPE_TYPE
+    )
+
+    assert row is None
+    assert not seen, "an empty id must not be looked up"
