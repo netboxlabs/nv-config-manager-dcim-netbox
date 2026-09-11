@@ -21,6 +21,7 @@ render-data field mapping see [NetBox data mapping](./netbox-data-mapping.mdx).
 | **Config lifecycle / state** (9) | `get_render_device_status`, `get_render_enabled_device_ids`, `get_render_template_versions`, `upsert_intended_configuration`, `update_render_template_version`, `get_backup_enabled_device_ids`, `get_configuration_backup_metadata`, `record_configuration_backup`, `has_recorded_config_drift` | Backed by the plugin's `DeviceConfigStatus` / `IntendedConfig` / `BackupConfig` models, not device custom fields. |
 | **DHCP** (4) | `get_dhcp_site_options`, `get_dhcp_contexts`, `get_dhcp_static_data`, `get_dhcp_auto_subnets` | **Read-only** (generates Kea config); does not write DCIM. |
 | **ZTP** (2) | `get_ztp_device`, `mark_ztp_device_provisioned` | Writes NetBox device status `provisioned` — an extra choice the companion plugin registers (see below). |
+| **Cable validation** (1) | `update_cable_status` | Stores Connected, Disconnected, or Invalid in the cable's `validation_status` custom field. |
 | **Firmware** (4) | `get_os_image_versions`, `set_intended_os_image`, `get_firmware_bundle`, `set_device_firmware_intent` | Sourced from the merged `config_context`. |
 | **Hosts / MAC correlation** (6) | `find_host_devices_by_mac`, `update_dpu_device_inventory`, `get_interface_hosts_by_mac`, `get_host_metadata_by_macs`, `get_host_metadata_by_names`, `get_connected_switch_port_by_remote_mac` | MAC is a first-class `MACAddress` object. |
 | **Secrets** (3) | `get_device_password_mapping_users`, `get_device_secret_versions`, `get_device_password_secret_names` | Returns secret **references** from `config_context`; no secret store. |
@@ -52,6 +53,12 @@ NetBox-native concept rather than a 1:1 equivalent:
   `provisioned`), and including model-specific sets such as `dcim.cable`'s
   `connected`. A content type with no status field, or an unknown one, raises
   `DCIMInvalidDataError` rather than returning an empty list.
+- **Cable validation status uses a custom field.** NetBox's native cable link
+  choices are not extensible and do not represent Disconnected or Invalid. The
+  companion plugin bootstrap therefore creates a `validation_status` select
+  field on cables, and `update_cable_status` writes all three validation
+  outcomes there without changing the native link status. An event that changes
+  only this field does not trigger device renders.
 - **MAC = `MACAddress` model.** NetBox 4.x has no scalar `interface.mac_address`;
   MACs are `MACAddress` objects with the interface's `primary_mac_address`
   pointing at one. `update_dpu_device_inventory` upserts them.

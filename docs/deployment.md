@@ -168,7 +168,8 @@ fine for a lab. For production, grant the token's user:
   `netbox-bgp` sessions.
 - **Write** on the plugin lifecycle models (device/intended/backup config),
   overlays, vxlans and VRFs (Spectrum-X), interfaces and mac-addresses (DPU
-  inventory), and devices (serial updates, interface VRF assignment).
+  inventory), devices (serial updates, interface VRF assignment), and cables
+  (validation-status custom-field updates).
 - **OPTIONS**, used to read field choices such as statuses.
 
 ## Troubleshooting

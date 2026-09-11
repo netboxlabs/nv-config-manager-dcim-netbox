@@ -171,6 +171,17 @@ async def _cable_devices(event, client):
     return device_ids
 
 
+async def _cable_changed(event: DCIMChangeEvent, client: DCIMClient):
+    """Avoid rendering when validation only changes its cable custom field."""
+    if (
+        event.operation == "update"
+        and event.changed_fields
+        and set(event.changed_fields) <= {"custom_fields.validation_status"}
+    ):
+        return ()
+    return await _cross(event, client, _cable_devices)
+
+
 async def _prefix_devices(event, client):
     prefix = await client.rest_request("GET", f"ipam/prefixes/{event.object_id}/")
     param = _PREFIX_SCOPE_FILTERS.get((prefix or {}).get("scope_type"))
@@ -252,7 +263,7 @@ _HANDLERS = {
     "dcim.interface": _parent_device_changed,
     "dcim.rearport": _parent_device_changed,
     "dcim.frontport": _parent_device_changed,
-    "dcim.cable": _cross_handler(_cable_devices),
+    "dcim.cable": _cable_changed,
     "extras.configcontext": _cross_handler(_config_context_devices),
     "ipam.vrf": _cross_handler(_vrf_devices),
     "ipam.prefix": _cross_handler(_prefix_devices),

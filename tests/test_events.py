@@ -48,7 +48,7 @@ class _FanoutClient:
         return self._list.get(path, [])
 
 
-def _event(object_type, object_id, record=None, operation="update"):
+def _event(object_type, object_id, record=None, operation="update", changed_fields=None):
     return DCIMChangeEvent.from_dict(
         {
             "provider": "netbox",
@@ -57,7 +57,7 @@ def _event(object_type, object_id, record=None, operation="update"):
             "object_id": str(object_id),
             "timestamp": "2026-07-29T00:00:00Z",
             "record": record or {},
-            "changed_fields": [],
+            "changed_fields": changed_fields or [],
             "contract_version": "1.0",
         }
     )
@@ -235,6 +235,35 @@ async def test_cable_change_fans_out_to_both_terminations():
         }
     )
     requests = await _dispatch(_event("dcim.cable", "2"), client)
+    assert sorted(r.device_id for r in requests) == ["1", "2"]
+
+
+async def test_cable_validation_status_only_change_does_not_render():
+    event = _event(
+        "dcim.cable",
+        "2",
+        changed_fields=["custom_fields.validation_status"],
+    )
+
+    assert await _dispatch(event, _FanoutClient()) == ()
+
+
+async def test_cable_mixed_change_still_renders():
+    client = _FanoutClient(
+        rest_get={
+            "dcim/cables/2/": {
+                "a_terminations": [{"object": {"device": {"id": 1}}}],
+                "b_terminations": [{"object": {"device": {"id": 2}}}],
+            }
+        }
+    )
+    event = _event(
+        "dcim.cable",
+        "2",
+        changed_fields=["custom_fields.validation_status", "label"],
+    )
+
+    requests = await _dispatch(event, client)
     assert sorted(r.device_id for r in requests) == ["1", "2"]
 
 
