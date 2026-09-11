@@ -12,6 +12,8 @@ from nv_config_manager_dcim import (
     discover_dcim_providers,
 )
 
+from nv_config_manager_dcim_netbox import NetBoxProvider
+
 # Area marker for `make <area>` / `pytest -m <area>`.
 pytestmark = pytest.mark.lifecycle
 
@@ -21,7 +23,18 @@ def test_provider_is_discovered_via_entry_point():
     assert "netbox" in providers
     metadata = providers["netbox"].metadata
     assert metadata.name == "netbox"
-    assert DCIM_PROVIDER_API_VERSION in metadata.supported_api_versions
+
+
+def test_declared_api_versions_cover_the_installed_sdk():
+    """The tripwire for an SDK bump.
+
+    `supported_api_versions` is a literal, so this comparison is real: it fails
+    when the installed SDK moves past what this provider was written against,
+    rather than passing by construction. Fixing it means re-checking the coupling
+    surface (the DCIMClient protocol, the render models, the cache schema) and
+    then widening `SUPPORTED_API_VERSIONS` -- not editing this test.
+    """
+    assert DCIM_PROVIDER_API_VERSION in NetBoxProvider.metadata.supported_api_versions
 
 
 def test_create_client_requires_server_and_token():

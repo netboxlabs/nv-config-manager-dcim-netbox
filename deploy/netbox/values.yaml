@@ -33,6 +33,13 @@ nvcm:
   # consumes them.
   eventSubject: netbox.change
 
+  # Must equal NVCM's `[nats] dcim_change_stream` (`dcim.events.stream`). The
+  # plugin publishes into it with JetStream, so each event is acked as stored
+  # rather than fired into the dark, and the stream is checked at connect -- a
+  # name that disagrees with NVCM's fails loudly instead of losing every event.
+  # `nvcm-netbox verify` compares the two.
+  eventStream: netbox
+
   # Base URL of NVCM's workflow UI, e.g. https://config-manager.local. The
   # Deploy and See Diff controls link to prefilled workflow forms under
   # `<workflowUrl>/workflows/<name>/form`; while it is empty they render as
