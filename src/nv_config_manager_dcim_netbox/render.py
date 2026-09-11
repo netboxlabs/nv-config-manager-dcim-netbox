@@ -737,8 +737,13 @@ def _bgp_instances(
 def _address_family_set(value: Any, model: type, described_as: str):
     """Build a ``{ipv4, ipv6}`` context value into ``model``, or ``None`` if empty.
 
-    Shared by the endpoint (host addresses) and prefix (CIDR) sets -- the two
-    differ only in which SDK model validates the values.
+    Shared by the endpoint (service reachability) and prefix (CIDR) sets. Only the
+    SDK model validates, and the two no longer validate alike: ``RenderPrefixSet``
+    is typed ``IPvAnyNetwork`` and rejects a malformed prefix, while
+    ``RenderEndpointSet`` is plain ``str`` because a service endpoint may be a
+    hostname rather than a literal address. So the raise below is reachable for
+    prefixes and, by design, not for endpoints -- config_context values that are
+    neither an address nor a resolvable name reach the templates unchallenged.
     """
     if not isinstance(value, dict):
         return None
