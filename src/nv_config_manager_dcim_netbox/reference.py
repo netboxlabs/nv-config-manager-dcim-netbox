@@ -5,43 +5,73 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
-from nv_config_manager_dcim import DCIMInvalidDataError, DCIMNotFoundError, DCIMSelection
+from nv_config_manager_dcim import (
+    DCIMInvalidDataError,
+    DCIMLocationIdentifier,
+    DCIMNotFoundError,
+    DCIMSelection,
+    dcim_location_id,
+    dcim_location_type,
+)
 
-from nv_config_manager_dcim_netbox.fabric_common import VRFS_PATH, chunked
+from nv_config_manager_dcim_netbox.fabric_common import (
+    LOCATION_SCOPE_TYPE,
+    REGION_SCOPE_TYPE,
+    SITE_SCOPE_TYPE,
+    SITEGROUP_SCOPE_TYPE,
+    VRFS_PATH,
+    chunked,
+    scope_type_for,
+)
 
 logger = logging.getLogger(__name__)
 
-# NVCM asks for locations by type ("Site" for the site dropdown). NetBox has no
-# per-location type field; its hierarchy *is* the type, one model per level. So a
-# requested type selects the model to query rather than filtering one list.
+# NVCM asks for locations by type -- "Site" for the site dropdown, "Module" for a
+# sub-site level. NetBox splits that one hierarchy across four models, and only
+# ``dcim.Location`` carries a type of its own: the topology loader parks the
+# source LocationType name in the ``nvcm_location_type`` custom field.
 #
-# Devices attach to a Site, and the mock-topology loader maps a blueprint's
-# Provider/Region levels onto Regions and its Site level onto a Site, creating no
-# NetBox Location objects at all. Querying `location_list` therefore returned
-# nothing and left NVCM's site dropdown empty.
-_LOCATION_MODELS = {
-    "site": ("site_list", "site"),
-    "region": ("region_list", "region"),
-    "sitegroup": ("site_group_list", "site_group"),
-    "site_group": ("site_group_list", "site_group"),
-    "location": ("location_list", "location"),
+# So a requested type either names one of the four models, or names a Location
+# subtype to filter that model by. ``DCIMSelection.location_type`` answers in the
+# same vocabulary, so a value from ``list_locations`` can be passed straight back.
+_MODEL_KEYS = {
+    "region": "region",
+    "sitegroup": "sitegroup",
+    "site_group": "sitegroup",
+    "site": "site",
+    "location": "location",
+}
+_MODEL_QUERY = {
+    "region": ("region_list", "Region"),
+    "sitegroup": ("site_group_list", "SiteGroup"),
+    "site": ("site_list", "Site"),
+    "location": ("location_list", "Location"),
 }
 
-# With no type given, return what devices can actually be scoped to: a Site, or
-# one of its optional Location sub-groupings. Sites first, because ids are
-# per-model in NetBox -- a Site and a Location can hold the same PK, and only one
-# of them can be offered under that id (see list_locations).
-_DEFAULT_LOCATION_MODELS = ("site", "location")
+# Written by the plugin's topology loader; also what the render reports as
+# ``location.kind``.
+_LOCATION_TYPE_FIELD = "nvcm_location_type"
 
-# Order in which a bare PK is resolved back to an object. NVCM stores a location
-# id as the plain integer NetBox uses (`is_valid_location_id` rejects anything
-# else), so the id alone cannot say which model it came from and this fixes which
-# one wins. Every model is listed, or an id from an explicitly-typed
-# `list_locations(("region",))` call would resolve to None.
-_LOCATION_RESOLUTION_ORDER = ("site", "location", "region", "site_group")
+# With no type given, return what devices can actually be scoped to: a Site, or
+# one of its optional Location sub-groupings.
+_DEFAULT_LOCATION_TYPES = ("Site", "Location")
+
+# Order an *untyped* id is resolved in. A reference carrying its location type
+# names its own model and skips this entirely.
+_LOCATION_RESOLUTION_ORDER = ("site", "location", "region", "sitegroup")
+
+# The scope type ``fabric_common`` derives from a location type, mapped back to
+# the model key used here, so the type -> model rule lives in one place.
+_SCOPE_TO_MODEL = {
+    REGION_SCOPE_TYPE: "region",
+    SITEGROUP_SCOPE_TYPE: "sitegroup",
+    SITE_SCOPE_TYPE: "site",
+    LOCATION_SCOPE_TYPE: "location",
+}
 _TENANTS_QUERY = "query { tenant_list { id name } }"
 
 # Only the two nested objects the managed-only dropdowns need, for the given ids.
@@ -95,71 +125,98 @@ class NetBoxReferenceMixin:
     """Read-only reference data used to populate workflow forms."""
 
     async def _locations_of(self, kind: str) -> list[dict[str, Any]]:
-        """Return the ``{id, name}`` rows for one level of NetBox's hierarchy."""
-        list_field = _LOCATION_MODELS[kind][0]
-        data = await self.graphql_query(f"query {{ {list_field} {{ id name }} }}")
+        """Return the rows for one model of NetBox's location hierarchy.
+
+        Locations also carry ``custom_fields`` -- that is where the source
+        LocationType lives, and it is what distinguishes a Module from a Rack.
+        """
+        list_field, _ = _MODEL_QUERY[kind]
+        fields = "id name custom_fields" if kind == "location" else "id name"
+        data = await self.graphql_query(f"query {{ {list_field} {{ {fields} }} }}")
         return list(data.get(list_field) or [])
 
+    @staticmethod
+    def _location_type_of(kind: str, row: dict[str, Any]) -> str:
+        """Return the location type to report for one row."""
+        label = _MODEL_QUERY[kind][1]
+        if kind != "location":
+            return label
+        custom = row.get("custom_fields")
+        if isinstance(custom, str):
+            try:
+                custom = json.loads(custom)
+            except ValueError:
+                custom = None
+        if isinstance(custom, dict) and custom.get(_LOCATION_TYPE_FIELD):
+            return str(custom[_LOCATION_TYPE_FIELD])
+        return label
+
     async def list_locations(self, location_types: tuple[str, ...] = ()) -> list[DCIMSelection]:
-        # A requested type selects which model to query -- NetBox's
-        # Region/SiteGroup/Site/Location hierarchy *is* the type, with no per-object
-        # type field to filter on.
-        requested = [t.lower().replace(" ", "_") for t in location_types]
-        unknown = [t for t in requested if t not in _LOCATION_MODELS]
-        if unknown:
-            logger.debug("No NetBox model for location type(s) %r; skipping", unknown)
+        """Return location options, each tagged with its own location type.
 
-        # Distinct models, in the order asked for. "sitegroup" and "site_group" are
-        # accepted spellings of one model, so a caller passing both must not make it
-        # be queried twice.
-        kinds: list[str] = []
-        for name in requested or _DEFAULT_LOCATION_MODELS:
-            model = _LOCATION_MODELS.get(name)
-            if model is not None and model not in [_LOCATION_MODELS[k] for k in kinds]:
-                kinds.append(name)
+        A requested type either names one of NetBox's four hierarchy models or a
+        Location subtype (``Module``, ``Rack``, ...) held in the custom field.
+        Ids are per-model in NetBox, so two levels can share one -- they are both
+        offered, and ``location_type`` is what tells them apart on the way back.
+        """
+        requested = [t.strip() for t in location_types if t and t.strip()]
+        models: list[str] = []
+        subtypes: list[str] = []
+        for raw in requested or _DEFAULT_LOCATION_TYPES:
+            model = _MODEL_KEYS.get(raw.lower().replace(" ", "_"))
+            if model is not None:
+                if model not in models:
+                    models.append(model)
+            elif raw not in subtypes:
+                subtypes.append(raw)
 
-        seen: dict[str, str] = {}
-        rows: list[dict[str, Any]] = []
-        for kind in kinds:
-            for item in await self._locations_of(kind):
-                key = str(item["id"])
-                if key in seen:
-                    # Two levels holding the same PK. Only one can be offered: the
-                    # id is all NVCM sends back, and get_location_metadata resolves
-                    # it to exactly one object.
-                    logger.debug(
-                        "NetBox %s id %s collides with the %s of that id; keeping the %s",
-                        kind,
-                        key,
-                        seen[key],
-                        seen[key],
-                    )
-                    continue
-                seen[key] = kind
-                rows.append(item)
-        return _selections(rows)
+        # A subtype is a Location narrowed by its custom field, so asking for one
+        # means reading that model even when it was not named outright.
+        reads = list(models)
+        if subtypes and "location" not in reads:
+            reads.append("location")
 
-    async def get_location_metadata(self, location_id: str) -> DCIMSelection | None:
-        """Return normalized metadata for one NetBox location PK, or ``None``.
+        pages = await asyncio.gather(*(self._locations_of(kind) for kind in reads))
+        out: list[DCIMSelection] = []
+        for kind, rows in zip(reads, pages, strict=True):
+            for row in rows:
+                location_type = self._location_type_of(kind, row)
+                # Only filter the Location read, and only when the caller asked
+                # for subtypes without asking for the model itself.
+                if kind == "location" and subtypes and "location" not in models:
+                    if location_type not in subtypes:
+                        continue
+                out.append(
+                    DCIMSelection(id=str(row["id"]), name=row["name"], location_type=location_type)
+                )
+        return out
 
-        Same id space as :meth:`list_locations`, so an id taken from a workflow
-        form round-trips here. Every level is tried, in
-        :data:`_LOCATION_RESOLUTION_ORDER`, and the first match wins -- PKs are
-        per-model, so ``list_locations`` never offers two entries under one id.
+    async def get_location_metadata(self, location: DCIMLocationIdentifier) -> DCIMSelection | None:
+        """Return normalized metadata for one NetBox location id, or ``None``.
+
+        Same id space as :meth:`list_locations`, so a value taken from a workflow
+        form round-trips here. A reference carrying its location type names the
+        model outright; a bare id is tried against each level in
+        :data:`_LOCATION_RESOLUTION_ORDER` and the first match wins.
 
         One document with an aliased list query per level, rather than a singular
         query per level in turn: a list filtered to a missing id comes back empty
-        instead of erroring, so all four resolve in a single round-trip.
+        instead of erroring, so every level resolves in a single round-trip.
         """
-        aliases = {
-            f"lvl{index}": _LOCATION_MODELS[kind][0]
-            for index, kind in enumerate(_LOCATION_RESOLUTION_ORDER)
-        }
+        location_id = dcim_location_id(location)
+        scope = scope_type_for(dcim_location_type(location))
+        order = (
+            [_SCOPE_TO_MODEL[scope]]
+            if scope in _SCOPE_TO_MODEL
+            else list(_LOCATION_RESOLUTION_ORDER)
+        )
+        aliases = {f"lvl{index}": kind for index, kind in enumerate(order)}
         # `id` on a list filter is an IDComparisonFilterLookup, not a bare ID --
         # passing the scalar makes NetBox reject the whole document.
         selections = " ".join(
-            f"{alias}: {field}(filters: {{id: {{exact: $id}}}}) {{ id name }}"
-            for alias, field in aliases.items()
+            f"{alias}: {_MODEL_QUERY[kind][0]}(filters: {{id: {{exact: $id}}}}) "
+            f"{{ id name{' custom_fields' if kind == 'location' else ''} }}"
+            for alias, kind in aliases.items()
         )
         try:
             data = await self.graphql_query(
@@ -167,10 +224,14 @@ class NetBoxReferenceMixin:
             )
         except DCIMNotFoundError:
             return None
-        for alias in aliases:
+        for alias, kind in aliases.items():
             rows = data.get(alias) or []
             if rows:
-                return DCIMSelection(id=str(rows[0]["id"]), name=rows[0]["name"])
+                return DCIMSelection(
+                    id=str(rows[0]["id"]),
+                    name=rows[0]["name"],
+                    location_type=self._location_type_of(kind, rows[0]),
+                )
         return None
 
     async def _managed_device_selections(self, field: str) -> list[DCIMSelection]:

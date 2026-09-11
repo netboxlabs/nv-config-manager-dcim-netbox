@@ -20,6 +20,7 @@ from nv_config_manager_dcim import (
     IBSwitchTopology,
 )
 
+from nv_config_manager_dcim_netbox.fabric_common import SITE_SCOPE_TYPE
 from tests._fake import fake_client as _client
 
 # Area marker for `make <area>` / `pytest -m <area>`.
@@ -388,13 +389,18 @@ async def test_resolve_ib_pkey_context():
     assert ctx.overlay_id == "10" and ctx.pkey_id == "20" and ctx.pkey == "0x7fff"
 
 
-async def test_resolve_ib_pkey_context_requires_a_location():
-    # Device.location is optional in NetBox. With no scope_id the overlay query is
-    # unscoped, so it would match another site's ib_pkey overlay.
-    seen: list[list] = []
+async def test_resolve_ib_pkey_context_falls_back_to_the_site():
+    """Device.location is optional in NetBox; the Site is not.
+
+    The reference provider's location chain is one typed tree, so its ancestor
+    walk reaches the Site. Here the Site sits outside the Location tree, so it is
+    searched as a second scope -- which is also what makes a Site-anchored
+    partition reachable, and what stops a device with no Location from failing.
+    """
+    seen: list[tuple[str, list]] = []
     client = _client(
         rest_list={
-            _OVERLAYS: [{"id": 10, "name": "other-site-part"}],
+            _OVERLAYS: [{"id": 10, "name": "site-part"}],
             _PKEYS: [{"id": 20, "pkey": "0x7fff", "overlay": 10}],
         }
     )
@@ -410,6 +416,74 @@ async def test_resolve_ib_pkey_context_requires_a_location():
         return {"id": "1", "name": "host-01", "site": {"id": "2", "name": "DM-Akron"}}
 
     client._resolve_ib_device = resolve
-    with pytest.raises(DCIMInvalidDataError, match="no Location"):
+    ctx = await client.resolve_ib_pkey_context("host-01", "0x7fff")
+
+    assert ctx.overlay_id == "10"
+    # Scoped to the Site, never unscoped -- an unscoped query would match every
+    # ib_pkey overlay in the install, including another site's.
+    overlay_queries = [params for path, params in seen if path == _OVERLAYS]
+    assert overlay_queries
+    for params in overlay_queries:
+        assert ("scope_type", SITE_SCOPE_TYPE) in params
+        assert ("scope_id", "2") in params
+
+
+async def test_resolve_ib_pkey_context_needs_a_site_or_location():
+    """With neither, the overlay query would be unscoped."""
+    client = _client(rest_list={_OVERLAYS: [], _PKEYS: []})
+
+    async def resolve(host):
+        return {"id": "1", "name": "host-01"}
+
+    client._resolve_ib_device = resolve
+    with pytest.raises(DCIMInvalidDataError):
         await client.resolve_ib_pkey_context("host-01", "0x7fff")
-    assert not [p for path, p in seen if path == _OVERLAYS]
+
+
+async def test_host_site_round_trips_into_a_partition():
+    """NVCM feeds the resolved site straight back as the partition's location.
+
+    `ib_pkey_creation` builds `dcim_location_reference(location_id, location_type)`
+    from the resolver output, so `IBHostSite.site_type` is what stops that Site pk
+    being looked up among Locations -- where a colliding pk matches the wrong one.
+    """
+    from nv_config_manager_dcim import dcim_location_reference
+
+    writes: list[tuple[str, str, dict]] = []
+    client = _client(
+        rest_list={
+            # A Location and a Site both holding pk 1: the collision the type resolves.
+            "dcim/sites/": [{"id": 1, "name": "TEST-SITE", "slug": "test-site"}],
+            "dcim/locations/": [{"id": 1, "name": "Some Other Module", "slug": "other"}],
+            "tenancy/tenants/": [{"id": 7, "name": "Demo Tenant", "slug": "demo-tenant"}],
+            _OVERLAYS: [],
+            _PKEYS: [],
+        },
+        record=writes,
+    )
+
+    async def resolve(host):
+        return {
+            "id": "1",
+            "name": "gpu-01",
+            "site": {"id": 1, "name": "TEST-SITE"},
+            "location": {"id": 2, "name": "Module1", "parent": None},
+        }
+
+    client._resolve_ib_device = resolve
+    host_site = await client.resolve_ib_host_site("gpu-01")
+
+    assert host_site.site_type == "Site"
+
+    await client.ensure_ib_pkey_partition(
+        "0x7fff",
+        "partition-a",
+        dcim_location_reference(host_site.site_id, host_site.site_type),
+        "Demo Tenant",
+        "full",
+    )
+
+    overlay = next(body for _m, path, body in writes if path == _OVERLAYS)
+    # Anchored on the Site it resolved from, not the Location of the same pk.
+    assert overlay["scope_type"] == SITE_SCOPE_TYPE
+    assert str(overlay["scope_id"]) == "1"

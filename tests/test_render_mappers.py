@@ -27,6 +27,7 @@ from nv_config_manager_dcim_netbox.render import (
     _endpoint_set,
     _evpn,
     _firmware_from_context,
+    _prefix_set,
     _render_interface,
     _render_ip,
     _render_vlan,
@@ -267,9 +268,18 @@ def test_endpoint_set_empty_or_wrong_type_returns_none():
     assert _endpoint_set(["10.0.0.1"]) is None  # must be a {ipv4,ipv6} mapping
 
 
-def test_endpoint_set_invalid_address_raises():
+def test_endpoint_set_accepts_a_hostname():
+    """An endpoint may be a hostname, so the SDK models these as plain strings.
+
+    Only prefixes are still validated as networks; see the prefix-set test below.
+    """
+    es = _endpoint_set({"ipv4": ["ntp.example.com"]})
+    assert tuple(es.ipv4) == ("ntp.example.com",)
+
+
+def test_prefix_set_invalid_network_raises():
     with pytest.raises(DCIMInvalidDataError):
-        _endpoint_set({"ipv4": ["not-an-ip"]})
+        _prefix_set({"ipv4": ["not-a-prefix"]})
 
 
 def test_services_from_context_only_sets_present_keys():

@@ -20,7 +20,11 @@ from collections.abc import Iterable, Iterator
 from nv_config_manager_dcim import (
     DCIMConflictError,
     DCIMInvalidDataError,
+    DCIMLocationIdentifier,
+    DCIMLocationReference,
     DCIMNotFoundError,
+    dcim_location_id,
+    dcim_location_type,
 )
 
 from nv_config_manager_dcim_netbox._mappers import device_pk, fk_id
@@ -45,11 +49,51 @@ PREFIXES_PATH = "ipam/prefixes/"
 INTERFACES_PATH = "dcim/interfaces/"
 IP_ADDRESSES_PATH = "ipam/ip-addresses/"
 
-# The two models an Overlay's ``CachedScopeMixin`` scope GFK can point at, and
-# where to look each one up. SpectrumX anchors at a Site, InfiniBand at a Location.
+# The four models an Overlay's ``CachedScopeMixin`` scope GFK can point at
+# (dcim.LOCATION_SCOPE_TYPES), and where to look each one up. SpectrumX anchors
+# at a Site and InfiniBand at a Location, but the plugin's form accepts any of
+# the four, so a read must be able to resolve all of them.
+REGION_SCOPE_TYPE = "dcim.region"
+SITEGROUP_SCOPE_TYPE = "dcim.sitegroup"
 SITE_SCOPE_TYPE = "dcim.site"
 LOCATION_SCOPE_TYPE = "dcim.location"
-SCOPE_PATHS = {SITE_SCOPE_TYPE: "dcim/sites/", LOCATION_SCOPE_TYPE: "dcim/locations/"}
+SCOPE_PATHS = {
+    REGION_SCOPE_TYPE: "dcim/regions/",
+    SITEGROUP_SCOPE_TYPE: "dcim/site-groups/",
+    SITE_SCOPE_TYPE: "dcim/sites/",
+    LOCATION_SCOPE_TYPE: "dcim/locations/",
+}
+
+# SDK ``location_type`` -> the NetBox model holding that id. Only the levels with
+# a model of their own are named; every other type (Module, Rack, Pod, Row, ...)
+# is a NetBox Location distinguished by its ``nvcm_location_type`` custom field.
+# ``Provider`` is a Region here: the topology loader maps that source level onto
+# one, and Regions carry no type custom field to tell them apart afterwards.
+_LOCATION_TYPE_SCOPES = {
+    "region": REGION_SCOPE_TYPE,
+    "provider": REGION_SCOPE_TYPE,
+    "sitegroup": SITEGROUP_SCOPE_TYPE,
+    "site_group": SITEGROUP_SCOPE_TYPE,
+    "site": SITE_SCOPE_TYPE,
+}
+
+# Tried in turn when a location arrives with no type. Sites first: that is what
+# NVCM's own /parameter/site endpoint hands out.
+_UNTYPED_SCOPE_ORDER = (
+    SITE_SCOPE_TYPE,
+    LOCATION_SCOPE_TYPE,
+    REGION_SCOPE_TYPE,
+    SITEGROUP_SCOPE_TYPE,
+)
+
+
+def scope_type_for(location_type: str | None) -> str | None:
+    """Return the NetBox scope type an SDK ``location_type`` names, if any."""
+    if not location_type:
+        return None
+    key = location_type.strip().lower().replace(" ", "_")
+    return _LOCATION_TYPE_SCOPES.get(key, LOCATION_SCOPE_TYPE)
+
 
 # netbox-bgp exposes no GraphQL, so BGP is read over REST.
 BGP_SESSIONS_PATH = "plugins/bgp/session/"
@@ -201,7 +245,7 @@ class FabricCommonMixin:
         return [row for page in pages for row in page]
 
     async def _find_overlay(
-        self, name: str, scope: str | None = None, *, scope_type: str
+        self, name: str, scope: DCIMLocationIdentifier | None = None, *, scope_type: str
     ) -> dict | None:
         params = [("name", name)]
         if scope is not None:
@@ -213,17 +257,23 @@ class FabricCommonMixin:
             # Site and Location pks are independent sequences, so scope_id=5 alone
             # matches a Location-scoped overlay when the caller meant Site 5.
             params.append(("scope_id", str(row["id"])))
-            params.append(("scope_type", scope_type))
+            # The row may have resolved in a different model than the caller's
+            # default when the value carried its own type.
+            params.append(("scope_type", scope_type_for(dcim_location_type(scope)) or scope_type))
         rows = await self.rest_list(self.OVERLAYS_PATH, params)
         if len(rows) > 1:
             raise DCIMConflictError(f"Multiple overlays named {name!r}")
         return rows[0] if rows else None
 
-    async def _resolve_scope(self, value: str | int | None, *, scope_type: str) -> dict | None:
-        """Resolve a selection value to the NetBox Site or Location row it names.
+    async def _resolve_scope(
+        self, value: DCIMLocationIdentifier | int | None, *, scope_type: str
+    ) -> dict | None:
+        """Resolve a selection value to the NetBox row it names.
 
-        *scope_type* picks the model: SpectrumX anchors at a Site, InfiniBand at a
-        sub-Site Location. PKs are per-model, so searching both would be guessing.
+        *scope_type* picks the model. A typed ``DCIMLocationReference`` overrides
+        it: the caller's default says which model the operation expects, while the
+        reference says which one the id actually came from, and PKs are per-model
+        so guessing wrong silently matches the wrong object.
 
         The pk is the contract -- NVCM round-trips the id ``list_locations`` gave
         out, and NetBox anchors the Overlay on a GFK, so it is resolved to a row
@@ -234,6 +284,8 @@ class FabricCommonMixin:
         """
         if value is None or value == "":
             return None
+        scope_type = scope_type_for(dcim_location_type(value)) or scope_type
+        value = dcim_location_id(value) if isinstance(value, DCIMLocationReference) else value
         try:
             path = SCOPE_PATHS[scope_type]
         except KeyError:
@@ -258,7 +310,7 @@ class FabricCommonMixin:
         self._scope_cache[cache_key] = found
         return found
 
-    async def _site_field_value(self, site: str) -> str:
+    async def _site_field_value(self, site: DCIMLocationIdentifier) -> str:
         """Normalize a site selection to what ``cf_nvcm_site`` stores: the Site pk.
 
         NVCM sends a pk, name or slug depending on the caller. A value resolving to
@@ -266,18 +318,26 @@ class FabricCommonMixin:
         returns no rows rather than raising.
         """
         row = await self._resolve_scope(site, scope_type=SITE_SCOPE_TYPE)
-        return str(row["id"]) if row else str(site)
+        return str(row["id"]) if row else str(dcim_location_id(site))
 
-    async def _resolve_any_scope(self, value: str | int | None) -> tuple[str | None, dict | None]:
+    async def _resolve_any_scope(
+        self, value: DCIMLocationIdentifier | int | None
+    ) -> tuple[str | None, dict | None]:
         """Resolve a value to ``(scope_type, row)`` when the model is not known.
 
-        Only for reads that span both kinds of overlay -- ``list_overlays`` is
-        filtered by isolation type, which may be either. Sites before Locations,
-        the order ``reference.get_location_metadata`` uses.
+        For reads that span every kind of overlay -- ``list_overlays`` is filtered
+        by isolation type, which may be scoped at any of the four levels. A typed
+        reference names its own model and is resolved directly; an untyped one is
+        tried against each level in turn.
         """
-        types = (SITE_SCOPE_TYPE, LOCATION_SCOPE_TYPE)
-        rows = await asyncio.gather(*(self._resolve_scope(value, scope_type=t) for t in types))
-        for scope_type, row in zip(types, rows, strict=True):
+        typed = scope_type_for(dcim_location_type(value))
+        if typed is not None:
+            row = await self._resolve_scope(value, scope_type=typed)
+            return (typed, row) if row is not None else (None, None)
+        rows = await asyncio.gather(
+            *(self._resolve_scope(value, scope_type=t) for t in _UNTYPED_SCOPE_ORDER)
+        )
+        for scope_type, row in zip(_UNTYPED_SCOPE_ORDER, rows, strict=True):
             if row is not None:
                 return scope_type, row
         return None, None

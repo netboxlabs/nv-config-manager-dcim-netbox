@@ -15,6 +15,7 @@ import re
 from nv_config_manager_dcim import (
     DCIMConflictError,
     DCIMInvalidDataError,
+    DCIMLocationIdentifier,
     DCIMNotFoundError,
     IBHostSite,
     IBInterfaceGuid,
@@ -24,6 +25,8 @@ from nv_config_manager_dcim import (
     IBPKeyContext,
     IBPKeyPartition,
     IBSwitchTopology,
+    dcim_location_id,
+    dcim_location_type,
 )
 
 from nv_config_manager_dcim_netbox._mappers import strip_mask
@@ -32,7 +35,9 @@ from nv_config_manager_dcim_netbox.fabric_common import (
     INTERFACES_PATH,
     IP_ADDRESSES_PATH,
     LOCATION_SCOPE_TYPE,
+    SITE_SCOPE_TYPE,
     normalize_pkey,
+    scope_type_for,
 )
 
 _IB_PKEY_ISOLATION = "ib_pkey"
@@ -120,6 +125,10 @@ query ($names: [String!]!) {
   }
 }
 """
+
+
+# What a NetBox Site reports as its location type (see reference._MODEL_QUERY).
+_SITE_LOCATION_TYPE = "Site"
 
 
 class NetBoxInfiniBandMixin:
@@ -221,7 +230,7 @@ class NetBoxInfiniBandMixin:
         self,
         pkey: str,
         partition_name: str,
-        location_name: str,
+        location_name: DCIMLocationIdentifier,
         tenant_name: str | None,
         membership_type: str,
     ) -> IBPKeyPartition:
@@ -229,20 +238,23 @@ class NetBoxInfiniBandMixin:
         # Normalized on write as well as on compare, so the stored value cannot
         # differ from what ensure_/sync_ib_pkey_assignments later compare against.
         membership_type = _normalize_membership(membership_type)
-        location_row = await self._resolve_scope(location_name, scope_type=LOCATION_SCOPE_TYPE)
+        # A typed reference names its own model; an untyped value is still a
+        # Location, which is where the topology loader anchors IB overlays.
+        scope_type = scope_type_for(dcim_location_type(location_name)) or LOCATION_SCOPE_TYPE
+        location_row = await self._resolve_scope(location_name, scope_type=scope_type)
         if location_row is None:
-            raise DCIMInvalidDataError(f"NetBox Location {location_name!r} not found")
+            raise DCIMInvalidDataError(
+                f"NetBox {scope_type} {dcim_location_id(location_name)!r} not found"
+            )
         tenant_id = await self._resolve_tenant_id(tenant_name)
 
-        overlay = await self._find_overlay(
-            partition_name, location_name, scope_type=LOCATION_SCOPE_TYPE
-        )
+        overlay = await self._find_overlay(partition_name, location_name, scope_type=scope_type)
         if overlay:
             overlay_id = overlay["id"]
         else:
             body = {
                 "name": partition_name,
-                "scope_type": LOCATION_SCOPE_TYPE,
+                "scope_type": scope_type,
                 "scope_id": location_row["id"],
                 "isolation_type": _IB_PKEY_ISOLATION,
                 "status": FABRIC_STATUS,
@@ -501,6 +513,10 @@ class NetBoxInfiniBandMixin:
             device_primary_ip=strip_mask((device.get("primary_ip4") or {}).get("address")),
             site_id=str(site_id),
             site_name=(site.get("name") if isinstance(site, dict) else "") or "",
+            # NVCM feeds site_id straight back as the partition's location. Untyped,
+            # that pk is looked up among Locations and can silently match an
+            # unrelated one, since pks are per-model.
+            site_type=_SITE_LOCATION_TYPE,
         )
 
     async def resolve_ib_host_site(self, host: str) -> IBHostSite:
@@ -517,27 +533,49 @@ class NetBoxInfiniBandMixin:
         if not device:
             raise DCIMNotFoundError(f"No NetBox device for IB host {host!r}")
         host_site = self._ib_host_site(device)
-        # Match the PKey at the device location OR any ancestor. Scoped on exact
-        # ``scope_id`` (+ scope_type, to disambiguate the GFK), not ``location_id``:
-        # that filter is descendant-inclusive, so the ancestor chain would also match
-        # sibling locations' overlays.
+        # Match the PKey at the device location OR any ancestor, the Site
+        # included. Scoped on exact ``scope_id`` (+ scope_type, to disambiguate the
+        # GFK), not ``location_id``: that filter is descendant-inclusive, so the
+        # ancestor chain would also match sibling locations' overlays.
         location_chain = self._ib_location_chain(device.get("location"))
         location_id = self._fk_id(device.get("location") or {})
-        scope_ids = [
+        location_ids = [
             str(chain_id)
             for chain_location in location_chain
             if (chain_id := self._fk_id(chain_location)) is not None
         ]
-        if not scope_ids:
-            # Device.location is optional in NetBox. With no scope_id the overlay
-            # query is unscoped and matches every ib_pkey overlay in the install.
+        site_id = self._fk_id(device.get("site") or {})
+        # The Location chain, then the Site. NetBox keeps the Site out of the
+        # Location tree, so walking `parent` stops one level short of it -- where
+        # the reference provider's single typed tree includes it as an ancestor.
+        # A Site-anchored partition (what `ensure_ib_pkey_partition` creates from
+        # a Site-typed reference) is only reachable through the second scope, and
+        # a device with no Location at all resolves through it too.
+        scopes: list[tuple[str, list[str]]] = []
+        if location_ids:
+            scopes.append((LOCATION_SCOPE_TYPE, location_ids))
+        if site_id is not None:
+            scopes.append((SITE_SCOPE_TYPE, [str(site_id)]))
+        if not scopes:
+            # Unscoped, the overlay query matches every ib_pkey overlay installed.
             raise DCIMInvalidDataError(
-                f"NetBox device {device.get('name')!r} has no Location; "
+                f"NetBox device {device.get('name')!r} has no Site or Location; "
                 f"cannot scope IB PKey {pkey_norm!r} to an overlay"
             )
-        params = [("isolation_type", _IB_PKEY_ISOLATION), ("scope_type", LOCATION_SCOPE_TYPE)]
-        params.extend(("scope_id", scope_id) for scope_id in scope_ids)
-        overlays = await self.rest_list(self.OVERLAYS_PATH, params)
+        # One query per scope type: `scope_id` is matched independently of
+        # `scope_type`, so passing both types at once would also match a
+        # Location whose pk happens to equal the Site's.
+        pages = await asyncio.gather(
+            *(
+                self.rest_list(
+                    self.OVERLAYS_PATH,
+                    [("isolation_type", _IB_PKEY_ISOLATION), ("scope_type", scope_type)]
+                    + [("scope_id", scope_id) for scope_id in ids],
+                )
+                for scope_type, ids in scopes
+            )
+        )
+        overlays = [row for page in pages for row in page]
         overlays_by_id = {str(overlay["id"]): overlay for overlay in overlays}
         # One pkey query, then match against the location/isolation-scoped
         # overlays, instead of a pkeys query per overlay.
