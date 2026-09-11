@@ -5,6 +5,10 @@
 #
 # NetBox issues the API token NVCM authenticates with, so it has to exist first.
 # The token is printed at the end for install.yaml.
+#
+# A registry that needs credentials: pass --registry-username with either
+# --registry-password or --registry-password-stdin and a pull secret is created
+# for you, or name one you already have with --pull-secret.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,8 +18,12 @@ NAMESPACE="nv-config-manager"
 RELEASE="netbox"
 TOKEN=""
 TIMEOUT="15m"
+PULL_SECRET=""
+REGISTRY_USERNAME=""
+REGISTRY_PASSWORD=""
+PASSWORD_STDIN=false
 
-usage() { sed -n '2,8p' "$0"; exit "${1:-0}"; }
+usage() { sed -n '2,12p' "$0"; exit "${1:-0}"; }
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -24,6 +32,10 @@ while [[ $# -gt 0 ]]; do
         --release)    RELEASE="$2"; shift 2 ;;
         --token)      TOKEN="$2"; shift 2 ;;
         --timeout)    TIMEOUT="$2"; shift 2 ;;
+        --pull-secret) PULL_SECRET="$2"; shift 2 ;;
+        --registry-username) REGISTRY_USERNAME="$2"; shift 2 ;;
+        --registry-password) REGISTRY_PASSWORD="$2"; shift 2 ;;
+        --registry-password-stdin) PASSWORD_STDIN=true; shift ;;
         -h|--help)    usage ;;
         *) echo "Unknown argument: $1" >&2; usage 1 ;;
     esac
@@ -103,6 +115,53 @@ do
     fi
 done
 
+# The `helm test` pod is the one image the chart builds without its registry
+# value: templates/tests/test-connection.yaml renders
+# `{{ .Values.test.image.repository }}:{{ .Values.test.image.tag }}` and nothing
+# else, so `test.image.registry` above is read by no template. Carrying the
+# registry in the repository is what actually repoints it -- and the tag override
+# alone would otherwise make it worse than untouched, asking Docker Hub for a
+# `sha256-...` tag that only the private registry has.
+if mapped_tag busybox >/dev/null; then
+    TAG_SETS+=(--set "netbox.test.image.repository=$REGISTRY/busybox")
+fi
+
+# --- pull secret -------------------------------------------------------------
+#
+# The upload step authenticates (`upload-to-registry.sh --username ...
+# --password-stdin`), so the registry this then pulls from usually needs
+# credentials too. Without a pull secret every pod sits in ImagePullBackOff with
+# "unauthorized", which reads like a missing image rather than a missing secret.
+#
+# One `netbox.global.imagePullSecrets` covers all six pod specs: Helm propagates
+# a chart's `global` down through the bitnami subcharts, so NetBox, PostgreSQL,
+# Valkey, the init container and waitForBackend all pick it up.
+SECRET_SETS=()
+if [[ -n "$REGISTRY_USERNAME" ]]; then
+    if [[ "$PASSWORD_STDIN" == true ]]; then
+        IFS= read -r REGISTRY_PASSWORD || true
+    fi
+    [[ -n "$REGISTRY_PASSWORD" ]] || {
+        echo "--registry-username needs --registry-password or --registry-password-stdin" >&2
+        exit 1
+    }
+    : "${PULL_SECRET:=netbox-registry-credentials}"
+    # The secret is per-host, while --registry carries the project path too.
+    REGISTRY_HOST="${REGISTRY%%/*}"
+    echo "==> Creating pull secret $PULL_SECRET for $REGISTRY_HOST"
+    kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    # Recreated rather than created: a rerun after a failed install would
+    # otherwise stop on AlreadyExists, and the credentials may have changed.
+    kubectl -n "$NAMESPACE" create secret docker-registry "$PULL_SECRET" \
+        --docker-server="$REGISTRY_HOST" \
+        --docker-username="$REGISTRY_USERNAME" \
+        --docker-password="$REGISTRY_PASSWORD" \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+fi
+if [[ -n "$PULL_SECRET" ]]; then
+    SECRET_SETS+=(--set "netbox.global.imagePullSecrets[0].name=$PULL_SECRET")
+fi
+
 echo "==> Installing NetBox into $NAMESPACE from $CHART"
 # Every image the chart references has to be repointed, not just the main one:
 # init and waitForBackend default to docker.io and would be the only thing
@@ -122,6 +181,7 @@ helm upgrade --install "$RELEASE" "$CHART" \
     --set "netbox.test.image.registry=$REGISTRY" \
     --set "netbox.worker.waitForBackend.image.registry=$REGISTRY" \
     ${TAG_SETS[@]+"${TAG_SETS[@]}"} \
+    ${SECRET_SETS[@]+"${SECRET_SETS[@]}"} \
     --wait --timeout "$TIMEOUT"
 
 echo "==> Initialising NetBox"

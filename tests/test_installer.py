@@ -999,7 +999,7 @@ def test_the_image_list_creates_its_output_directory(tmp_path, monkeypatch):
     stub_bin = tmp_path / "bin"
     stub_bin.mkdir()
     docker = stub_bin / "docker"
-    docker.write_text('#!/bin/sh\necho \'{"Descriptor":{"digest":"sha256:stub"}}\'\n')
+    docker.write_text(f"#!/bin/sh\necho sha256:{'b' * 64}\n")
     docker.chmod(0o755)
 
     out = tmp_path / "does" / "not" / "exist" / "images.txt"
@@ -1106,6 +1106,273 @@ def test_airgapped_install_says_so_when_it_cannot_map_a_tag(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "bitnami/valkey" in result.stderr
     assert "netbox.valkey.image.tag" in result.stderr
+
+
+def test_airgapped_install_wires_a_pull_secret_into_every_pod(tmp_path):
+    """The upload step authenticates, so the registry it pushes to usually needs
+    credentials to pull from as well.
+
+    One `netbox.global.imagePullSecrets` covers all six pod specs: Helm
+    propagates a chart's `global` down through the bitnami subcharts.
+    """
+    root = _bundle(tmp_path, "nv-config-manager-netbox:0.1.0\n")
+    import os
+
+    env = dict(os.environ, PATH=f"{tmp_path / 'bin'}:{os.environ['PATH']}")
+    result = subprocess.run(
+        [
+            str(root / "install-netbox.sh"),
+            "--registry",
+            "reg.example.com/nvcm",
+            "--pull-secret",
+            "my-creds",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+    argv = (tmp_path / "helm.argv").read_text()
+    assert "netbox.global.imagePullSecrets[0].name=my-creds" in argv, argv
+
+
+def test_airgapped_install_creates_the_pull_secret_from_credentials(tmp_path):
+    # The secret is per-host; --registry carries the project path too.
+    root = _bundle(tmp_path, "nv-config-manager-netbox:0.1.0\n")
+    import os
+
+    env = dict(os.environ, PATH=f"{tmp_path / 'bin'}:{os.environ['PATH']}")
+    result = subprocess.run(
+        [
+            str(root / "install-netbox.sh"),
+            "--registry",
+            "reg.example.com/nvcm",
+            "--registry-username",
+            "robot",
+            "--registry-password",
+            "hunter2",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+    kubectl = (tmp_path / "kubectl.argv").read_text()
+    assert "--docker-server=reg.example.com" in kubectl, kubectl
+    assert "--docker-username=robot" in kubectl, kubectl
+    argv = (tmp_path / "helm.argv").read_text()
+    assert "netbox.global.imagePullSecrets[0].name=netbox-registry-credentials" in argv, argv
+
+
+def test_the_chart_carries_a_pull_secret_into_every_pod_spec():
+    """`netbox.global` is the netbox subchart's global, not Helm's top-level one.
+
+    It still reaches PostgreSQL and Valkey because Helm propagates each level's
+    global downwards -- but that is worth pinning, since the alternative is a
+    secret that silently covers only the NetBox pods.
+    """
+    if shutil.which("helm") is None:
+        pytest.skip("helm not installed")
+    if not (_CHART / "charts").is_dir():
+        pytest.skip("chart deps not fetched (helm dependency build)")
+    rendered = subprocess.run(
+        [
+            "helm",
+            "template",
+            "nb",
+            str(_CHART),
+            "--set",
+            "netbox.global.imagePullSecrets[0].name=creds",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    specs = [d for d in yaml.safe_load_all(rendered.stdout) if d]
+    pod_specs = [
+        d["spec"]["template"]["spec"]
+        for d in specs
+        if d.get("kind") in {"Deployment", "StatefulSet"}
+    ]
+    assert pod_specs, "no workloads rendered"
+    for spec in pod_specs:
+        names = [s.get("name") for s in spec.get("imagePullSecrets", [])]
+        assert "creds" in names, spec.get("containers", [{}])[0].get("image")
+
+
+# -- the bundle build ---------------------------------------------------------
+
+
+def _fake_nvcm_repo(tmp_path: Path) -> Path:
+    """An NVCM checkout whose create-airgapped.sh only records how it was called."""
+    repo = tmp_path / "nvcm"
+    (repo / "deploy" / "airgapped").mkdir(parents=True)
+    theirs = repo / "deploy" / "airgapped" / "create-airgapped.sh"
+    theirs.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$@" > "{tmp_path}/theirs.argv"\n'
+        # A bundle in the layout the merge step asserts.
+        'out=""; prev=""\n'
+        'for a in "$@"; do [ "$prev" = "--output" ] && out="$a"; prev="$a"; done\n'
+        'root="$out/nv-config-manager-airgapped-v0.1.0-test"\n'
+        'mkdir -p "$root/helm" "$root/images" "$root/installer"\n'
+        'echo "# bundle" > "$root/README.md"\n'
+        'cd "$out"\n'
+        "tar -czf nv-config-manager-airgapped-v0.1.0-test.tar.gz "
+        "nv-config-manager-airgapped-v0.1.0-test\n"
+        "rm -rf nv-config-manager-airgapped-v0.1.0-test\n"
+        "shasum -a 256 nv-config-manager-airgapped-v0.1.0-test.tar.gz "
+        "> nv-config-manager-airgapped-v0.1.0-test.tar.gz.sha256\n"
+    )
+    theirs.chmod(0o755)
+    return repo
+
+
+def _run_bundle(tmp_path: Path, *args: str, images: str = "nv-config-manager-netbox:0.1.0\n"):
+    """Run the real wrapper inside a copy of the repo layout it expects.
+
+    A copy rather than the checkout itself: the wrapper calls
+    `netbox-images.sh` by path, and that one needs helm and a live registry.
+    What is under test is what the wrapper does with the list, not how the list
+    is produced.
+    """
+    import os
+
+    repo = _fake_nvcm_repo(tmp_path)
+    here = tmp_path / "provider" / "deploy" / "airgapped"
+    here.mkdir(parents=True)
+    shutil.copy(_AIRGAPPED / "create-airgapped.sh", here / "create-airgapped.sh")
+    (here / "create-airgapped.sh").chmod(0o755)
+    (here / "install-netbox.sh").write_text("#!/bin/sh\nexit 0\n")
+    lister = here / "netbox-images.sh"
+    lister.write_text(f'#!/bin/sh\nprintf %s \'{images}\' > "$2"\ncat "$2"\n')
+    lister.chmod(0o755)
+    # The chart is copied into the bundle, and its dependency must already be
+    # vendored or the wrapper runs `helm dependency build` against the network.
+    chart = tmp_path / "provider" / "deploy" / "netbox"
+    (chart / "charts").mkdir(parents=True)
+    (chart / "Chart.yaml").write_text("name: nvcm-netbox\n")
+    (chart / "charts" / "netbox-0.0.0.tgz").write_bytes(b"")
+
+    stub_bin = tmp_path / "bin"
+    stub_bin.mkdir(exist_ok=True)
+    (stub_bin / "docker").write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$@" >> "{tmp_path}/docker.argv"\n'
+        # `docker image inspect --format {{.Architecture}}` and the plain
+        # existence check both go through here.
+        'case "$*" in *Architecture*) echo "$NVCM_TEST_ARCH" ;; esac\n'
+        "exit 0\n"
+    )
+    (stub_bin / "docker").chmod(0o755)
+
+    out = tmp_path / "out"
+    out.mkdir(exist_ok=True)
+    env = dict(
+        os.environ,
+        PATH=f"{stub_bin}:{os.environ['PATH']}",
+        NVCM_REPO=str(repo),
+        OUTPUT_DIR=str(out),
+        NVCM_TEST_ARCH=os.environ.get("NVCM_TEST_ARCH", "arm64"),
+    )
+    result = subprocess.run(
+        [str(here / "create-airgapped.sh"), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    return result, out, tmp_path
+
+
+def test_the_bundle_build_asks_for_the_local_image_fallback(tmp_path):
+    """Both of this bundle's own images exist in no registry, so their script's
+    `docker pull` of them fails and, without the flag, it stops with an
+    incomplete image set rather than saving what `make images` built.
+    """
+    result, _, tmp = _run_bundle(tmp_path, "--version", "v0.1.0", "--arch", "arm64")
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+    argv = (tmp / "theirs.argv").read_text().split("\n")
+    assert "--local-image-fallback" in argv, argv
+
+
+def test_the_bundle_build_stages_digest_pins_as_tags(tmp_path):
+    """A digest reference survives neither `docker save --platform` nor the
+    Skopeo archive fallback, so the pinned images are pulled by digest and
+    re-tagged `<repo>:sha256-<digest>` before their script sees the list.
+    """
+    digest = "sha256:" + "a" * 64
+    result, out, tmp = _run_bundle(
+        tmp_path,
+        "--version",
+        "v0.1.0",
+        "--arch",
+        "arm64",
+        images=f"registry-1.docker.io/bitnami/valkey@{digest}\n",
+    )
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+
+    staged = (out / "netbox-extra-images.staged.txt").read_text().split()
+    assert staged == [f"registry-1.docker.io/bitnami/valkey:sha256-{'a' * 64}"], staged
+    # The tag is exactly what upload-to-registry.sh would have pushed a digest
+    # reference to, so install-netbox.sh still finds it.
+    docker = (tmp / "docker.argv").read_text()
+    assert "tag" in docker.split("\n"), docker
+
+
+def test_the_bundle_build_refuses_an_image_built_for_another_architecture(tmp_path):
+    import os
+
+    os.environ["NVCM_TEST_ARCH"] = "amd64"
+    try:
+        result, _, _ = _run_bundle(tmp_path, "--version", "v0.1.0", "--arch", "arm64")
+    finally:
+        del os.environ["NVCM_TEST_ARCH"]
+    assert result.returncode != 0
+    assert "is amd64, but this bundle is for arm64" in result.stderr, result.stderr
+    assert "make images PLATFORM=linux/arm64" in result.stderr, result.stderr
+
+
+def test_the_bundle_build_ignores_a_tarball_from_an_earlier_run(tmp_path):
+    # An interrupted run leaves one behind, and merging that would ship a bundle
+    # built from a different version's images under this version's name.
+    out = tmp_path / "out"
+    out.mkdir()
+    stale = out / "nv-config-manager-airgapped-v0.0.9-old.tar.gz"
+    stale.write_bytes(b"stale")
+
+    result, out, _ = _run_bundle(tmp_path, "--version", "v0.1.0", "--arch", "arm64")
+    assert result.returncode == 0, result.stderr
+    assert stale.read_bytes() == b"stale", "the earlier run's tarball was consumed"
+    assert not (out / "nv-config-manager-netbox-airgapped-v0.0.9-old.tar.gz").exists()
+
+
+def test_the_bundle_build_leaves_a_checksum_for_the_bundle_it_shipped(tmp_path):
+    """Their script checksums the tarball this one replaces. Left alone the
+    output directory holds a checksum naming a file that is not there, and the
+    bundle that is there has none.
+    """
+    result, out, _ = _run_bundle(tmp_path, "--version", "v0.1.0", "--arch", "arm64")
+    assert result.returncode == 0, result.stderr
+
+    leftovers = sorted(p.name for p in out.glob("nv-config-manager-airgapped-*"))
+    assert leftovers == [], leftovers
+    bundle = out / "nv-config-manager-netbox-airgapped-v0.1.0-test.tar.gz"
+    assert bundle.is_file()
+    checksum = out / (bundle.name + ".sha256")
+    assert checksum.is_file(), sorted(p.name for p in out.iterdir())
+    assert bundle.name in checksum.read_text()
+    verified = subprocess.run(
+        ["shasum", "-a", "256", "-c", checksum.name],
+        cwd=out,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert verified.returncode == 0, verified.stdout + verified.stderr
 
 
 def test_verify_waits_for_the_consumer_instead_of_racing_it(monkeypatch):

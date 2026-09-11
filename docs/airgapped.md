@@ -5,7 +5,8 @@ both and the target environment needs no internet access.
 
 ## Building the bundle
 
-On a machine with network access and the images already built:
+On a machine with network access, with the images built for the architecture the
+bundle is for:
 
 ```bash
 make images                                  # provider wheelhouse + NetBox
@@ -20,8 +21,24 @@ forwards every argument, so all its flags work:
 deploy/airgapped/create-airgapped.sh --version v0.1.0 --arch amd64 --ngc-api-key "$NGC_API_KEY"
 ```
 
-The result is `generated/nv-config-manager-netbox-airgapped-<version>-<arch>.tar.gz`,
-their bundle plus `netbox-chart/` and `install-netbox.sh`.
+The result is `generated/nv-config-manager-netbox-airgapped-<version>-<arch>.tar.gz`
+and its `.sha256`, their bundle plus `netbox-chart/` and `install-netbox.sh`.
+
+### One architecture per bundle
+
+NVCM's script defaults to `--arch both`. This one defaults to the build host's
+instead, because the two images it adds are built by `make images` one
+architecture at a time -- a Docker tag holds one -- so half of a `both` bundle
+would carry images the target cannot execute. Build one bundle per architecture:
+
+```bash
+make images PLATFORM=linux/amd64
+deploy/airgapped/create-airgapped.sh --version v0.1.0 --arch amd64
+```
+
+The build checks the local images before running theirs, and stops with that
+command line rather than failing several minutes in with "no suitable export
+target found for platform".
 
 ### Which images go in
 
@@ -38,9 +55,33 @@ Bitnami subcharts ship `tag: latest`, which means nothing offline and would drif
 between building the bundle and installing from it. The build fails rather than
 bundling a floating tag.
 
+The digest is the *index* digest, not one platform's manifest inside it.
+`docker manifest inspect -v` answers with one entry per platform, and taking the
+first of them pinned amd64 -- which pulls the amd64 image whatever `--arch` says
+and then cannot be exported for arm64 at all.
+
 The provider wheelhouse is included explicitly. It appears in neither chart,
 since NVCM's pods install it from `dcim.provider_packages` in the install config,
-so nothing renders it and it would otherwise be missed.
+so nothing renders it and it would otherwise be missed. A profile without one is
+an error rather than a bundle with five images: NVCM would install no provider
+and the DCIM consumer would start and handle nothing.
+
+### Staging, before their script runs
+
+Neither kind of image this bundle adds can be pulled the way their script pulls
+the rest, so both are staged into the local Docker store first and handed over
+with their `--local-image-fallback`:
+
+- **Ours** (`nv-config-manager-netbox`, `nv-config-manager-dcim-netbox`) exist in
+  no registry at all; `make images` built them locally.
+- **The pinned ones** are re-tagged `<repo>:sha256-<digest>`. A digest reference
+  survives neither step of their pipeline: `docker save --platform` reports "no
+  suitable export target found for platform", and both its Skopeo fallback and
+  `upload-to-registry.sh` reading the archive back reject "reference does not
+  include a tag". The tag is exactly what `upload-to-registry.sh` pushes a digest
+  reference to and what `install-netbox.sh` then asks the chart for, so the
+  private registry still ends up holding an immutable tag rather than a floating
+  `latest`.
 
 ## Installing
 
@@ -58,6 +99,22 @@ cd nv-config-manager-netbox-airgapped-v0.1.0-amd64
 
 ./install-netbox.sh --registry registry.example.com/nv-config-manager
 ```
+
+If that registry needs credentials to pull from -- it usually does, since the
+upload above authenticated to it -- either name a pull secret that already
+exists or let the install create one:
+
+```bash
+./install-netbox.sh --registry registry.example.com/nv-config-manager \
+  --registry-username '<user>' --registry-password-stdin
+# or, reusing NVCM's:
+./install-netbox.sh --registry registry.example.com/nv-config-manager \
+  --pull-secret registry-credentials
+```
+
+One `netbox.global.imagePullSecrets` covers all six pod specs, NetBox's and the
+Bitnami subcharts'. Without it every pod sits in `ImagePullBackOff` with
+`unauthorized`, which reads like a missing image rather than a missing secret.
 
 That prints an API token. Put it in `install.yaml` under
 `secrets.k8s.dcim.values.token`, then deploy NVCM:
@@ -105,6 +162,14 @@ services:
 Without the `provider_packages` entry NVCM never installs the provider, and the
 DCIM consumer starts but handles nothing.
 
+Everything else about the file is NVCM's, and their air-gapped requirements still
+apply on top of these three -- `cluster.airgapped: true`, `images.source:
+registry` and an `images.registry` pointing at the same namespace
+`upload-to-registry.sh` uploaded to, so the installer uses the bundled
+dependency charts and manifests rather than reaching for them. See their
+[air-gapped bundle README](https://github.com/dsx-ai-factory/nv-config-manager/blob/main/deploy/airgapped/README.md)
+for the full set.
+
 ## Notes
 
 `install-netbox.sh` repoints every image in the chart, not just the main one.
@@ -116,9 +181,12 @@ against running their charts with non-Bitnami registries; pushing their images
 into a private registry is exactly what an air-gapped install does, and the
 chart refuses to render without it.
 
-The chart's `helm test` hook references `busybox` from Docker Hub directly and
-is not repointed. Nothing creates that Pod during an install, so it does not
-affect an offline deployment, but `helm test` will not work.
+The chart's `helm test` hook is the one image built without a registry value:
+`templates/tests/test-connection.yaml` renders
+`{{ .Values.test.image.repository }}:{{ .Values.test.image.tag }}` and nothing
+else, so the registry has to be carried in the repository instead. It is, so
+`helm test` works offline too. Nothing creates that Pod during an install either
+way.
 
 The merge step depends on NVCM's bundle layout (`helm/`, `images/`,
 `installer/`). It checks for those directories and stops with a clear message if
