@@ -6,8 +6,8 @@ Backed by first-class plugin models: ``DeviceConfigStatus`` (per-device flags),
 ``IntendedConfig``, and ``BackupConfig`` -- one record per device, read/written
 over the plugin REST API.
 The config *content* lives in the config store (referenced by ``commit_id``);
-these records hold the flags and pointers. A device is "managed" when its
-``DeviceConfigStatus.render_enabled`` is set.
+these records hold the flags and pointers. A device is "managed" when it has a
+``DeviceConfigStatus`` record at all (see ``inventory.managed_device_ids``).
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Platform slugs eligible for backup (matches the managed-fleet platforms).
-_BACKUP_PLATFORMS = frozenset({"arista-eos", "cumulus-linux", "nv-os"})
+_BACKUP_PLATFORMS = frozenset({"arista-eos", "cumulus-linux", "juniper-junos", "nv-os"})
 # ZTP writes ``provisioned``, so freshly-provisioned devices need it as well as
 # ``active`` or they would never be backed up.
 _BACKUP_STATUSES = frozenset({"active", "provisioned"})

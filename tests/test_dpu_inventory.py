@@ -78,7 +78,8 @@ async def test_update_dpu_creates_mac_and_sets_primary():
     # returns the refreshed host device
     assert result.id == "5"
     assert result.serial == "SN-NEW"
-    assert result.interfaces[0].mac_address == "AA:BB:CC:00:00:01"
+    # InterfaceData carries the netaddr canonical form, as the reference emits.
+    assert result.interfaces[0].mac_address == "AA-BB-CC-00-00-01"
 
 
 async def test_update_dpu_reuses_existing_mac():

@@ -33,12 +33,16 @@ def _client(**kwargs):
 
 
 @pytest.mark.inventory
-async def test_managed_metadata_resolves_render_enabled_from_the_status_endpoint():
+async def test_managed_metadata_resolves_managed_ids_from_the_status_endpoint():
+    # "Managed" is having a DeviceConfigStatus row, not render_enabled=True (the
+    # reference's config_manager_devices); the status listing is unfiltered.
     # cf_nvcm_render_enabled names no real custom field, so NetBox would drop it and
     # return the whole fleet.
-    client, queries = _client(rest_list={STATUS_PATH: [{"id": 1, "device": 4}]})
+    client, queries = _client(
+        rest_list={STATUS_PATH: [{"id": 1, "device": 4, "render_enabled": False}]}
+    )
     await client.get_managed_device_metadata()
-    assert ("render_enabled", "true") in params_for(queries, STATUS_PATH)
+    assert params_for(queries, STATUS_PATH) == []
     device_params = params_for(queries, _DEVICES)
     assert ("id", "4") in device_params
     assert not any(key.startswith("cf_nvcm_") for key, _ in device_params)
@@ -78,11 +82,12 @@ async def test_list_devices_requires_primary_ip_and_maps_every_filter():
         ("device_type_id", "7"),
         ("manufacturer", "nvidia"),
         ("platform", "nv-os"),
-        # managed_only narrows to the render-enabled device ids, ANDed with the rest.
+        # managed_only narrows to the managed (status-row) device ids, ANDed with
+        # the rest.
         ("id", "9"),
     ):
         assert expected in params, expected
-    assert ("render_enabled", "true") in params_for(queries, STATUS_PATH)
+    assert params_for(queries, STATUS_PATH) == []
     # Every value reaches aiohttp as a string.
     assert all(isinstance(value, str) for _, value in params)
 
@@ -112,7 +117,7 @@ async def test_guid_lookup_uses_the_case_insensitive_custom_field_filter():
     # case-insensitive. Losing it silently stops matching real GUIDs.
     client, queries = _client()
     await client.find_ib_interfaces_by_guids(["0xABCD"])
-    assert ("cf_ib_guid", "0xABCD") in params_for(queries, _INTERFACES)
+    assert ("cf_ib_guid__ie", "0xABCD") in params_for(queries, _INTERFACES)
 
 
 @pytest.mark.dhcp

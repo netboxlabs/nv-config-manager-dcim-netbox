@@ -73,6 +73,19 @@ async def test_get_backup_enabled_device_ids_intersects_eligible():
     assert {i for i in result} == {"5"}
 
 
+async def test_get_backup_enabled_device_ids_includes_juniper_junos():
+    # Parity: the reference's backup platform set includes "Juniper Junos".
+    client = _client(
+        rest_list={
+            _STATUS: [{"device": 5}],
+            "dcim/devices/": [
+                {"id": 5, "status": {"value": "active"}, "platform": {"slug": "juniper-junos"}},
+            ],
+        }
+    )
+    assert set(await client.get_backup_enabled_device_ids(True)) == {"5"}
+
+
 async def test_get_backup_enabled_device_ids_accepts_provisioned():
     # ZTP writes `provisioned`; a NetBox without the plugin's FIELD_CHOICES cannot
     # be asked to filter on it, so it must be matched here.

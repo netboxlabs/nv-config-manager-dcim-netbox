@@ -140,7 +140,32 @@ async def test_find_ib_interfaces_by_guids():
     assert [g.interface_id for g in result] == ["11"]
 
 
+async def test_find_ib_interfaces_by_guids_is_one_case_insensitive_request():
+    # One request: the reference ORs every GUID through ``cf_ib_guid__ie``, and
+    # NetBox generates that iexact lookup for text custom fields.
+    queries = []
+    client = _client(rest_list={"dcim/interfaces/": []}, queries=queries)
+    await client.find_ib_interfaces_by_guids(["0xAA", "0xbb", "0xAA"])
+    assert queries == [
+        ("dcim/interfaces/", [("cf_ib_guid__ie", "0xAA"), ("cf_ib_guid__ie", "0xbb")])
+    ]
+
+    # No GUIDs, no request: an unfiltered read would return every interface.
+    queries.clear()
+    assert await client.find_ib_interfaces_by_guids([]) == []
+    assert queries == []
+
+
 # -- partitions -----------------------------------------------------------------
+
+
+def _scope_resolver(*, site=None, location=None):
+    """A ``_resolve_scope`` stub answering each scope model with its row."""
+
+    async def resolve_scope(value, *, scope_type):
+        return {"dcim.site": site, "dcim.location": location}[scope_type]
+
+    return resolve_scope
 
 
 async def test_ensure_ib_pkey_partition_creates_overlay_and_pkey():
@@ -151,17 +176,14 @@ async def test_ensure_ib_pkey_partition_creates_overlay_and_pkey():
         record=record,
     )
 
-    async def resolve_scope(value, *, scope_type):
-        assert scope_type == "dcim.location", scope_type
-        return {"id": 5, "name": "Row 1", "slug": "row-1"}
-
     async def resolve_tenant(name):
         return None
 
     async def find_overlay(name, scope=None, *, scope_type=None):
+        assert scope_type == "dcim.location", scope_type
         return None  # no existing overlay -> create
 
-    client._resolve_scope = resolve_scope
+    client._resolve_scope = _scope_resolver(location={"id": 5, "name": "Row 1", "slug": "row-1"})
     client._resolve_tenant_id = resolve_tenant
     client._find_overlay = find_overlay
     part = await client.ensure_ib_pkey_partition("0x7fff", "part-A", "Row 1", None, "full")
@@ -171,6 +193,63 @@ async def test_ensure_ib_pkey_partition_creates_overlay_and_pkey():
     assert posts == {_OVERLAYS, _PKEYS}
     overlay_body = next(b for m, p, b in record if m == "POST" and p == _OVERLAYS)
     assert overlay_body["scope_type"] == "dcim.location" and overlay_body["scope_id"] == 5
+    assert "tenant" not in overlay_body  # no tenant named, none written
+
+
+async def test_ensure_ib_pkey_partition_accepts_the_host_site_name():
+    # NVCM feeds back resolve_ib_host_site().site_name, a NetBox Site, so the
+    # overlay is anchored on that Site. Sites win when a Location shares the name.
+    record = []
+    client = _client(
+        rest_list={_PKEYS: []}, post={_OVERLAYS: {"id": 10}, _PKEYS: {"id": 20}}, record=record
+    )
+    seen = {}
+
+    async def find_overlay(name, scope=None, *, scope_type=None):
+        seen["scope_type"] = scope_type
+        return None
+
+    client._resolve_scope = _scope_resolver(
+        site={"id": 3, "name": "SPO01", "slug": "spo01"},
+        location={"id": 5, "name": "SPO01", "slug": "spo01-loc"},
+    )
+    client._find_overlay = find_overlay
+    part = await client.ensure_ib_pkey_partition("0x7fff", "part-A", "SPO01", None, "full")
+    assert part.partition_id == "10"
+    assert seen["scope_type"] == "dcim.site"
+    overlay_body = next(b for m, p, b in record if m == "POST" and p == _OVERLAYS)
+    assert overlay_body["scope_type"] == "dcim.site" and overlay_body["scope_id"] == 3
+
+
+async def test_ensure_ib_pkey_partition_rejects_an_unknown_scope():
+    client = _client(rest_list={_PKEYS: []})
+    client._resolve_scope = _scope_resolver()
+    with pytest.raises(DCIMInvalidDataError, match="Site or Location 'nowhere'"):
+        await client.ensure_ib_pkey_partition("0x7fff", "part-A", "nowhere", None, "full")
+
+
+async def test_ensure_ib_pkey_partition_resolves_the_tenant_or_raises():
+    # tenant_name is optional; a named tenant must exist, as in the reference.
+    record = []
+    tenants = [{"id": 7, "name": "Acme"}]
+    client = _client(
+        rest_list={_PKEYS: [], "tenancy/tenants/": tenants},
+        post={_OVERLAYS: {"id": 10}, _PKEYS: {"id": 20}},
+        record=record,
+    )
+
+    async def find_overlay(name, scope=None, *, scope_type=None):
+        return None
+
+    client._resolve_scope = _scope_resolver(site={"id": 3, "name": "SPO01", "slug": "spo01"})
+    client._find_overlay = find_overlay
+    await client.ensure_ib_pkey_partition("0x7fff", "part-A", "SPO01", "Acme", "full")
+    bodies = [b for m, p, b in record if m == "POST"]
+    assert bodies and all(b["tenant"] == 7 for b in bodies)
+
+    tenants.clear()
+    with pytest.raises(DCIMInvalidDataError, match="Tenant 'Acme' not found"):
+        await client.ensure_ib_pkey_partition("0x7fff", "part-A", "SPO01", "Acme", "full")
 
 
 async def test_ensure_orphan_ib_pkey_creates_when_absent():
@@ -388,13 +467,13 @@ async def test_resolve_ib_pkey_context():
     assert ctx.overlay_id == "10" and ctx.pkey_id == "20" and ctx.pkey == "0x7fff"
 
 
-async def test_resolve_ib_pkey_context_requires_a_location():
-    # Device.location is optional in NetBox. With no scope_id the overlay query is
-    # unscoped, so it would match another site's ib_pkey overlay.
+async def test_resolve_ib_pkey_context_without_a_location_scopes_to_the_site():
+    # Device.location is optional in NetBox. The overlay query must still be
+    # scoped (here to the Site) so it cannot match another site's ib_pkey overlay.
     seen: list[list] = []
     client = _client(
         rest_list={
-            _OVERLAYS: [{"id": 10, "name": "other-site-part"}],
+            _OVERLAYS: [{"id": 10, "name": "site-part"}],
             _PKEYS: [{"id": 20, "pkey": "0x7fff", "overlay": 10}],
         }
     )
@@ -410,6 +489,38 @@ async def test_resolve_ib_pkey_context_requires_a_location():
         return {"id": "1", "name": "host-01", "site": {"id": "2", "name": "DM-Akron"}}
 
     client._resolve_ib_device = resolve
-    with pytest.raises(DCIMInvalidDataError, match="no Location"):
-        await client.resolve_ib_pkey_context("host-01", "0x7fff")
-    assert not [p for path, p in seen if path == _OVERLAYS]
+    ctx = await client.resolve_ib_pkey_context("host-01", "0x7fff")
+    assert ctx.overlay_id == "10"
+    overlay_queries = [p for path, p in seen if path == _OVERLAYS]
+    assert overlay_queries == [
+        [("isolation_type", "ib_pkey"), ("scope_type", "dcim.site"), ("scope_id", "2")]
+    ]
+
+
+async def test_resolve_ib_pkey_context_matches_a_site_scoped_partition():
+    # ensure_ib_pkey_partition anchors a partition on the host's Site when given
+    # the name resolve_ib_host_site returns; the lookup has to find it there.
+    overlay = {"id": 10, "name": "ib-part"}
+
+    async def rest_list(path, params=None, **kwargs):
+        params = params or []
+        if path == _OVERLAYS:
+            return [overlay] if ("scope_type", "dcim.site") in params else []
+        if path == _PKEYS:
+            return [{"id": 20, "pkey": "0x7fff", "overlay": 10}]
+        return []
+
+    client = _client()
+    client.rest_list = rest_list
+
+    async def resolve(host):
+        return {
+            "id": "1",
+            "name": "host-01",
+            "site": {"id": "2", "name": "DM-Akron"},
+            "location": {"id": 5},
+        }
+
+    client._resolve_ib_device = resolve
+    ctx = await client.resolve_ib_pkey_context("host-01", "0x7fff")
+    assert ctx.overlay_id == "10" and ctx.pkey_id == "20"

@@ -72,19 +72,27 @@ The provider registers render-event handlers for these native object types
 | --- | --- |
 | `dcim.device` | the device itself |
 | `dcim.interface` / `dcim.rearport` / `dcim.frontport` | the parent device |
+| `dcim.macaddress` | the assigned interface's device (NetBox 4.2+ keeps MACs on their own model) |
 | `dcim.cable` | both termination devices |
 | `ipam.vrf` | devices with an interface in the VRF |
 | `ipam.prefix` | devices in the prefix's scope (site/location/region) |
 | `ipam.ipaddress` | the interface's device |
-| `extras.configcontext` | devices matching the context's scope (locations/roles/platforms/tenants/tags…) |
+| `extras.configcontext` | devices matching the context's scope (sites/locations/roles/platforms/tenants/tags…), read from the event record — so a **delete** still re-renders the devices it applied to |
 | `netbox_bgp.bgpsession` | the session's device |
 | `ipam.asn` | every device whose BGP session references the ASN (`local_as` / `remote_as`) |
 | `netbox_bgp.bgppeergroup` | every device whose BGP session uses the peer group |
 | `netbox_nv_config_manager.overlayassignment` | the assigned device, or the assigned interface's device |
 | `netbox_nv_config_manager.deviceconfigstatus` | the device |
 
-Cross-object handlers skip `delete` events (the object can no longer be resolved)
-and are best-effort.
+Cross-object handlers other than `extras.configcontext` skip `delete` events (the
+object can no longer be resolved).
+
+A handler that cannot reach NetBox (connection error, timeout, 5xx) raises
+`events.NetBoxUnavailableError`, deliberately *not* a `DCIMError`: NVCM's
+dispatcher acknowledges any `DCIMError` as a processed-and-failed event, and only
+a non-DCIM exception makes the consumer nak the message for redelivery. A
+deterministic failure (400, GraphQL data error) stays a `DCIMInvalidDataError`
+and is acked, so it is not redelivered forever.
 
 Object types with **no NetBox equivalent** are deliberately not registered:
 `dcim.cablepath` (NetBox's `CablePath` is internal),

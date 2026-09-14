@@ -46,7 +46,8 @@ INTERFACES_PATH = "dcim/interfaces/"
 IP_ADDRESSES_PATH = "ipam/ip-addresses/"
 
 # The two models an Overlay's ``CachedScopeMixin`` scope GFK can point at, and
-# where to look each one up. SpectrumX anchors at a Site, InfiniBand at a Location.
+# where to look each one up. SpectrumX anchors at a Site; InfiniBand at the host's
+# Site, or a Location when the partition names one.
 SITE_SCOPE_TYPE = "dcim.site"
 LOCATION_SCOPE_TYPE = "dcim.location"
 SCOPE_PATHS = {SITE_SCOPE_TYPE: "dcim/sites/", LOCATION_SCOPE_TYPE: "dcim/locations/"}
@@ -271,9 +272,10 @@ class FabricCommonMixin:
     async def _resolve_any_scope(self, value: str | int | None) -> tuple[str | None, dict | None]:
         """Resolve a value to ``(scope_type, row)`` when the model is not known.
 
-        Only for reads that span both kinds of overlay -- ``list_overlays`` is
-        filtered by isolation type, which may be either. Sites before Locations,
-        the order ``reference.get_location_metadata`` uses.
+        For callers that accept either kind of scope: ``list_overlays`` is
+        filtered by isolation type, which may be either, and an IB partition may
+        name the host's Site or a Location. Sites before Locations, the order
+        ``reference.get_location_metadata`` uses.
         """
         types = (SITE_SCOPE_TYPE, LOCATION_SCOPE_TYPE)
         rows = await asyncio.gather(*(self._resolve_scope(value, scope_type=t) for t in types))
@@ -289,11 +291,19 @@ class FabricCommonMixin:
         return rows[0]["id"] if rows else None
 
     async def _resolve_tenant_id(self, tenant: str | None) -> int | None:
+        """Resolve a tenant pk or name; ``None``/empty means no tenant.
+
+        A named tenant that does not exist raises, as the reference provider
+        does, rather than provisioning with the tenant silently dropped.
+        """
         if not tenant:
             return None
         if str(tenant).isdigit():
             return int(tenant)
-        return await self._lookup_id("tenancy/tenants/", tenant)
+        tenant_id = await self._lookup_id("tenancy/tenants/", tenant)
+        if tenant_id is None:
+            raise DCIMInvalidDataError(f"Tenant {tenant!r} not found in DCIM")
+        return tenant_id
 
     # Kept as a method for the mixins' ``self._fk_id(...)`` call sites; the
     # implementation is the shared one in ``_mappers``.

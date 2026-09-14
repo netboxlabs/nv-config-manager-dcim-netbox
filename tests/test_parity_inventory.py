@@ -21,7 +21,9 @@ from nv_config_manager_dcim import (
 from nv_config_manager_dcim_netbox._mappers import (
     canonical_mac,
     host_metadata_from_gql,
+    interface_from_rest,
     network_device_from_rest,
+    workflow_mac,
 )
 from nv_config_manager_dcim_netbox.fabric_common import STATUS_PATH
 from tests._fake import fake_client as _client
@@ -243,6 +245,42 @@ async def test_list_namespace_tags_no_location_is_unscoped():
     assert params == []
 
 
+async def test_list_namespace_tags_excludes_the_vrfs_own_name_tag():
+    # The plugin loader tags a zone VRF [spectrumx, <its own name>]; the reference
+    # returns only the tags on Namespace objects, i.e. the zone tag alone.
+    client = _capture(
+        rest_rows={
+            "ipam/vrfs/": [
+                {
+                    "name": "ns1",
+                    "tags": [
+                        {"name": "spectrumx", "slug": "spectrumx"},
+                        {"name": "ns1", "slug": "ns1"},
+                    ],
+                },
+                {"name": "tenant-a", "tags": [{"name": "spectrumx", "slug": "spectrumx"}]},
+            ]
+        }
+    )
+    assert await client.list_namespace_tags() == ["spectrumx"]
+
+
+def test_workflow_mac_is_netaddr_canonical():
+    # Parity with the reference's str(netaddr.EUI(mac)): NVCM's cable validation
+    # keys hosts by that form, so a colon-separated value never matches.
+    assert workflow_mac("44:38:39:00:00:03") == "44-38-39-00-00-03"
+    assert workflow_mac("aa:bb:cc:0:0:1") == "AA-BB-CC-00-00-01"
+    assert workflow_mac(None) is None
+    assert workflow_mac("") is None
+    with pytest.raises(DCIMInvalidDataError):
+        workflow_mac("not-a-mac")
+    assert interface_from_rest({"id": 1, "name": "p0", "mac_address": "aa:bb:cc:00:00:01"})
+    assert (
+        interface_from_rest({"id": 1, "name": "p0", "mac_address": "aa:bb:cc:00:00:01"}).mac_address
+        == "AA-BB-CC-00-00-01"
+    )
+
+
 # -- Fix 6: host alias custom field ------------------------------------------
 
 
@@ -294,12 +332,32 @@ async def test_set_primary_mac_reuses_across_separators():
 # -- Fix 8: managed-only scoping ---------------------------------------------
 
 
-async def test_list_devices_managed_only_scopes_by_render_enabled_status():
-    client = _capture(rest_rows={STATUS_PATH: [{"id": 1, "device": 2}]})
+async def test_list_devices_managed_only_scopes_by_status_record():
+    # Parity: `nv_config_manager_device_status: $managed_only` in the reference
+    # query means "has a status record", not render_enabled=True.
+    client = _capture(rest_rows={STATUS_PATH: [{"id": 1, "device": 2, "render_enabled": False}]})
     await client.list_devices(DCIMDeviceSelectionFilter(managed_only=True))
     calls = dict((path, params) for path, params in client._calls)
-    assert ("render_enabled", "true") in calls[STATUS_PATH]
+    assert calls[STATUS_PATH] == []
     assert ("id", "2") in calls["dcim/devices/"]
+
+
+async def test_get_network_devices_managed_only_is_independent_of_render_enabled():
+    seen = {}
+    client = _capture(
+        rest_rows={
+            STATUS_PATH: [{"id": 1, "device": 2, "render_enabled": False}],
+            "dcim/devices/": [],
+        }
+    )
+    await client.get_network_devices(DeviceInventoryFilter(managed_only=True))
+    seen = dict(client._calls)
+    assert seen[STATUS_PATH] == []
+    assert ("id", "2") in seen["dcim/devices/"]
+    # An explicit render_enabled filter still goes to the status endpoint.
+    client = _capture(rest_rows={STATUS_PATH: [{"id": 1, "device": 2, "render_enabled": True}]})
+    await client.get_network_devices(DeviceInventoryFilter(render_enabled=True))
+    assert ("render_enabled", "true") in dict(client._calls)[STATUS_PATH]
 
 
 async def test_list_devices_managed_only_without_status_records_is_empty():

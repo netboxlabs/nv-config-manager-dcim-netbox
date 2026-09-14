@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from nv_config_manager_dcim import DeviceVRF, NamespaceRouteDistinguisher
 
 from nv_config_manager_dcim_netbox._mappers import tag_names
@@ -66,34 +68,47 @@ class NetBoxIPAMMixin:
     async def get_namespace_route_distinguishers(
         self, site: str, namespace_tag: str
     ) -> list[NamespaceRouteDistinguisher]:
-        """Return the route distinguishers in use in a namespace zone.
+        """Return the namespaces at ``site`` and every route distinguisher NetBox
+        will refuse for a new VRF there.
 
-        The caller allocates a new non-conflicting RD, so this returns every one
-        already taken by a VRF tagged ``namespace_tag``. NetBox VRFs have no
-        native site link, so ``site`` filters on the ``nvcm_site`` custom field
-        (when defined) to keep multi-site deployments from drawing candidates
-        across sites.
+        The namespaces are the VRFs tagged ``namespace_tag`` at ``site``. NetBox
+        VRFs have no native site link, so ``site`` filters on the ``nvcm_site``
+        custom field, resolved to the Site pk first: that is what ``cf_nvcm_site``
+        holds, while NVCM sends the pk from ``list_locations``. One entry per
+        namespace: the zone VRF and every tenant VRF ``provision_spectrum_x_vrf``
+        created in it carry the same namespace tag. ``namespace_id`` is that tag
+        name (not the VRF pk), which is what provision re-applies to the new VRF.
+        The caller provisions one VRF per entry.
 
-        ``site`` is resolved to the Site pk first: that is what ``cf_nvcm_site``
-        holds, while NVCM sends the pk from ``list_locations``.
-
-        One entry per namespace. The zone VRF and every tenant VRF
-        ``provision_spectrum_x_vrf`` created in it carry the same namespace tag,
-        so their RDs are grouped under it, as a Nautobot namespace lists the RDs
-        of the VRFs it contains. The caller provisions one VRF per entry.
+        The ``route_distinguishers`` are deliberately *not* scoped to the site or
+        the tag. A Nautobot namespace scopes RD and VNI uniqueness, so listing the
+        RDs of its own VRFs is the whole taken set there; NetBox makes
+        ``ipam.VRF.rd`` and the plugin's ``VXLAN.vnid`` unique across the install.
+        NVCM's allocator only subtracts the RDs it is handed from
+        ``[rd_min, rd_max]``, so a taken set narrower than NetBox's uniqueness rule
+        hands back a value another site already holds, the VRF POST fails, and
+        every retry recomputes the same value. Every namespace therefore reports
+        the RDs of all VRFs (any site, any tag) plus ``*:<vnid>`` for every plugin
+        VXLAN, so a VNI another overlay uses is excluded as well.
         """
         params: list[tuple[str, str]] = []
         if site:
             params.append(("cf_nvcm_site", await self._site_field_value(site)))
-        vrfs = await self.rest_list(VRFS_PATH, params)
-        by_namespace: dict[str, list[str]] = {}
-        for vrf in vrfs:
+        reads = [self.rest_list(VRFS_PATH), self.rest_list(self.VXLANS_PATH)]
+        if params:
+            reads.append(self.rest_list(VRFS_PATH, params))
+        all_vrfs, vxlans, *site_vrfs = await asyncio.gather(*reads)
+        zone_vrfs = site_vrfs[0] if site_vrfs else all_vrfs
+        taken = dict.fromkeys(vrf["rd"] for vrf in all_vrfs if vrf.get("rd"))
+        taken.update(dict.fromkeys(f"*:{v['vnid']}" for v in vxlans if v.get("vnid") is not None))
+        route_distinguishers = tuple(taken)
+
+        namespaces: dict[str, None] = {}
+        for vrf in zone_vrfs:
             if namespace_tag not in tag_names(vrf):
                 continue
-            # ``provision_spectrum_x_vrf`` re-applies namespace_id as a VRF tag
-            # name, so it must be the tag name and not the VRF pk. Take the first
-            # tag that is not the zone marker, which is how ``get_spectrum_x_vrfs``
-            # reads it back.
+            # The first tag that is not the zone marker, which is how
+            # ``get_spectrum_x_vrfs`` reads the namespace back.
             candidate_names = sorted(
                 t["name"]
                 for t in (vrf.get("tags") or [])
@@ -101,11 +116,10 @@ class NetBoxIPAMMixin:
                 and t.get("name")
                 and namespace_tag not in (t.get("name"), t.get("slug"))
             )
-            ns_name = candidate_names[0] if candidate_names else ""
-            rds = by_namespace.setdefault(ns_name, [])
-            if vrf.get("rd") and vrf["rd"] not in rds:
-                rds.append(vrf["rd"])
+            namespaces.setdefault(candidate_names[0] if candidate_names else "")
         return [
-            NamespaceRouteDistinguisher(namespace_id=ns_name, route_distinguishers=tuple(rds))
-            for ns_name, rds in by_namespace.items()
+            NamespaceRouteDistinguisher(
+                namespace_id=ns_name, route_distinguishers=route_distinguishers
+            )
+            for ns_name in namespaces
         ]

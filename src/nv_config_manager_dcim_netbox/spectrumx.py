@@ -84,6 +84,10 @@ class NetBoxSpectrumXMixin:
         if not vrf_ids:
             return []
         data = await self.graphql_query(_SPECTRUMX_VRFS_QUERY, {"ids": vrf_ids})
+        # NVCM passes the Site pk; the workflow shows ``site`` to a person, so a
+        # VRF with no interface to derive it from reports the Site's name.
+        site_row = await self._resolve_scope(site, scope_type=SITE_SCOPE_TYPE)
+        site_name = (site_row or {}).get("name") or str(site)
         out: list[SpectrumXVRF] = []
         for vrf in data.get("vrf_list") or []:
             # Namespace is emulated as a VRF tag; derive it from the data (and
@@ -106,14 +110,14 @@ class NetBoxSpectrumXMixin:
                     for i in interface_rows
                     if ((i.get("device") or {}).get("site") or {}).get("name")
                 ),
-                site,
+                site_name,
             )
             out.append(
                 SpectrumXVRF(
                     vrf_id=str(vrf["id"]),
                     name=vrf["name"],
                     namespace=vrf_namespace,
-                    site=vrf_site or site,
+                    site=vrf_site,
                     route_distinguisher=vrf.get("rd") or "",
                     interfaces=interfaces,
                 )
@@ -129,7 +133,6 @@ class NetBoxSpectrumXMixin:
         site: str,
         tenant: str,
     ) -> None:
-        tenant_id = await self._resolve_tenant_id(tenant)
         vrf_name = f"SpXTenant{vnid}"
         created_overlay_id: int | None = None
         # Track every object created across all namespaces for reverse-order rollback.
@@ -142,6 +145,7 @@ class NetBoxSpectrumXMixin:
         if site_row is None:
             raise DCIMInvalidDataError(f"NetBox has no Site {site!r} for the Spectrum-X overlay")
         site_pk = site_row["id"]
+        tenant_id = await self._resolve_tenant_id(tenant)
 
         overlay = await self._find_overlay(overlay_name, site, scope_type=SITE_SCOPE_TYPE)
         if overlay:
@@ -290,6 +294,8 @@ class NetBoxSpectrumXMixin:
         isolation_cache: dict[int, str | None] = {}
 
         # One query per object; the device and its interfaces are independent.
+        # ``assigned_object_id`` is a GFK id shared by devices, interfaces and
+        # VRFs, so every read below also matches on ``assigned_object_type``.
         selected = [str(i) for i in interface_ids]
         every = list(dict.fromkeys([*selected, *(str(i) for i in device_interface_ids)]))
         device_rows, *interface_rows = await asyncio.gather(
@@ -307,13 +313,23 @@ class NetBoxSpectrumXMixin:
                 await self._create_overlay_assignment(target_overlay_id, "dcim.device", device_id)
                 created += 1
             for interface_id in selected:
-                rows = by_interface.get(interface_id, [])
-                if not any(str(self._fk_id(r.get("overlay"))) == target_overlay_id for r in rows):
+                rows = by_interface.setdefault(interface_id, [])
+                if not any(
+                    str(self._fk_id(r.get("overlay"))) == target_overlay_id
+                    for r in rows
+                    if str(r.get("assigned_object_type")) == "dcim.interface"
+                ):
                     await self._create_overlay_assignment(
                         target_overlay_id, "dcim.interface", interface_id
                     )
                     created += 1
-                    rows.append({"id": "created", "overlay": target_overlay_id})
+                    rows.append(
+                        {
+                            "id": "created",
+                            "overlay": target_overlay_id,
+                            "assigned_object_type": "dcim.interface",
+                        }
+                    )
 
         # Selected ports leave every other Spectrum-X overlay. With no target
         # that is the whole operation.
@@ -339,7 +355,8 @@ class NetBoxSpectrumXMixin:
             str(overlay)
             for rows in by_interface.values()
             for row in rows
-            if (overlay := self._fk_id(row.get("overlay"))) is not None
+            if str(row.get("assigned_object_type")) == "dcim.interface"
+            and (overlay := self._fk_id(row.get("overlay"))) is not None
         }
         orphaned = []
         for row in device_rows:

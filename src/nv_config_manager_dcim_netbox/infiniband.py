@@ -32,6 +32,7 @@ from nv_config_manager_dcim_netbox.fabric_common import (
     INTERFACES_PATH,
     IP_ADDRESSES_PATH,
     LOCATION_SCOPE_TYPE,
+    SITE_SCOPE_TYPE,
     normalize_pkey,
 )
 
@@ -203,17 +204,16 @@ class NetBoxInfiniBandMixin:
         return out
 
     async def find_ib_interfaces_by_guids(self, guids: list[str]) -> list[IBInterfaceGuid]:
-        # Exact filter only: NetBox ignores an unknown ``__ie`` lookup on a custom
-        # field and returns every interface, which reads back as a bogus multi-match.
-        # The exact filter is already case-insensitive. Repeated ``cf_*`` params are
-        # not reliably OR-ed, so query per GUID, concurrently.
-        pages = await asyncio.gather(
-            *(
-                self.rest_list(INTERFACES_PATH, [("cf_ib_guid", guid)])
-                for guid in dict.fromkeys(guids)
-            )
-        )
-        return [_ib_guid(row) for rows in pages for row in rows]
+        # ``cf_ib_guid__ie``: NetBox generates the iexact lookup for text custom
+        # fields, and a repeated multi-value param ORs, so one request matches
+        # every GUID whichever case UFM or NetBox stored it in (the reference
+        # queries ``cf_ib_guid__ie`` the same way). No GUIDs means no request: an
+        # unfiltered read would return every interface.
+        unique = list(dict.fromkeys(guids))
+        if not unique:
+            return []
+        rows = await self.rest_list(INTERFACES_PATH, [("cf_ib_guid__ie", g) for g in unique])
+        return [_ib_guid(row) for row in rows]
 
     # -- partitions ----------------------------------------------------------
 
@@ -229,21 +229,22 @@ class NetBoxInfiniBandMixin:
         # Normalized on write as well as on compare, so the stored value cannot
         # differ from what ensure_/sync_ib_pkey_assignments later compare against.
         membership_type = _normalize_membership(membership_type)
-        location_row = await self._resolve_scope(location_name, scope_type=LOCATION_SCOPE_TYPE)
-        if location_row is None:
-            raise DCIMInvalidDataError(f"NetBox Location {location_name!r} not found")
+        # NVCM hands back the ``site_name`` from ``resolve_ib_host_site``, which
+        # is a NetBox Site; a Location may also be named. Sites first, the order
+        # ``list_locations`` uses.
+        scope_type, scope_row = await self._resolve_any_scope(location_name)
+        if scope_row is None:
+            raise DCIMInvalidDataError(f"NetBox Site or Location {location_name!r} not found")
         tenant_id = await self._resolve_tenant_id(tenant_name)
 
-        overlay = await self._find_overlay(
-            partition_name, location_name, scope_type=LOCATION_SCOPE_TYPE
-        )
+        overlay = await self._find_overlay(partition_name, location_name, scope_type=scope_type)
         if overlay:
             overlay_id = overlay["id"]
         else:
             body = {
                 "name": partition_name,
-                "scope_type": LOCATION_SCOPE_TYPE,
-                "scope_id": location_row["id"],
+                "scope_type": scope_type,
+                "scope_id": scope_row["id"],
                 "isolation_type": _IB_PKEY_ISOLATION,
                 "status": FABRIC_STATUS,
             }
@@ -528,16 +529,25 @@ class NetBoxInfiniBandMixin:
             for chain_location in location_chain
             if (chain_id := self._fk_id(chain_location)) is not None
         ]
-        if not scope_ids:
-            # Device.location is optional in NetBox. With no scope_id the overlay
-            # query is unscoped and matches every ib_pkey overlay in the install.
-            raise DCIMInvalidDataError(
-                f"NetBox device {device.get('name')!r} has no Location; "
-                f"cannot scope IB PKey {pkey_norm!r} to an overlay"
+        # Device.location is optional in NetBox; the Site (required by
+        # ``_ib_host_site``) tops the ancestor chain, where the reference's
+        # Site-typed location sits, and is where ``ensure_ib_pkey_partition``
+        # anchors a partition created from ``resolve_ib_host_site``.
+        overlays: list[dict] = []
+        if scope_ids:
+            params = [("isolation_type", _IB_PKEY_ISOLATION), ("scope_type", LOCATION_SCOPE_TYPE)]
+            params.extend(("scope_id", scope_id) for scope_id in scope_ids)
+            overlays.extend(await self.rest_list(self.OVERLAYS_PATH, params))
+        overlays.extend(
+            await self.rest_list(
+                self.OVERLAYS_PATH,
+                [
+                    ("isolation_type", _IB_PKEY_ISOLATION),
+                    ("scope_type", SITE_SCOPE_TYPE),
+                    ("scope_id", host_site.site_id),
+                ],
             )
-        params = [("isolation_type", _IB_PKEY_ISOLATION), ("scope_type", LOCATION_SCOPE_TYPE)]
-        params.extend(("scope_id", scope_id) for scope_id in scope_ids)
-        overlays = await self.rest_list(self.OVERLAYS_PATH, params)
+        )
         overlays_by_id = {str(overlay["id"]): overlay for overlay in overlays}
         # One pkey query, then match against the location/isolation-scoped
         # overlays, instead of a pkeys query per overlay.

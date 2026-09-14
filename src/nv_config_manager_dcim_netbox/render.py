@@ -86,6 +86,7 @@ from nv_config_manager_dcim import (
 
 from nv_config_manager_dcim_netbox._mappers import choice_str, fk_id
 from nv_config_manager_dcim_netbox.fabric_common import (
+    BGP_ASN_FIELD,
     BGP_PEER_GROUPS_PATH,
     BGP_SESSIONS_PATH,
     DEVICES_PATH,
@@ -109,6 +110,24 @@ logger = logging.getLogger(__name__)
 _ROUTE_SERVER_TAG = "route-server"
 _WAN_ROLE_SLUGS = ("wan", "tan-bbr")
 _LOOPBACK_PREFIX = "lo"
+
+# ipam.asn rows, for resolving the ``nvcm_bgp_asn`` custom field to an ASN number.
+ASNS_PATH = "ipam/asns/"
+
+# IPAddress.role is a NetBox choice field and arrives as its value (``vip``); the
+# reference emits the Nautobot Role *name*, which the templates compare against
+# (``role_name == "VIP"``). Keyed by IPAddressRoleChoices value; unknown values
+# pass through unchanged.
+_IP_ROLE_LABELS = {
+    "loopback": "Loopback",
+    "secondary": "Secondary",
+    "anycast": "Anycast",
+    "vip": "VIP",
+    "vrrp": "VRRP",
+    "hsrp": "HSRP",
+    "glbp": "GLBP",
+    "carp": "CARP",
+}
 
 _RENDER_DEVICE_QUERY = """
 query ($id: ID!) {
@@ -136,6 +155,7 @@ query ($id: ID!) {
       name
       slug
       region { name }
+      tags { name }
     }
     location {
       id
@@ -173,6 +193,7 @@ query ($id: ID!) {
             tenant { name }
             tags { name }
             config_context
+            custom_fields
           }
         }
       }
@@ -289,6 +310,14 @@ def _targets(values: Any) -> tuple[RenderRouteTarget, ...]:
     return tuple(out)
 
 
+def _ip_role_label(role: Any) -> str | None:
+    """Return an IP address role as its label (``VIP``), not its choice value (``vip``)."""
+    if isinstance(role, dict) and role.get("label"):
+        return str(role["label"])
+    value = choice_str(role)
+    return _IP_ROLE_LABELS.get(value, value) if value else None
+
+
 def _render_ip(addr: str, role: Any, site_networks: list[Any]) -> RenderIPAddress | None:
     """Build a :class:`RenderIPAddress`, deriving host, version, and prefix ancestry.
 
@@ -309,13 +338,13 @@ def _render_ip(addr: str, role: Any, site_networks: list[Any]) -> RenderIPAddres
         address=str(iface),
         host=str(host),
         version=host.version,
-        role=choice_str(role) or None if role else None,
+        role=_ip_role_label(role),
         parent_prefixes=tuple(str(net) for net in parents),
     )
 
 
 def _render_connected_interface(
-    iface: dict[str, Any], site_networks: list[Any]
+    iface: dict[str, Any], site_networks: list[Any], peer_asns: dict[str, str] | None = None
 ) -> RenderConnectedInterface | None:
     """Build the cabling peer for one interface from its connected endpoint.
 
@@ -323,8 +352,10 @@ def _render_connected_interface(
     ``vrf.j2``, which forms a BGP neighbour from ``intf.connected_interface``)
     read the peer interface's IPv4 (``peer_ipv4``) and the peer device's role
     and routing ASN. The peer ASN comes from the peer device's merged
-    ``config_context.bgp.asn`` (the loader seeds it per device). Returns ``None``
-    for uncabled interfaces so those never emit a neighbour.
+    ``config_context.bgp.asn`` (the loader seeds it per device), else from
+    ``peer_asns`` -- the custom-field and session fallbacks resolved by
+    ``_connected_peer_asns``, keyed by peer name. Returns ``None`` for uncabled
+    interfaces so those never emit a neighbour.
     """
     endpoint = next(iter(iface.get("connected_endpoints") or []), None)
     if not endpoint:
@@ -355,7 +386,8 @@ def _render_connected_interface(
             role=(peer_device.get("role") or {}).get("name") or "",
             tenant=(peer_device.get("tenant") or {}).get("name"),
             tags=_tags(peer_device),
-            routing_asn=_str_or_none(peer_bgp.get("asn")),
+            routing_asn=_str_or_none(peer_bgp.get("asn"))
+            or (peer_asns or {}).get(str(peer_device["name"])),
         ),
     )
 
@@ -364,6 +396,7 @@ def _render_interface(
     iface: dict[str, Any],
     site_networks: list[Any],
     lag_members: dict[str, tuple[str, ...]] | None = None,
+    peer_asns: dict[str, str] | None = None,
 ) -> RenderInterface:
     """Map one NetBox interface into the typed :class:`RenderInterface`.
 
@@ -405,7 +438,7 @@ def _render_interface(
             filter(None, (_render_vlan(v) for v in iface.get("tagged_vlans") or []))
         ),
         addresses=addresses,
-        connected_interface=_render_connected_interface(iface, site_networks),
+        connected_interface=_render_connected_interface(iface, site_networks, peer_asns),
     )
 
 
@@ -470,6 +503,7 @@ def _location_hierarchy(device: dict[str, Any]) -> tuple[RenderLocation, RenderL
         id=_str_or_none(site.get("id")),
         name=str(site["name"]),
         kind="Site",
+        tags=_tags(site),
         parent=(
             RenderLocation(name=str(region["name"]), kind="Region")
             if isinstance(region, dict) and region.get("name")
@@ -567,12 +601,19 @@ def _peer_ttl(session: dict[str, Any], group_attributes: dict[str, dict[str, Any
     return None
 
 
+def _session_label(session: dict[str, Any], device_name: str | None) -> str:
+    """Name a session in an error by device and session, as the reference does."""
+    device = f"device '{device_name}'" if device_name else "device"
+    return f"NetBox {device} netbox-bgp session '{session.get('name') or session.get('id')}'"
+
+
 def _bgp_peer(
     session: dict[str, Any],
     by_address: dict[str, dict[str, Any]],
     peer_endpoints: dict[str, dict[str, Any]],
     group_names: dict[str, str],
     group_attributes: dict[str, dict[str, Any]],
+    device_name: str | None = None,
 ) -> tuple[RenderBGPPeer, str]:
     """Map one ``netbox-bgp`` session to a peer, and the VRF the session runs in.
 
@@ -584,46 +625,62 @@ def _bgp_peer(
       gives the session's source VRF -- the reference reads the same thing off its
       local endpoint's ``source_interface.vrf``.
     * ``remote_address`` is assigned to an interface on the peer, which names the
-      neighbour and its role -- the reference's ``peer.routing_instance.device``
-      and ``peer.source_interface``, resolved here in ``peer_endpoints``.
+      neighbour, its role and both its address families -- the reference's
+      ``peer.routing_instance.device`` and ``peer.source_interface``, resolved
+      here in ``peer_endpoints``.
 
     Deriving the neighbour from the *address* rather than from cabling is what
     makes a loopback-sourced session work: an iBGP/EVPN peering has no cable to
     follow, and its ``peer_group`` is exactly the field the templates interpolate.
+
+    An address that resolves to no interface fails the render, as it does in the
+    reference: unresolved, a local address would fall through to the default VRF
+    and put a WAN peer in the default-VRF neighbour block, and a remote address
+    leaves no peer to name.
     """
-    local_iface = by_address.get(_host_of((session.get("local_address") or {}).get("address")))
+    local = session.get("local_address") or {}
+    local_iface = by_address.get(_host_of(local.get("address")))
+    if local.get("address") and local_iface is None:
+        raise DCIMInvalidDataError(
+            f"{_session_label(session, device_name)} has local address {local['address']}, "
+            "which is on none of the device's interfaces, so its source VRF cannot be determined"
+        )
     source_vrf = _normalize_vrf_name((local_iface or {}).get("vrf"))
 
     remote = session.get("remote_address") or {}
-    endpoint = peer_endpoints.get(str(fk_id(remote)), {})
+    endpoint = peer_endpoints.get(str(fk_id(remote)))
+    if remote and endpoint is None:
+        raise DCIMInvalidDataError(
+            f"{_session_label(session, device_name)} has remote address {remote.get('address')}, "
+            "which is assigned to no interface, so its peer cannot be identified"
+        )
+    endpoint = endpoint or {}
     peer_name = _str_or_none(endpoint.get("device_name"))
     # The peer's role doubles as its peer-group name where the session names none
     # -- the reference's fallback, and what the fabric's group naming follows.
     peer_role = str(endpoint.get("device_role") or "")
     peer_group = _peer_group_name(session.get("peer_group"), group_names) or peer_role.upper()
-    if remote.get("address") and not peer_group:
-        # The default-VRF neighbour block interpolates peer_group unguarded, so an
-        # unidentifiable peer does not render a partial config, it renders an
-        # invalid one. The reference provider refuses the same case (it requires the
-        # peer endpoint's interface, its BGP plugin not exposing the VRF association
-        # on source_ip); this is narrower, refusing only when the field the templates
-        # need cannot be produced.
+    if remote and not peer_group:
+        # The default-VRF neighbour block interpolates peer_group unguarded, so a
+        # peer with neither a group nor a role renders an invalid config, not a
+        # partial one.
         raise DCIMInvalidDataError(
-            f"netbox-bgp session {session.get('id')} has remote address "
-            f"{remote.get('address')}, which is assigned to no interface, so its peer "
-            "cannot be named and the session has no peer group of its own"
+            f"{_session_label(session, device_name)} names no peer group, and its peer "
+            f"{peer_name or remote.get('address')} has no role to fall back to"
         )
 
+    # Both families come from the peer interface, as in the reference; the session's
+    # own remote address leads so it stays the neighbour for its family.
     peer_ipv4 = peer_ipv6 = None
-    if remote.get("address"):
+    for address in (remote.get("address"), *endpoint.get("addresses", ())):
         try:
-            ip = ipaddress.ip_interface(remote["address"]).ip
-            if ip.version == 4:
-                peer_ipv4 = str(ip)
-            else:
-                peer_ipv6 = str(ip)
+            ip = ipaddress.ip_interface(str(address)).ip
         except ValueError:
-            pass
+            continue
+        if ip.version == 4 and peer_ipv4 is None:
+            peer_ipv4 = str(ip)
+        elif ip.version == 6 and peer_ipv6 is None:
+            peer_ipv6 = str(ip)
 
     name = peer_name or session.get("name") or f"peer-{session.get('id')}"
     return (
@@ -651,6 +708,7 @@ def _bgp_instances(
     peer_groups: list[dict[str, Any]] | None = None,
     peer_endpoints: dict[str, dict[str, Any]] | None = None,
     device_asn: str | None = None,
+    device_name: str | None = None,
 ) -> tuple[RenderBGPInstance, ...]:
     """Group ``netbox-bgp`` sessions for a device into BGP instances keyed by local ASN.
 
@@ -667,6 +725,7 @@ def _bgp_instances(
     peers with anyone. ``device_asn`` (the device's own ASN) therefore seeds a peerless
     instance where no session already carries it, so a device that has an ASN and
     no neighbours reports what the reference reports rather than nothing at all.
+    ``device_name`` only names the device in errors.
     """
     group_attributes = {
         str(group["id"]): group.get("extra_attributes") or {}
@@ -706,7 +765,7 @@ def _bgp_instances(
             },
         )
         peer, source_vrf = _bgp_peer(
-            session, by_address, peer_endpoints or {}, group_names, group_attributes
+            session, by_address, peer_endpoints or {}, group_names, group_attributes, device_name
         )
         inst["peers"].append(peer)
         inst["vrfs"].add(source_vrf)
@@ -908,6 +967,7 @@ def _routing_from_context(
     router_id_interface: str | None = None,
     peer_groups: list[dict[str, Any]] | None = None,
     peer_endpoints: dict[str, dict[str, Any]] | None = None,
+    device_name: str | None = None,
 ) -> RenderRoutingData:
     """Native ``netbox-bgp`` instances plus effective routing policy (ASN/ISIS/EVPN)."""
     bgp = context.get("bgp") if isinstance(context.get("bgp"), dict) else {}
@@ -919,6 +979,7 @@ def _routing_from_context(
             peer_groups,
             peer_endpoints,
             _str_or_none(bgp.get("asn")),
+            device_name,
         ),
         default_asn=_str_or_none(bgp.get("asn")),
         local_asn=_str_or_none(bgp.get("local-asn")),
@@ -974,11 +1035,13 @@ class NetBoxRenderMixin:
         """Resolve each session's ``remote_address`` to the peer it identifies.
 
         Returned keyed by remote-address id: ``{interface_name, device_name,
-        device_role}``. The address serializer nests the interface and its brief
-        device, so the first read names both; only the role needs the second,
-        because no brief serializer carries it. Both are id-filtered, and skipped
-        entirely for a device with no sessions, which is most of a fabric -- and a
-        failed role read costs only the peer-group fallback, not the peer's name.
+        device_role, addresses}``. The address serializer nests the interface and
+        its brief device, so the first read names both. The role needs a devices
+        read, because no brief serializer carries it; ``addresses`` -- every
+        address on the peer interface, from which both peer address families are
+        derived as the reference does -- needs an addresses read by interface. All
+        are id-filtered, and skipped entirely for a device with no sessions, which
+        is most of a fabric.
         """
         address_ids = {
             str(pk)
@@ -994,13 +1057,18 @@ class NetBoxRenderMixin:
             if isinstance(interface := address.get("assigned_object"), dict)
             and address.get("assigned_object_type") == "dcim.interface"
         }
-        devices = await self._id_map(
-            DEVICES_PATH,
-            {
-                str(pk)
-                for interface in assigned.values()
-                if (pk := fk_id(interface.get("device"))) is not None
-            },
+        devices, interface_addresses = await asyncio.gather(
+            self._id_map(
+                DEVICES_PATH,
+                {
+                    str(pk)
+                    for interface in assigned.values()
+                    if (pk := fk_id(interface.get("device"))) is not None
+                },
+            ),
+            self._interface_addresses(
+                {str(i["id"]) for i in assigned.values() if i.get("id") is not None}
+            ),
         )
         endpoints: dict[str, dict[str, Any]] = {}
         for address_id, interface in assigned.items():
@@ -1010,8 +1078,72 @@ class NetBoxRenderMixin:
                 "interface_name": interface.get("name"),
                 "device_name": device.get("name") or brief.get("name"),
                 "device_role": (device.get("role") or {}).get("name"),
+                "addresses": interface_addresses.get(str(interface.get("id")), ()),
             }
         return endpoints
+
+    async def _interface_addresses(self, interface_ids: set[str]) -> dict[str, tuple[str, ...]]:
+        """Addresses on each interface, keyed by interface id (empty ids -> no fetch)."""
+        if not interface_ids:
+            return {}
+        rows = await self._safe_list(
+            IP_ADDRESSES_PATH, [("interface_id", i) for i in sorted(interface_ids)]
+        )
+        out: dict[str, list[str]] = {}
+        for row in rows:
+            # Nested when the serializer expands it, a bare id otherwise.
+            owner = str(
+                (row.get("assigned_object") or {}).get("id") or row.get("assigned_object_id")
+            )
+            if owner in interface_ids and row.get("address"):
+                out.setdefault(owner, []).append(str(row["address"]))
+        return {owner: tuple(found) for owner, found in out.items()}
+
+    async def _connected_peer_asns(
+        self,
+        interfaces: list[dict[str, Any]],
+        sessions: list[dict[str, Any]],
+        peer_endpoints: dict[str, dict[str, Any]],
+    ) -> dict[str, str]:
+        """Routing ASNs for cabled peers with no ``config_context.bgp.asn``, by peer name.
+
+        The reference reads a peer's BGP routing instances before its config
+        context. netbox-bgp has no instance object, so after the context (read
+        directly by ``_render_connected_interface``) the fallbacks are the peer's
+        ``nvcm_bgp_asn`` custom field -- an ``ipam.asn`` reference, a bare pk over
+        GraphQL and a nested object over REST -- and, failing that, the remote ASN
+        this device's own sessions already state for that peer. Without them a peer
+        whose ASN exists only as netbox-bgp data renders ``remote-as external``.
+        """
+        asns: dict[str, str] = {}
+        pks: dict[str, str] = {}
+        for iface in interfaces:
+            endpoint = next(iter(iface.get("connected_endpoints") or []), None)
+            peer = (endpoint or {}).get("device") or {}
+            name = _str_or_none(peer.get("name"))
+            if name is None or name in asns or name in pks:
+                continue
+            context = peer.get("config_context")
+            bgp = context.get("bgp") if isinstance(context, dict) else None
+            if isinstance(bgp, dict) and _str_or_none(bgp.get("asn")) is not None:
+                continue
+            value = (peer.get("custom_fields") or {}).get(BGP_ASN_FIELD)
+            if isinstance(value, dict) and value.get("asn") is not None:
+                asns[name] = str(value["asn"])
+            elif (pk := fk_id(value)) is not None:
+                pks[name] = str(pk)
+        resolved = await self._id_map(ASNS_PATH, set(pks.values()))
+        for name, pk in pks.items():
+            asn = _str_or_none((resolved.get(pk) or {}).get("asn"))
+            if asn is not None:
+                asns[name] = asn
+        for session in sessions:
+            endpoint = peer_endpoints.get(str(fk_id(session.get("remote_address")))) or {}
+            name = _str_or_none(endpoint.get("device_name"))
+            asn = _str_or_none((session.get("remote_as") or {}).get("asn"))
+            if name is not None and asn is not None:
+                asns.setdefault(name, asn)
+        return asns
 
     async def _l3_vxlans_for_vrfs(self, vrf_ids: set[str]) -> list[dict[str, Any]]:
         """L3 VXLANs whose VRF this device carries -- the reference's scoping."""
@@ -1427,10 +1559,11 @@ class NetBoxRenderMixin:
             self._bgp_peer_endpoints(bgp_sessions),
         )
         peer_groups = list(peer_group_map.values())
+        peer_asns = await self._connected_peer_asns(interfaces, bgp_sessions, peer_endpoints)
 
         lag_members = _lag_member_map(interfaces)
         render_interfaces = tuple(
-            _render_interface(i, site_networks, lag_members) for i in interfaces
+            _render_interface(i, site_networks, lag_members, peer_asns) for i in interfaces
         )
         router_id_interface = _loopback_interface_name(interfaces)
 
@@ -1462,6 +1595,7 @@ class NetBoxRenderMixin:
                     router_id_interface,
                     peer_groups,
                     peer_endpoints,
+                    _str_or_none(device.get("name")),
                 ),
                 overlays=overlays,
                 firmware=_firmware_from_context(context),
