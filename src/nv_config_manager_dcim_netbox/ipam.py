@@ -4,19 +4,18 @@
 
 from __future__ import annotations
 
-import asyncio
-
 from nv_config_manager_dcim import DeviceVRF, NamespaceRouteDistinguisher
 
-from nv_config_manager_dcim_netbox._mappers import fk_id, tag_names
+from nv_config_manager_dcim_netbox._mappers import tag_names
 from nv_config_manager_dcim_netbox.fabric_common import INTERFACES_PATH, VRFS_PATH
 
 # NetBox has no first-class IPAM "namespace" object: NetBox models a namespace
 # (an isolated zone of unique IP space) *as* a VRF. There is no grouping
 # container above the VRF, so a namespace *zone* -- a set of related VRFs that
 # should hold unique route distinguishers -- is emulated with a NetBox **tag**
-# applied to those VRFs. ``namespace_tag`` selects that zone; each VRF in it is
-# itself a namespace carrying one route distinguisher.
+# applied to those VRFs. ``namespace_tag`` selects that zone; within it a
+# second tag names the namespace, and every VRF carrying that tag contributes
+# its route distinguisher to the namespace.
 
 
 class NetBoxIPAMMixin:
@@ -25,8 +24,7 @@ class NetBoxIPAMMixin:
 
     async def get_device_vrfs(self, device_id: str) -> list[DeviceVRF]:
         # NetBox attaches VRFs to interfaces, never to devices, so a device's VRFs
-        # are the union across its interfaces. That is also how
-        # ``assign_vrf_to_device`` writes them back.
+        # are the union across its interfaces.
         interfaces = await self.rest_list(INTERFACES_PATH, [("device_id", str(device_id))])
         vrfs: dict[str, str] = {}
         for interface in interfaces:
@@ -36,37 +34,13 @@ class NetBoxIPAMMixin:
         return [DeviceVRF(vrf_id=vrf_id, vrf_name=name) for vrf_id, name in vrfs.items()]
 
     async def assign_vrf_to_device(self, device_id: str, vrf_id: str) -> None:
-        """Assign a VRF to a device by setting it on the device's interfaces.
+        """No-op: NetBox has no device/VRF relation.
 
-        NetBox has no device->VRF relationship (VRFs attach to interfaces /
-        prefixes / IPs, never devices), so "the device's VRF" is represented as
-        the VRF on its interfaces -- which is exactly how ``get_device_vrfs``
-        reads it back. Interfaces already in the target VRF are skipped so repeat
-        calls don't emit redundant changes.
-
-        ``mgmt_only`` interfaces are excluded: the reference provider models this
-        as a device-level assignment that leaves the management port alone, and
-        rendering a tenant VRF under it severs the management plane.
+        The reference provider inserts a device-level assignment row and touches
+        no interfaces; the ports stage that follows is what puts the selected
+        ports in the VRF. Writing the VRF onto every interface here would move
+        ports belonging to other tenants on a shared switch.
         """
-        target = int(vrf_id)
-        interfaces = await self.rest_list(INTERFACES_PATH, [("device_id", str(device_id))])
-        stale = [
-            interface
-            for interface in interfaces
-            if not interface.get("mgmt_only")
-            # str-compare: the FK may arrive nested or bare, and as int or str.
-            and str(fk_id(interface.get("vrf"))) != str(target)
-        ]
-        # Independent PATCHes: issue them together rather than one round trip per
-        # interface (a spine can carry hundreds).
-        await asyncio.gather(
-            *(
-                self.rest_request(
-                    "PATCH", f"{INTERFACES_PATH}{interface['id']}/", json={"vrf": target}
-                )
-                for interface in stale
-            )
-        )
 
     async def assign_vrf_to_interface(self, interface_id: str, vrf_id: str | None) -> None:
         await self.rest_request(
@@ -83,8 +57,9 @@ class NetBoxIPAMMixin:
         """Return no removals because NetBox has no separate device/VRF relation.
 
         The reference provider reconciles a device-level assignment table here;
-        NetBox has no such model, so the non-management interface VRFs
-        ``assign_vrf_to_device`` writes are the whole association.
+        NetBox has no such model, so the interface VRFs are the whole association.
+        The workflow still deploys the full configuration when ports are unassigned
+        or leave an overlay, which is what strips a dead VRF from the switch.
         """
         return []
 
@@ -101,12 +76,17 @@ class NetBoxIPAMMixin:
 
         ``site`` is resolved to the Site pk first: that is what ``cf_nvcm_site``
         holds, while NVCM sends the pk from ``list_locations``.
+
+        One entry per namespace. The zone VRF and every tenant VRF
+        ``provision_spectrum_x_vrf`` created in it carry the same namespace tag,
+        so their RDs are grouped under it, as a Nautobot namespace lists the RDs
+        of the VRFs it contains. The caller provisions one VRF per entry.
         """
         params: list[tuple[str, str]] = []
         if site:
             params.append(("cf_nvcm_site", await self._site_field_value(site)))
         vrfs = await self.rest_list(VRFS_PATH, params)
-        out: list[NamespaceRouteDistinguisher] = []
+        by_namespace: dict[str, list[str]] = {}
         for vrf in vrfs:
             if namespace_tag not in tag_names(vrf):
                 continue
@@ -122,10 +102,10 @@ class NetBoxIPAMMixin:
                 and namespace_tag not in (t.get("name"), t.get("slug"))
             )
             ns_name = candidate_names[0] if candidate_names else ""
-            out.append(
-                NamespaceRouteDistinguisher(
-                    namespace_id=ns_name,
-                    route_distinguishers=(vrf["rd"],) if vrf.get("rd") else (),
-                )
-            )
-        return out
+            rds = by_namespace.setdefault(ns_name, [])
+            if vrf.get("rd") and vrf["rd"] not in rds:
+                rds.append(vrf["rd"])
+        return [
+            NamespaceRouteDistinguisher(namespace_id=ns_name, route_distinguishers=tuple(rds))
+            for ns_name, rds in by_namespace.items()
+        ]

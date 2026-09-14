@@ -81,6 +81,41 @@ async def test_get_namespace_route_distinguishers_collects_zone_rds():
     assert in_use == {"65000:1", "65000:2"}
 
 
+async def test_get_namespace_route_distinguishers_groups_tenant_vrfs_under_their_namespace():
+    # provision_spectrum_x_vrf stamps each tenant VRF with the zone marker and the
+    # namespace tag, so it matches the same filter as the zone VRF. It must fold
+    # into that namespace's entry, not appear as a namespace of its own: the
+    # caller provisions one VRF per entry and NetBox rejects a repeated RD.
+    vrfs = [
+        {"id": 1, "name": "NS-A", "rd": None, "tags": [_tag("spectrumx"), _tag("NS-A")]},
+        {"id": 2, "name": "SpXTenant100", "rd": "*:100", "tags": [_tag("spectrumx"), _tag("NS-A")]},
+        {"id": 3, "name": "SpXTenant200", "rd": "*:200", "tags": [_tag("spectrumx"), _tag("NS-A")]},
+        {"id": 4, "name": "NS-B", "rd": None, "tags": [_tag("spectrumx"), _tag("NS-B")]},
+    ]
+    client = _client_with_vrfs(vrfs)
+    try:
+        result = await client.get_namespace_route_distinguishers("SiteX", "spectrumx")
+    finally:
+        await client.close()
+    assert [r.namespace_id for r in result] == ["NS-A", "NS-B"]
+    assert result[0].route_distinguishers == ("*:100", "*:200")
+    assert result[1].route_distinguishers == ()
+
+
+async def test_get_namespace_route_distinguishers_dedupes_a_repeated_rd():
+    # Duplicate zone tags on a hand-edited VRF should not double-count its RD.
+    vrfs = [
+        {"id": 1, "name": "a", "rd": "*:100", "tags": [_tag("spectrumx"), _tag("NS-A")]},
+        {"id": 2, "name": "b", "rd": "*:100", "tags": [_tag("spectrumx"), _tag("NS-A")]},
+    ]
+    client = _client_with_vrfs(vrfs)
+    try:
+        result = await client.get_namespace_route_distinguishers("SiteX", "spectrumx")
+    finally:
+        await client.close()
+    assert [(r.namespace_id, r.route_distinguishers) for r in result] == [("NS-A", ("*:100",))]
+
+
 async def test_get_namespace_route_distinguishers_matches_zone_marker_by_slug():
     # The namespace_tag ('spectrumx') matches the zone marker by tag name OR slug;
     # the returned namespace_id is the *other* tag (the namespace name).
