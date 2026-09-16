@@ -13,6 +13,7 @@ from nv_config_manager_dcim import (
     DCIMDeviceSelection,
     DCIMInvalidDataError,
     DCIMNotFoundError,
+    dcim_location_type,
 )
 
 from nv_config_manager_dcim_netbox._mappers import (
@@ -28,8 +29,13 @@ from nv_config_manager_dcim_netbox._mappers import device_pk as _device_pk
 from nv_config_manager_dcim_netbox.fabric_common import (
     DEVICES_PATH,
     INTERFACES_PATH,
+    LOCATION_SCOPE_TYPE,
+    REGION_SCOPE_TYPE,
+    SITE_SCOPE_TYPE,
+    SITEGROUP_SCOPE_TYPE,
     STATUS_PATH,
     chunked,
+    scope_type_for,
 )
 
 if TYPE_CHECKING:
@@ -105,6 +111,21 @@ query ($ids: [ID!]!) {{
   device_list(filters: {{id: {{in_list: $ids}}}}) {{{_HOST_DEVICE_FIELDS}}}
 }}
 """
+
+
+# NetBox device filter for each level a location reference can name. An untyped
+# reference stays on ``site``: that is what NVCM's /parameter/site hands out.
+_DEVICE_LOCATION_FILTERS = {
+    REGION_SCOPE_TYPE: "region",
+    SITEGROUP_SCOPE_TYPE: "site_group",
+    SITE_SCOPE_TYPE: "site",
+    LOCATION_SCOPE_TYPE: "location",
+}
+
+
+def _device_location_filter(value: object) -> str:
+    """Return the device-list filter key a location reference should use."""
+    return _DEVICE_LOCATION_FILTERS.get(scope_type_for(dcim_location_type(value)), "site")
 
 
 class NetBoxInventoryMixin:
@@ -185,6 +206,11 @@ class NetBoxInventoryMixin:
                     params.append((key, status_slug(value)))
                 elif key == "device_type_id":
                     params.append((key, str(value)))
+                elif key == "site":
+                    # A location filter names whichever level it came from: NetBox
+                    # keys each of the four separately, and a Location id sent as
+                    # `site_id` matches the Site of that pk instead.
+                    params.append(slug_or_id(_device_location_filter(value), value))
                 else:
                     # Name-or-id: NetBox keys these by slug, with the id under
                     # `<key>_id`. Workflows send either. See ``slug_or_id``.

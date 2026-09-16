@@ -135,14 +135,11 @@ async def test_unfiltered_locations_cover_sites_and_locations():
     assert {s.name for s in await client.list_locations()} == {"TRIAL01", "Row 1"}
 
 
-async def test_locations_never_offer_two_entries_under_one_id():
+async def test_colliding_ids_are_both_offered_and_typed():
     """NetBox PKs are per-model, so a Site and a Location can both be id 1.
 
-    NVCM stores a location id as the bare integer (`is_valid_location_id` rejects
-    anything else) and sends only that back, so two choices sharing an id are
-    indistinguishable -- and `get_location_metadata` would resolve both to the
-    Site, silently returning a different object than the one that was picked.
-    Dedup therefore keys on the id alone, not on (id, name).
+    Both are offered -- dropping one made it unselectable -- and
+    ``location_type`` is what tells them apart when the id comes back.
     """
     client = _client(
         gql={
@@ -152,10 +149,75 @@ async def test_locations_never_offer_two_entries_under_one_id():
     )
     result = await client.list_locations()
 
-    assert len({s.id for s in result}) == len(result), [(s.id, s.name) for s in result]
-    # Sites win, matching the order get_location_metadata resolves in.
-    assert ("1", "demo-site") in [(s.id, s.name) for s in result]
-    assert ("2", "rack-row-b") in [(s.id, s.name) for s in result]
+    assert {(s.id, s.name, s.location_type) for s in result} == {
+        ("1", "demo-site", "Site"),
+        ("1", "rack-row-a", "Location"),
+        ("2", "rack-row-b", "Location"),
+    }
+
+
+async def test_location_subtypes_come_from_the_custom_field():
+    """NVCM's dropdown asks for ("Site", "Module").
+
+    NetBox has no Module model -- the topology loader records the source
+    LocationType in ``nvcm_location_type`` -- so a subtype filters the Location
+    model rather than selecting a model of its own.
+    """
+    client = _client(
+        gql={
+            "site_list": [{"id": 1, "name": "TEST-SITE"}],
+            "location_list": [
+                {"id": 1, "name": "SUPERPOD 1", "custom_fields": {"nvcm_location_type": "Module"}},
+                {"id": 2, "name": "Row 3", "custom_fields": {"nvcm_location_type": "Rack"}},
+                {"id": 3, "name": "Untagged", "custom_fields": {}},
+            ],
+        }
+    )
+
+    result = await client.list_locations(("Site", "Module"))
+
+    assert {(s.name, s.location_type) for s in result} == {
+        ("TEST-SITE", "Site"),
+        ("SUPERPOD 1", "Module"),
+    }
+
+
+async def test_asking_for_the_location_model_returns_every_subtype():
+    client = _client(
+        gql={
+            "location_list": [
+                {"id": 1, "name": "SUPERPOD 1", "custom_fields": {"nvcm_location_type": "Module"}},
+                {"id": 2, "name": "Untagged", "custom_fields": {}},
+            ]
+        }
+    )
+
+    result = await client.list_locations(("Location",))
+
+    assert {(s.name, s.location_type) for s in result} == {
+        ("SUPERPOD 1", "Module"),
+        ("Untagged", "Location"),
+    }
+
+
+async def test_a_typed_reference_resolves_against_its_own_model():
+    """A Site and a Location share id 1; the type decides which one is meant."""
+    from nv_config_manager_dcim import DCIMLocationReference
+
+    gql = {
+        "lvl0": [
+            {"id": 1, "name": "the-location", "custom_fields": {"nvcm_location_type": "Module"}}
+        ],
+    }
+    client = _client(gql=gql)
+
+    found = await client.get_location_metadata(
+        DCIMLocationReference(id="1", location_type="Module")
+    )
+
+    # Only one alias is queried for a typed reference, so lvl0 is the Location.
+    assert found is not None
+    assert (found.id, found.name, found.location_type) == ("1", "the-location", "Module")
 
 
 async def test_get_location_metadata_resolves_every_level():
@@ -202,3 +264,17 @@ async def test_get_location_metadata_resolves_a_site_id():
     client = _client(gql={"lvl0": [{"id": 1, "name": "TRIAL01 - demo"}]})
     found = await client.get_location_metadata("1")
     assert found is not None and found.name == "TRIAL01 - demo"
+
+
+async def test_subtype_matching_is_case_insensitive():
+    """The model lookup casefolds, so the subtype comparison beside it must too."""
+    client = _client(
+        gql={
+            "location_list": [
+                {"id": 1, "name": "SUPERPOD 1", "custom_fields": {"nvcm_location_type": "Module"}},
+            ]
+        }
+    )
+
+    assert [s.name for s in await client.list_locations(("module",))] == ["SUPERPOD 1"]
+    assert [s.name for s in await client.list_locations(("MODULE",))] == ["SUPERPOD 1"]

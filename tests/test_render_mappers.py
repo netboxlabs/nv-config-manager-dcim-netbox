@@ -296,11 +296,12 @@ def test_endpoint_set_empty_or_wrong_type_returns_none():
 
 
 def test_endpoint_set_accepts_a_hostname():
-    """``RenderEndpointSet`` is typed ``str``, not ``IPvAnyAddress``: a service
-    endpoint may be a hostname, so the provider must not re-impose IP-only
-    validation the SDK deliberately dropped."""
+    """An endpoint may be a hostname, so the SDK models these as plain strings.
+
+    Only prefixes are still validated as networks; see the prefix-set test below.
+    """
     es = _endpoint_set({"ipv4": ["ntp.example.com"]})
-    assert tuple(str(x) for x in es.ipv4) == ("ntp.example.com",)
+    assert tuple(es.ipv4) == ("ntp.example.com",)
 
 
 def test_prefix_set_invalid_prefix_raises():

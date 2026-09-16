@@ -6,7 +6,11 @@ from __future__ import annotations
 
 import asyncio
 
-from nv_config_manager_dcim import DeviceVRF, NamespaceRouteDistinguisher
+from nv_config_manager_dcim import (
+    DCIMLocationIdentifier,
+    DeviceVRF,
+    NamespaceRouteDistinguisher,
+)
 
 from nv_config_manager_dcim_netbox._mappers import tag_names
 from nv_config_manager_dcim_netbox.fabric_common import INTERFACES_PATH, VRFS_PATH
@@ -66,7 +70,7 @@ class NetBoxIPAMMixin:
         return []
 
     async def get_namespace_route_distinguishers(
-        self, site: str, namespace_tag: str
+        self, site: DCIMLocationIdentifier, namespace_tag: str
     ) -> list[NamespaceRouteDistinguisher]:
         """Return the namespaces at ``site`` and every route distinguisher NetBox
         will refuse for a new VRF there.

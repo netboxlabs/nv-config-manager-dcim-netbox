@@ -20,7 +20,13 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from nv_config_manager_dcim import DCIMConflictError, DCIMInvalidDataError, SpectrumXVRF
+from nv_config_manager_dcim import (
+    DCIMConflictError,
+    DCIMInvalidDataError,
+    DCIMLocationIdentifier,
+    SpectrumXVRF,
+    dcim_location_id,
+)
 
 from nv_config_manager_dcim_netbox._mappers import tag_names
 from nv_config_manager_dcim_netbox.fabric_common import (
@@ -74,7 +80,7 @@ class NetBoxSpectrumXMixin:
     """Spectrum-X VRF/overlay provisioning and reconciliation."""
 
     async def get_spectrum_x_vrfs(
-        self, overlay_name: str, site: str, namespace: str | None = None
+        self, overlay_name: str, site: DCIMLocationIdentifier, namespace: str | None = None
     ) -> list[SpectrumXVRF]:
         overlay = await self._find_overlay(overlay_name, site, scope_type=SITE_SCOPE_TYPE)
         if not overlay:
@@ -87,7 +93,7 @@ class NetBoxSpectrumXMixin:
         # NVCM passes the Site pk; the workflow shows ``site`` to a person, so a
         # VRF with no interface to derive it from reports the Site's name.
         site_row = await self._resolve_scope(site, scope_type=SITE_SCOPE_TYPE)
-        site_name = (site_row or {}).get("name") or str(site)
+        site_name = (site_row or {}).get("name") or str(dcim_location_id(site))
         out: list[SpectrumXVRF] = []
         for vrf in data.get("vrf_list") or []:
             # Namespace is emulated as a VRF tag; derive it from the data (and
@@ -103,7 +109,9 @@ class NetBoxSpectrumXMixin:
                 if i.get("device")
             )
             # NetBox VRFs carry no location, so derive the site from an attached
-            # interface's device, falling back to the overlay's site.
+            # interface's device, falling back to the overlay's site name.
+            # ``SpectrumXVRF.site`` is a plain string in the SDK contract, so the
+            # fallback is the resolved name -- never the reference NVCM sent.
             vrf_site = next(
                 (
                     ((i.get("device") or {}).get("site") or {}).get("name")
@@ -130,7 +138,7 @@ class NetBoxSpectrumXMixin:
         route_distinguisher: str,
         vnid: int,
         overlay_name: str,
-        site: str,
+        site: DCIMLocationIdentifier,
         tenant: str,
     ) -> None:
         vrf_name = f"SpXTenant{vnid}"
@@ -143,7 +151,9 @@ class NetBoxSpectrumXMixin:
         # overlay's scope and the VRFs' cf_nvcm_site.
         site_row = await self._resolve_scope(site, scope_type=SITE_SCOPE_TYPE)
         if site_row is None:
-            raise DCIMInvalidDataError(f"NetBox has no Site {site!r} for the Spectrum-X overlay")
+            raise DCIMInvalidDataError(
+                f"NetBox has no Site {dcim_location_id(site)!r} for the Spectrum-X overlay"
+            )
         site_pk = site_row["id"]
         tenant_id = await self._resolve_tenant_id(tenant)
 
@@ -251,7 +261,9 @@ class NetBoxSpectrumXMixin:
                 await self._safe_delete(f"{self.ASSIGNMENTS_PATH}{assignment['id']}/")
         await self._safe_delete(f"{VRFS_PATH}{vrf_id}/")
 
-    async def delete_spectrum_x_overlay_if_unused(self, overlay_name: str, site: str) -> bool:
+    async def delete_spectrum_x_overlay_if_unused(
+        self, overlay_name: str, site: DCIMLocationIdentifier
+    ) -> bool:
         overlay = await self._find_overlay(overlay_name, site, scope_type=SITE_SCOPE_TYPE)
         if not overlay:
             return False
@@ -264,7 +276,7 @@ class NetBoxSpectrumXMixin:
     async def reconcile_spectrum_x_overlay_assignments(
         self,
         overlay_name: str | None,
-        site: str,
+        site: DCIMLocationIdentifier,
         device_id: str,
         interface_ids: list[str],
         device_interface_ids: list[str],
