@@ -10,7 +10,6 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 from nv_config_manager_dcim import (
-    DCIM_PROVIDER_API_VERSION,
     DCIMChangeEvent,
     DCIMClient,
     DCIMProviderMetadata,
@@ -79,6 +78,21 @@ class NetBoxDCIMClient(
     """
 
 
+# The SDK API versions this provider is known to implement, as literals.
+#
+# Deliberately not `(DCIM_PROVIDER_API_VERSION,)`: the SDK's registry admits a
+# provider by comparing the running SDK's major version against this tuple, so
+# echoing the installed SDK's own constant back at it makes the gate a tautology
+# that passes on any version, including the incompatible one it exists to catch.
+# Spelled out, an SDK major bump is refused at discovery with a clear message
+# instead of failing somewhere inside a render.
+#
+# Bump this only after re-checking the coupling surface against the new SDK: the
+# `DCIMClient` protocol (tests/test_coverage.py walks every member), the render
+# models, and RENDER_DATA_CACHE_SCHEMA_VERSION.
+SUPPORTED_API_VERSIONS = ("1.0",)
+
+
 class NetBoxProvider:
     """NetBox provider factory and lifecycle contract."""
 
@@ -86,7 +100,7 @@ class NetBoxProvider:
         name="netbox",
         display_name="NetBox",
         provider_version=_provider_version(),
-        supported_api_versions=(DCIM_PROVIDER_API_VERSION,),
+        supported_api_versions=SUPPORTED_API_VERSIONS,
     )
 
     def validate_settings(self, settings: ProviderSettings) -> None:

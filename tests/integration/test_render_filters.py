@@ -76,8 +76,22 @@ _REST = {
             "status": {"value": "active"},
             "local_as": {"asn": 65000},
             "remote_as": {"asn": 65001},
-            "remote_address": {"address": "10.0.1.0/31"},
+            "remote_address": {"id": 40, "address": "10.0.1.0/31"},
             "peer_group": {"name": "underlay"},
+        }
+    ],
+    # The remote address must resolve to an interface on the peer, as the
+    # reference requires, or the session fails the render.
+    "ipam/ip-addresses/": [
+        {
+            "id": 40,
+            "address": "10.0.1.0/31",
+            "assigned_object_type": "dcim.interface",
+            "assigned_object": {
+                "id": 41,
+                "name": "Ethernet1",
+                "device": {"id": 42, "name": "spine-01"},
+            },
         }
     ],
     "plugins/nv-config-manager/overlay-assignments/": [

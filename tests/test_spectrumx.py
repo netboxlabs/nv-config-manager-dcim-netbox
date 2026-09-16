@@ -316,6 +316,9 @@ async def test_typed_site_survives_the_vrf_site_fallback():
     client = fake_client(
         rest_list={
             "plugins/nv-config-manager/vxlans/": [{"id": 1, "vrf": 1, "overlay": 10}],
+            # Typed as a Site, so the reference resolves here and not among Locations.
+            "dcim/sites/": [{"id": 1, "name": "SPO01", "slug": "spo01"}],
+            "dcim/locations/": [{"id": 1, "name": "Some Other Module", "slug": "other"}],
         },
         gql={
             "vrf_list": [
@@ -335,4 +338,78 @@ async def test_typed_site_survives_the_vrf_site_fallback():
         "spx-overlay", DCIMLocationReference(id="1", location_type="Site")
     )
 
-    assert [(v.name, v.site) for v in vrfs] == [("SpXTenant5000", "1")]
+    # A plain string -- the Site's name, never the reference NVCM sent.
+    assert [(v.name, v.site) for v in vrfs] == [("SpXTenant5000", "SPO01")]
+
+
+async def test_get_spectrum_x_vrfs_reports_the_site_name_for_a_vrf_with_no_interfaces():
+    # NVCM passes the Site pk. With no interface device to derive the site from,
+    # the fallback is the Site's name, which is what the workflow's "Created VRFs"
+    # table shows -- not the pk.
+    gql = {"vrf_list": [{"id": "8", "name": "SpXTenant", "rd": "*:60000", "interfaces": []}]}
+
+    async def resolve_scope(value, *, scope_type):
+        assert (value, scope_type) == ("3", "dcim.site")
+        return {"id": 3, "name": "SPO01", "slug": "spo01"}
+
+    client = _client(gql=gql, rest_list={_VXLANS: [{"vrf": 8}]}, overlay={"id": 10})
+    client._resolve_scope = resolve_scope
+    vrfs = await client.get_spectrum_x_vrfs("nvcm-spx", "3")
+    assert vrfs[0].site == "SPO01"
+
+    # An unresolvable site falls back to the argument rather than failing the read.
+    client = _client(gql=gql, rest_list={_VXLANS: [{"vrf": 8}]}, overlay={"id": 10})
+    vrfs = await client.get_spectrum_x_vrfs("nvcm-spx", "DM-Akron")
+    assert vrfs[0].site == "DM-Akron"
+
+
+def _vrf_assignment(assignment_id, vrf_id, overlay):
+    return {
+        "id": assignment_id,
+        "assigned_object_type": "ipam.vrf",
+        "assigned_object_id": vrf_id,
+        "overlay": overlay,
+    }
+
+
+async def test_reconcile_ignores_a_vrf_assignment_sharing_the_interface_pk():
+    # assigned_object_id is a GFK id: VRF 11 and interface 11 are different objects.
+    # The VRF's own assignment on the target overlay must not stand in for the
+    # interface's.
+    record = []
+    client = _client(
+        rest_list={_ASSIGN: [_vrf_assignment(50, 11, 10)]},
+        record=record,
+        overlay={"id": 10, "isolation_type": "spectrum_x_vrf"},
+    )
+    created, removed = await client.reconcile_spectrum_x_overlay_assignments(
+        "nvcm-spx", "DM-Akron", "1", ["11"], ["11"]
+    )
+    assert (created, removed) == (2, 0)
+    posts = [b for m, p, b in record if m == "POST" and p == _ASSIGN]
+    assert [(b["assigned_object_type"], b["assigned_object_id"]) for b in posts] == [
+        ("dcim.device", 1),
+        ("dcim.interface", 11),
+    ]
+
+
+async def test_reconcile_vrf_assignment_does_not_keep_the_device_assignment_active():
+    # Removing the last port from overlay 7: only an *interface* row on overlay 7
+    # keeps the device assignment; a VRF row with the interface's pk does not.
+    device_row = {
+        "id": 40,
+        "assigned_object_type": "dcim.device",
+        "assigned_object_id": 1,
+        "overlay": 7,
+    }
+    record = []
+    client = fake_client(
+        rest_list={_ASSIGN: [device_row, _vrf_assignment(50, 11, 7)]},
+        rest_get={f"{_OVERLAYS}7/": {"id": 7, "isolation_type": "spectrum_x_vrf"}},
+        record=record,
+    )
+    created, removed = await client.reconcile_spectrum_x_overlay_assignments(
+        None, "DM-Akron", "1", ["11"], ["11"]
+    )
+    assert (created, removed) == (0, 1)
+    assert [p for m, p, _ in record if m == "DELETE"] == [f"{_ASSIGN}40/"]

@@ -239,12 +239,12 @@ class NetBoxReferenceMixin:
     async def _managed_device_selections(self, field: str) -> list[DCIMSelection]:
         """Return distinct ``tenant``/``role`` choices across managed devices.
 
-        "Managed" is ``DeviceConfigStatus.render_enabled`` -- the same source
+        "Managed" is having a ``DeviceConfigStatus`` record -- the same source
         ``get_managed_device_metadata`` uses -- resolved to device ids first. Read over
         GraphQL asking only for the two nested objects, rather than paginating every
         field of the whole managed fleet to collect a few dozen names.
         """
-        managed_ids = sorted(await self.status_flag_device_ids(render_enabled=True) or ())
+        managed_ids = sorted(await self.managed_device_ids())
         if not managed_ids:
             return []
         pages = await asyncio.gather(
@@ -298,11 +298,17 @@ class NetBoxReferenceMixin:
         # Names only -- deliberately not ``_mappers.tag_names``, which also returns
         # slugs. These are offered to operators as choices, so a tag must appear
         # once (as its name), not twice (name and slug).
+        #
+        # The plugin loader also tags each zone VRF with its own name (so
+        # get_spectrum_x_vrfs can report the namespace). That is the VRF's
+        # identity, not a zone; the reference returns only the tags on Namespace
+        # objects, so it is dropped here.
         tags: set[str] = set()
         for vrf in vrfs:
+            own_name = vrf.get("name")
             for tag in vrf.get("tags") or []:
                 name = tag.get("name") if isinstance(tag, dict) else None
-                if isinstance(name, str) and name:
+                if isinstance(name, str) and name and name != own_name:
                     tags.add(name)
         return sorted(tags)
 

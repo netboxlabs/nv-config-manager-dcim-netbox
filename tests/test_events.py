@@ -7,10 +7,16 @@ affected-device fan-out for each native event type the provider registers.
 from __future__ import annotations
 
 import pytest
-from nv_config_manager_dcim import DCIMChangeEvent
+from nv_config_manager_dcim import (
+    DCIMChangeEvent,
+    DCIMConnectivityError,
+    DCIMError,
+    DCIMInvalidDataError,
+)
 
 from nv_config_manager_dcim_netbox.events import (
     _HANDLERS,
+    NetBoxUnavailableError,
     _bgp_session_changed,
     _device_changed,
     _interface_changed,
@@ -96,6 +102,7 @@ def test_register_render_event_handlers_covers_every_native_type():
         "dcim.interface",
         "dcim.rearport",
         "dcim.frontport",
+        "dcim.macaddress",
         "dcim.cable",
         "extras.configcontext",
         "ipam.vrf",
@@ -159,7 +166,10 @@ async def test_overlay_assignment_to_interface_resolves_device_via_client():
     assert [r.device_id for r in requests] == ["8"]
 
 
-async def test_overlay_assignment_interface_resolution_error_is_noop():
+async def test_overlay_assignment_interface_resolution_error_raises():
+    """See test_cross_object_resolution_error_raises: a handler that returns
+    normally is recorded as a processed event, so a failure must not."""
+
     class FakeClient:
         async def rest_request(self, *args, **kwargs):
             raise RuntimeError("boom")
@@ -167,8 +177,8 @@ async def test_overlay_assignment_interface_resolution_error_is_noop():
     event = _event(
         _OVERLAY_TYPE, "1", {"assigned_object_type": "dcim.interface", "assigned_object_id": 12}
     )
-    requests = await _overlay_assignment_changed(event, FakeClient())
-    assert requests == ()
+    with pytest.raises(DCIMInvalidDataError):
+        await _overlay_assignment_changed(event, FakeClient())
 
 
 async def test_overlay_assignment_without_assigned_id_is_noop():
@@ -252,15 +262,122 @@ async def test_prefix_without_scope_is_noop():
     assert await _dispatch(_event("ipam.prefix", "8"), client) == ()
 
 
-async def test_config_context_change_fans_out_to_matching_devices():
-    client = _FanoutClient(
+class _RecordingFanoutClient(_FanoutClient):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.gets: list[str] = []
+        self.lists: list[tuple[str, list]] = []
+
+    async def rest_request(self, method, path, **kwargs):
+        self.gets.append(path)
+        return await super().rest_request(method, path, **kwargs)
+
+    async def rest_list(self, path, params=None, **kwargs):
+        self.lists.append((path, list(params or [])))
+        return await super().rest_list(path, params, **kwargs)
+
+
+# The scope lists as the plugin's event serializer (NetBox's ConfigContext REST
+# serializer) emits them: nested briefs with id + slug.
+_CONFIG_CONTEXT_RECORD = {
+    "id": 5,
+    "name": "leaf-bgp",
+    "regions": [],
+    "site_groups": [],
+    "sites": [{"id": 3, "name": "DM-Akron", "slug": "dm-akron"}],
+    "locations": [],
+    "device_types": [],
+    "roles": [{"id": 2, "name": "Leaf", "slug": "leaf"}],
+    "platforms": [{"id": 4, "name": "Cumulus Linux", "slug": "cumulus-linux"}],
+    "tenant_groups": [],
+    "tenants": [],
+    "tags": [{"id": 9, "name": "Fabric", "slug": "fabric"}],
+}
+
+
+async def test_config_context_change_builds_device_filters_from_the_record():
+    client = _RecordingFanoutClient(rest_list={"dcim/devices/": [{"id": 20}]})
+    requests = await _dispatch(_event("extras.configcontext", "5", _CONFIG_CONTEXT_RECORD), client)
+    assert [r.device_id for r in requests] == ["20"]
+    assert client.gets == []  # the record is the scope; nothing is read back
+    assert client.lists == [
+        (
+            "dcim/devices/",
+            [("site_id", "3"), ("role_id", "2"), ("platform_id", "4"), ("tag", "fabric")],
+        )
+    ]
+
+
+async def test_config_context_delete_rerenders_the_scoped_devices():
+    # Parity: the reference has no delete guard here. The record is the pre-delete
+    # snapshot, and the devices the context applied to must render without it.
+    client = _RecordingFanoutClient(rest_list={"dcim/devices/": [{"id": 20}, {"id": 21}]})
+    event = _event("extras.configcontext", "5", _CONFIG_CONTEXT_RECORD, operation="delete")
+    requests = await _dispatch(event, client)
+    assert sorted(r.device_id for r in requests) == ["20", "21"]
+    assert client.gets == []  # a GET after delete would 404
+
+
+async def test_config_context_without_record_scope_is_read_back_unless_deleted():
+    client = _RecordingFanoutClient(
         rest_get={
             "extras/config-contexts/5/": {"roles": [{"id": 2}], "tags": [{"slug": "fabric"}]}
         },
         rest_list={"dcim/devices/": [{"id": 20}]},
     )
-    requests = await _dispatch(_event("extras.configcontext", "5"), client)
+    requests = await _dispatch(_event("extras.configcontext", "5", {"id": 5}), client)
     assert [r.device_id for r in requests] == ["20"]
+    assert client.gets == ["extras/config-contexts/5/"]
+    with pytest.raises(DCIMInvalidDataError):
+        await _dispatch(_event("extras.configcontext", "5", {}, operation="delete"), client)
+
+
+# --- dcim.macaddress (NetBox 4.2+) ---------------------------------------------
+
+
+async def test_mac_address_change_fans_out_to_the_assigned_interface_device():
+    record = {
+        "mac_address": "AA:BB:CC:00:00:01",
+        "assigned_object_type": "dcim.interface",
+        "assigned_object_id": 11,
+        "assigned_object": {"id": 11, "name": "swp1", "device": {"id": 7, "name": "leaf-01"}},
+    }
+    client = _RecordingFanoutClient()
+    requests = await _dispatch(_event("dcim.macaddress", "3", record), client)
+    assert [r.device_id for r in requests] == ["7"]
+    assert client.gets == []
+
+
+async def test_mac_address_delete_uses_the_record_and_resolves_the_interface():
+    # The record's assigned_object may omit the device; the interface outlives the
+    # MAC, so it is still resolvable on delete.
+    record = {"assigned_object_type": "dcim.interface", "assigned_object_id": 11}
+    client = _RecordingFanoutClient(rest_get={"dcim/interfaces/11/": {"device": {"id": 7}}})
+    event = _event("dcim.macaddress", "3", record, operation="delete")
+    assert [r.device_id for r in await _dispatch(event, client)] == ["7"]
+    assert client.gets == ["dcim/interfaces/11/"]
+
+
+async def test_mac_address_without_record_assignment_is_fetched():
+    client = _RecordingFanoutClient(
+        rest_get={
+            "dcim/mac-addresses/3/": {
+                "assigned_object_type": "dcim.interface",
+                "assigned_object_id": 11,
+                "assigned_object": {"device": {"id": 8}},
+            }
+        }
+    )
+    assert [r.device_id for r in await _dispatch(_event("dcim.macaddress", "3"), client)] == ["8"]
+    assert client.gets == ["dcim/mac-addresses/3/"]
+
+
+async def test_mac_address_not_on_an_interface_is_noop():
+    for record in (
+        {"assigned_object_type": None, "assigned_object_id": None},
+        {"assigned_object_type": "virtualization.vminterface", "assigned_object_id": 4},
+    ):
+        assert await _dispatch(_event("dcim.macaddress", "3", record), _FanoutClient()) == ()
 
 
 async def test_cross_object_delete_is_noop():
@@ -268,7 +385,15 @@ async def test_cross_object_delete_is_noop():
     assert await _dispatch(_event("ipam.vrf", "9", operation="delete"), None) == ()
 
 
-async def test_cross_object_resolution_error_is_noop():
+async def test_cross_object_resolution_error_raises():
+    """A swallowed resolution failure is worse than a noisy one.
+
+    The dispatcher counts a handler that returns normally as processed and
+    acknowledges the message, so returning () here would file a lost render under
+    EVENT_PROCESSED_COUNTER: the change never renders and the failure metric shows
+    nothing wrong. The reference provider raises on the same paths.
+    """
+
     class _Boom:
         async def rest_list(self, *args, **kwargs):
             raise RuntimeError("boom")
@@ -276,7 +401,52 @@ async def test_cross_object_resolution_error_is_noop():
         async def rest_request(self, *args, **kwargs):
             raise RuntimeError("boom")
 
-    assert await _dispatch(_event("ipam.vrf", "9"), _Boom()) == ()
+    with pytest.raises(DCIMInvalidDataError):
+        await _dispatch(_event("ipam.vrf", "9"), _Boom())
+
+
+class _Unreachable:
+    def __init__(self, exc):
+        self._exc = exc
+
+    async def rest_list(self, *args, **kwargs):
+        raise self._exc
+
+    async def rest_request(self, *args, **kwargs):
+        raise self._exc
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [DCIMConnectivityError("NetBox REST request failed"), TimeoutError("read timeout")],
+)
+async def test_transient_netbox_failures_escape_as_a_non_dcim_error(exc):
+    """NVCM's dispatcher swallows every DCIMError (the event is acked as
+    processed-and-failed); only a non-DCIM exception reaches the consumer and
+    naks the message. A NetBox outage must therefore not surface as a DCIMError,
+    or the change is lost."""
+    client = _Unreachable(exc)
+    for event in (
+        _event("ipam.vrf", "9"),
+        _event("extras.configcontext", "5", {"roles": [{"id": 2}]}),
+        _event("dcim.macaddress", "3"),
+        _event(
+            _OVERLAY_TYPE, "1", {"assigned_object_type": "dcim.interface", "assigned_object_id": 12}
+        ),
+    ):
+        with pytest.raises(NetBoxUnavailableError) as info:
+            await _dispatch(event, client)
+        assert not isinstance(info.value, DCIMError), event.object_type
+        assert info.value.__cause__ is exc
+
+
+async def test_deterministic_netbox_failures_stay_dcim_errors():
+    # A 400 / GraphQL data error will fail the same way on redelivery, so it must
+    # stay a DCIMError for the dispatcher to ack and count as failed.
+    exc = DCIMInvalidDataError("NetBox rejected the request (400)")
+    with pytest.raises(DCIMInvalidDataError) as info:
+        await _dispatch(_event("ipam.vrf", "9"), _Unreachable(exc))
+    assert info.value is exc
 
 
 async def test_a_malformed_device_id_drops_the_fanout_instead_of_raising():

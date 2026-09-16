@@ -381,10 +381,12 @@ class PublisherStatus(NamedTuple):
     backend: str
     importable: bool
     subject: str | None
+    stream: str | None = None
+    contract_version: str | None = None
 
 
 def netbox_publisher_status(namespace: str, runner: Runner | None = None) -> PublisherStatus:
-    """Return NetBox's configured event backend, whether it can run, and its subject.
+    """Return NetBox's configured event backend, whether it can run, and its subject/stream.
 
     The `nats` backend imports nats-py lazily, inside publish(). A NetBox image
     without that package therefore starts, loads the config and looks healthy,
@@ -409,8 +411,15 @@ def netbox_publisher_status(namespace: str, runner: Runner | None = None) -> Pub
             "import json;from django.conf import settings;"
             "cfg=settings.PLUGINS_CONFIG.get('netbox_nv_config_manager',{});"
             "ok=True\ntry:\n import nats\nexcept ImportError:\n ok=False\n"
+            # The envelope contract version is a plugin constant, not a setting:
+            # the consumer exact-matches it, so a plugin built against a different
+            # SDK has every event rejected as invalid rather than degraded.
+            "cv=None\ntry:\n"
+            " from netbox_nv_config_manager.events_pipeline import CONTRACT_VERSION as cv\n"
+            "except Exception:\n pass\n"
             "print(json.dumps({'backend':cfg.get('event_publisher','log'),'importable':ok,"
-            "'subject':cfg.get('nats_subject')}))",
+            "'subject':cfg.get('nats_subject'),'stream':cfg.get('nats_stream','netbox'),"
+            "'contract_version':cv}))",
             namespace=namespace,
             runner=runner,
         )
@@ -424,10 +433,14 @@ def netbox_publisher_status(namespace: str, runner: Runner | None = None) -> Pub
             except ValueError:
                 continue
             subject = payload.get("subject")
+            stream = payload.get("stream")
+            contract = payload.get("contract_version")
             return PublisherStatus(
                 str(payload.get("backend", "unknown")),
                 bool(payload.get("importable")),
                 str(subject) if subject else None,
+                str(stream) if stream else None,
+                str(contract) if contract else None,
             )
     return PublisherStatus("unknown", True, None)
 

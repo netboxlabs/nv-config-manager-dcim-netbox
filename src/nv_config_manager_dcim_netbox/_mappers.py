@@ -69,6 +69,21 @@ def canonical_mac(value: str | None) -> str | None:
         return value
 
 
+def workflow_mac(value: str | None) -> str | None:
+    """Return a MAC in netaddr's canonical form (``44-38-39-00-00-03``), or ``None``.
+
+    ``InterfaceData.mac_address`` must match what the reference provider emits
+    (``str(netaddr.EUI(mac))``): NVCM's cable validation keys hosts by that form
+    and never sees a colon-separated NetBox value. Unparseable input raises.
+    """
+    if not value:
+        return None
+    try:
+        return str(netaddr.EUI(value))
+    except (netaddr.AddrFormatError, ValueError, TypeError) as exc:
+        raise DCIMInvalidDataError(f"Invalid MAC address: {value!r}") from exc
+
+
 # --- NetBox response-shape helpers -----------------------------------------------
 #
 # NetBox returns a related object as a nested brief dict in most serializers but
@@ -245,32 +260,25 @@ def network_device_from_rest(
 
 
 def interface_from_rest(interface: dict[str, Any]) -> InterfaceData:
-    """Map a REST interface object to ``InterfaceData``.
-
-    NOTE: the MAC is surfaced as NetBox stores it on its ``MACAddress`` model;
-    canonicalization (``canonical_mac``) is applied where MACs are *compared*
-    (see ``hosts.py``) rather than rewriting the value shown to callers.
-    """
+    """Map a REST interface object to ``InterfaceData`` (MAC in ``workflow_mac`` form)."""
     vrf = interface.get("vrf") or {}
     return InterfaceData(
         name=interface["name"],
         id=str(interface["id"]),
         host=name_of(interface.get("device")) or "",
-        mac_address=interface.get("mac_address") or None,
+        mac_address=workflow_mac(interface.get("mac_address")),
         vrf_id=str(vrf["id"]) if vrf.get("id") is not None else None,
     )
 
 
 def _interface_from_gql(interface: dict[str, Any], host_name: str) -> InterfaceData:
-    # MAC is surfaced as NetBox's MACAddress model returns it; comparisons that
-    # must be case/separator-insensitive go through ``canonical_mac`` (hosts.py).
     primary_mac = interface.get("primary_mac_address") or {}
     vrf = interface.get("vrf") or {}
     return InterfaceData(
         name=interface["name"],
         id=str(interface["id"]),
         host=host_name,
-        mac_address=primary_mac.get("mac_address"),
+        mac_address=workflow_mac(primary_mac.get("mac_address")),
         vrf_id=str(vrf["id"]) if vrf.get("id") is not None else None,
     )
 

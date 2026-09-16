@@ -212,17 +212,16 @@ class NetBoxInfiniBandMixin:
         return out
 
     async def find_ib_interfaces_by_guids(self, guids: list[str]) -> list[IBInterfaceGuid]:
-        # Exact filter only: NetBox ignores an unknown ``__ie`` lookup on a custom
-        # field and returns every interface, which reads back as a bogus multi-match.
-        # The exact filter is already case-insensitive. Repeated ``cf_*`` params are
-        # not reliably OR-ed, so query per GUID, concurrently.
-        pages = await asyncio.gather(
-            *(
-                self.rest_list(INTERFACES_PATH, [("cf_ib_guid", guid)])
-                for guid in dict.fromkeys(guids)
-            )
-        )
-        return [_ib_guid(row) for rows in pages for row in rows]
+        # ``cf_ib_guid__ie``: NetBox generates the iexact lookup for text custom
+        # fields, and a repeated multi-value param ORs, so one request matches
+        # every GUID whichever case UFM or NetBox stored it in (the reference
+        # queries ``cf_ib_guid__ie`` the same way). No GUIDs means no request: an
+        # unfiltered read would return every interface.
+        unique = list(dict.fromkeys(guids))
+        if not unique:
+            return []
+        rows = await self.rest_list(INTERFACES_PATH, [("cf_ib_guid__ie", g) for g in unique])
+        return [_ib_guid(row) for row in rows]
 
     # -- partitions ----------------------------------------------------------
 
@@ -238,13 +237,20 @@ class NetBoxInfiniBandMixin:
         # Normalized on write as well as on compare, so the stored value cannot
         # differ from what ensure_/sync_ib_pkey_assignments later compare against.
         membership_type = _normalize_membership(membership_type)
-        # A typed reference names its own model; an untyped value is still a
-        # Location, which is where the topology loader anchors IB overlays.
-        scope_type = scope_type_for(dcim_location_type(location_name)) or LOCATION_SCOPE_TYPE
-        location_row = await self._resolve_scope(location_name, scope_type=scope_type)
-        if location_row is None:
+        # A typed reference names its own model and is resolved there directly.
+        # Untyped, the value is whatever NVCM last handed out: the Site pk from
+        # ``resolve_ib_host_site`` on an older NVCM, or a Location the topology
+        # loader anchored. Both are searched, Sites first.
+        typed_scope = scope_type_for(dcim_location_type(location_name))
+        if typed_scope is not None:
+            scope_type = typed_scope
+            scope_row = await self._resolve_scope(location_name, scope_type=scope_type)
+        else:
+            scope_type, scope_row = await self._resolve_any_scope(location_name)
+        if scope_row is None:
             raise DCIMInvalidDataError(
-                f"NetBox {scope_type} {dcim_location_id(location_name)!r} not found"
+                f"NetBox {typed_scope or 'Site or Location'} "
+                f"{dcim_location_id(location_name)!r} not found"
             )
         tenant_id = await self._resolve_tenant_id(tenant_name)
 
@@ -255,7 +261,7 @@ class NetBoxInfiniBandMixin:
             body = {
                 "name": partition_name,
                 "scope_type": scope_type,
-                "scope_id": location_row["id"],
+                "scope_id": scope_row["id"],
                 "isolation_type": _IB_PKEY_ISOLATION,
                 "status": FABRIC_STATUS,
             }

@@ -158,8 +158,14 @@ To iterate on the plugin, run NetBox on the host with only NVCM in the cluster.
 ## NetBox permissions
 
 The provider authenticates with a v2 API token (`Authorization: Bearer
-nbt_<key>.<secret>`). The installer's token belongs to the superuser, which is
-fine for a lab. For production, grant the token's user:
+nbt_<key>.<secret>`). The installer's token belongs to the superuser the chart
+mints (`netbox.superuser`), which is a bring-up convenience and nothing more:
+no code path in the provider or the plugin tests `is_superuser`, and the token is
+never rotated. Past a lab, point NVCM at a service account holding only the
+grants below — the deployment works unchanged, and a leaked token then reads
+fabric data instead of owning the NetBox instance.
+
+Grant the token's user:
 
 - **Read** on `dcim` (devices, interfaces, sites, locations, regions,
   device-types, platforms, roles, cables), `ipam` (prefixes, vlans, vrfs,

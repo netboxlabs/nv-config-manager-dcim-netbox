@@ -18,6 +18,7 @@ import click
 import pytest
 import yaml
 from click.testing import CliRunner
+from nv_config_manager_dcim import DCIM_EVENT_CONTRACT_VERSION
 
 from nv_config_manager_dcim_netbox.installer import cli, cluster
 from nv_config_manager_dcim_netbox.installer import config as cfg
@@ -1414,13 +1415,66 @@ def test_verify_fails_when_netbox_publishes_to_a_different_subject(monkeypatch):
     assert cfg.EVENT_SUBJECT in result.output
 
 
+def test_the_publisher_probe_is_valid_python():
+    """It runs as `manage.py shell -c <snippet>` in the NetBox pod, where a syntax
+    error is indistinguishable from an unreachable pod: the CommandError handler
+    reports the backend as unknown and `verify` carries on."""
+    import ast
+
+    runner = _RecordingRunner()
+    cluster.netbox_publisher_status("ns", runner=runner)
+
+    snippet = runner.argv[-1]
+    ast.parse(snippet)
+    assert "nats_stream" in snippet
+    assert "CONTRACT_VERSION" in snippet
+
+
+def test_verify_fails_when_the_plugin_stamps_a_different_contract_version(monkeypatch):
+    """The consumer exact-matches contract_version, so a mismatch is not a partial
+    parse -- every event is rejected while the publish reports success."""
+    monkeypatch.setattr(cluster, "read_nats_password", lambda ns: "pw")
+    monkeypatch.setattr(
+        cluster,
+        "netbox_publisher_status",
+        lambda ns: cluster.PublisherStatus(
+            "nats", True, cfg.EVENT_SUBJECT, cfg.EVENT_STREAM, "0.9"
+        ),
+    )
+
+    result = CliRunner().invoke(cli.main, ["verify"])
+
+    assert result.exit_code != 0
+    assert "0.9" in result.output
+
+
+def test_verify_fails_when_netbox_publishes_to_a_different_stream(monkeypatch):
+    """A wrong stream name is not silent -- the plugin's publisher checks it at
+    connect -- but the failure lands in NetBox's log, not in front of whoever ran
+    the deploy."""
+    monkeypatch.setattr(cluster, "read_nats_password", lambda ns: "pw")
+    monkeypatch.setattr(
+        cluster,
+        "netbox_publisher_status",
+        lambda ns: cluster.PublisherStatus("nats", True, cfg.EVENT_SUBJECT, "nautobot"),
+    )
+
+    result = CliRunner().invoke(cli.main, ["verify"])
+
+    assert result.exit_code != 0
+    assert "nautobot" in result.output
+    assert cfg.EVENT_STREAM in result.output
+
+
 def test_verify_accepts_a_matching_subject(monkeypatch):
     monkeypatch.setattr(cli, "VERIFY_POLL_INTERVAL", 0)
     monkeypatch.setattr(cluster, "read_nats_password", lambda ns: "pw")
     monkeypatch.setattr(
         cluster,
         "netbox_publisher_status",
-        lambda ns: cluster.PublisherStatus("nats", True, cfg.EVENT_SUBJECT),
+        lambda ns: cluster.PublisherStatus(
+            "nats", True, cfg.EVENT_SUBJECT, cfg.EVENT_STREAM, DCIM_EVENT_CONTRACT_VERSION
+        ),
     )
     monkeypatch.setattr(cluster, "publish_test_event", lambda *a, **k: "")
     monkeypatch.setattr(
@@ -1514,9 +1568,10 @@ def test_apply_dcim_sets_the_event_stream_and_subject():
     assert patched["dcim"]["event_stream"] == cfg.EVENT_STREAM
     assert patched["dcim"]["event_subject"] == cfg.EVENT_SUBJECT
 
-    # And it must equal what the chart tells the plugin to publish on.
+    # And both must equal what the chart tells the plugin to publish on.
     chart_values = yaml.safe_load((_CHART / "values.yaml").read_text())
     assert patched["dcim"]["event_subject"] == chart_values["nvcm"]["eventSubject"]
+    assert patched["dcim"]["event_stream"] == chart_values["nvcm"]["eventStream"]
 
 
 def test_the_shipped_profile_agrees_with_apply_dcim():
