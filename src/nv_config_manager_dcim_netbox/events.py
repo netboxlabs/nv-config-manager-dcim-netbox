@@ -238,6 +238,15 @@ async def _vrf_devices(event, client):
     return {_fk_id(i.get("device")) for i in interfaces}
 
 
+async def _vlan_devices(event, client):
+    record = event.record or {}
+    try:
+        vlan_vid = int(record["vid"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DCIMInvalidDataError("NetBox VLAN event is missing a valid VID") from exc
+    return await client.find_switches_by_vlan(vlan_vid)
+
+
 async def _ip_address_devices(event, client):
     ip = await client.rest_request("GET", f"ipam/ip-addresses/{event.object_id}/")
     if not ip or ip.get("assigned_object_type") != "dcim.interface":
@@ -371,6 +380,7 @@ _HANDLERS = {
     "dcim.cable": _cross_handler(_cable_devices),
     "extras.configcontext": _config_context_changed,
     "ipam.vrf": _cross_handler(_vrf_devices),
+    "ipam.vlan": _cross_handler(_vlan_devices),
     "ipam.prefix": _cross_handler(_prefix_devices),
     "ipam.ipaddress": _cross_handler(_ip_address_devices),
     # A netbox-bgp session carries only a single ``device`` FK (the local peer);

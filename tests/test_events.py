@@ -106,6 +106,7 @@ def test_register_render_event_handlers_covers_every_native_type():
         "dcim.cable",
         "extras.configcontext",
         "ipam.vrf",
+        "ipam.vlan",
         "ipam.prefix",
         "ipam.ipaddress",
         "ipam.asn",
@@ -213,6 +214,50 @@ async def test_vrf_change_fans_out_to_interface_devices():
     )
     requests = await _dispatch(_event("ipam.vrf", "9"), client)
     assert sorted(r.device_id for r in requests) == ["3", "5"]  # deduplicated
+
+
+async def test_vlan_change_fans_out_to_tagged_and_untagged_interface_devices():
+    class VLANClient(_FanoutClient):
+        def __init__(self):
+            super().__init__()
+            self.vid = None
+
+        async def find_switches_by_vlan(self, vlan_vid):
+            self.vid = vlan_vid
+            return [3, 5, 3]
+
+    client = VLANClient()
+    requests = await _dispatch(_event("ipam.vlan", "9", {"id": 9, "vid": 900}), client)
+
+    assert client.vid == 900
+    assert [request.device_id for request in requests] == ["3", "5"]
+
+
+async def test_vlan_helper_custom_field_change_uses_the_vlan_handler():
+    class VLANClient(_FanoutClient):
+        async def find_switches_by_vlan(self, vlan_vid):
+            return [7]
+
+    event = DCIMChangeEvent.from_dict(
+        {
+            "provider": "netbox",
+            "operation": "update",
+            "object_type": "ipam.vlan",
+            "object_id": "9",
+            "timestamp": "2026-07-29T00:00:00Z",
+            "record": {
+                "id": 9,
+                "vid": 900,
+                "custom_fields": {"nvcm_helper_addresses": ["10.0.0.53"]},
+            },
+            "changed_fields": ["custom_fields.nvcm_helper_addresses"],
+            "contract_version": "1.0",
+        }
+    )
+
+    requests = await _dispatch(event, VLANClient())
+
+    assert [request.device_id for request in requests] == ["7"]
 
 
 async def test_ip_address_change_fans_out_to_assigned_device():
