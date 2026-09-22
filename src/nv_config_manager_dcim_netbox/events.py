@@ -186,19 +186,13 @@ async def _mac_address_changed(event: DCIMChangeEvent, client: DCIMClient):
 
 # -- cross-object fan-out --------------------------------------------------------
 # The changed object is not a device, so the affected devices are resolved with a
-# NetBox query. On delete the object can no longer be read back, so a handler
-# either resolves from the pre-delete event record (the plugin serializes the
-# object before the row goes) or skips the event. Skipping is correct wherever
-# NetBox itself emits the follow-on changes: deleting a VLAN or VRF re-saves each
-# interface that carried it, and deleting a BGP peer group re-saves its sessions
-# (core.signals.handle_deleted_object nulls the FK / removes the M2M row), so
-# those arrive as dcim.interface / netbox_bgp.bgpsession update events in the same
-# batch and fan out to the device on their own -- verified against a live NetBox
-# 4.7.0 (tests/live). A cable is the exception: 4.7.0 emits no interface update
-# when one is deleted, so it is resolved from the record, as are an IP address (a
-# GenericForeignKey) and a prefix (no reverse relation), neither of which leaves a
-# trace either. The render-enabled gate is applied downstream, so these return
-# candidates unfiltered.
+# NetBox query. On delete the object cannot be read back, so a handler resolves
+# from the pre-delete event record or skips the event. Delete is skipped where
+# NetBox re-saves the related objects itself (handle_deleted_object): VLAN/VRF
+# delete emits dcim.interface updates, peer-group delete emits bgpsession updates,
+# which fan out on their own. Cable, IP and prefix delete leave no such trace
+# (verified on 4.7.0, tests/live), so they resolve from the record. The
+# render-enabled gate is applied downstream, so these return candidates unfiltered.
 
 # ConfigContext scope dimension -> device-list filter. AND across dimensions, OR
 # within one -- exactly how NetBox evaluates ConfigContext applicability.
@@ -289,8 +283,7 @@ async def _cable_devices(event, client):
 
 
 async def _cable_deleted(event, client):
-    # NetBox 4.7.0 emits no interface update when a cable is deleted, so the
-    # affected devices come from the delete record's terminations instead.
+    # 4.7.0 emits no interface update on cable delete; resolve from the record.
     return _cable_termination_devices(event.record)
 
 
@@ -419,9 +412,7 @@ _HANDLERS = {
     "dcim.macaddress": _mac_address_changed,
     # A deleted cable / VRF / VLAN re-saves the interfaces that carried it, so the
     # devices re-render from those dcim.interface updates -- see the section comment.
-    # A deleted VRF or VLAN re-saves the interfaces that carried it, so the devices
-    # re-render from those dcim.interface updates -- see the section comment. A
-    # cable is the exception (no interface update on 4.7.0): resolve from the record.
+    # Cable delete emits no interface update on 4.7.0; resolve from the record.
     "dcim.cable": _cross_handler(_cable_devices, on_delete=_cable_deleted),
     "extras.configcontext": _config_context_changed,
     "ipam.vrf": _cross_handler(_vrf_devices),
