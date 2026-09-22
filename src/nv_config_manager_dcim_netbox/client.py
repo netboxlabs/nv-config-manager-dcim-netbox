@@ -422,17 +422,6 @@ class BaseNetBoxClient:
             )
         return out
 
-    async def find_switches_by_vlan(self, vlan_vid: int) -> list[str]:
-        """Find devices with a tagged or untagged interface on a VLAN."""
-        interfaces = await self.rest_list("dcim/interfaces/", [("vlan", str(vlan_vid))])
-        device_ids: set[str] = set()
-        for interface in interfaces:
-            device = interface.get("device") or {}
-            device_id = device.get("id")
-            if device_id is not None:
-                device_ids.add(str(device_id))
-        return sorted(device_ids)
-
     async def config_contexts_for_profile(
         self, profile_name: str, site: str | None = None
     ) -> list[dict[str, Any]]:

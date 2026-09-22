@@ -239,12 +239,9 @@ async def _vrf_devices(event, client):
 
 
 async def _vlan_devices(event, client):
-    record = event.record or {}
-    try:
-        vlan_vid = int(record["vid"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise DCIMInvalidDataError("NetBox VLAN event is missing a valid VID") from exc
-    return await client.find_switches_by_vlan(vlan_vid)
+    # ``vlan_id`` is the VLAN PK; ``vlan`` would match by VID, which is not unique.
+    interfaces = await client.rest_list(INTERFACES_PATH, [("vlan_id", str(event.object_id))])
+    return {_fk_id(i.get("device")) for i in interfaces}
 
 
 async def _ip_address_devices(event, client):

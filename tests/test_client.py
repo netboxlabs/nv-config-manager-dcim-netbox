@@ -9,7 +9,6 @@ native HTTP/GraphQL failures onto the SDK error taxonomy.
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
@@ -31,21 +30,6 @@ from nv_config_manager_dcim_netbox.provider import NetBoxProvider
 pytestmark = pytest.mark.lifecycle
 
 _OK = {"server": "https://netbox.example", "token": "t"}
-
-
-async def test_find_switches_by_vlan_uses_direct_interface_filter():
-    client = BaseNetBoxClient("https://netbox.example", "token")
-    client.rest_list = AsyncMock(
-        return_value=[
-            {"device": {"id": 3}},
-            {"device": {"id": 5}},
-            {"device": {"id": 3}},
-            {"device": None},
-        ]
-    )
-
-    assert await client.find_switches_by_vlan(900) == ["3", "5"]
-    client.rest_list.assert_awaited_once_with("dcim/interfaces/", [("vlan", "900")])
 
 
 # --- required-settings validation ----------------------------------------------

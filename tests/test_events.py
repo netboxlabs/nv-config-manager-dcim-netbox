@@ -54,6 +54,18 @@ class _FanoutClient:
         return self._list.get(path, [])
 
 
+class _ParamCapturingClient(_FanoutClient):
+    """``_FanoutClient`` that also records the params of the last ``rest_list``."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.params = None
+
+    async def rest_list(self, path, params=None, **kwargs):
+        self.params = params
+        return await super().rest_list(path, params, **kwargs)
+
+
 def _event(object_type, object_id, record=None, operation="update"):
     return DCIMChangeEvent.from_dict(
         {
@@ -216,28 +228,23 @@ async def test_vrf_change_fans_out_to_interface_devices():
     assert sorted(r.device_id for r in requests) == ["3", "5"]  # deduplicated
 
 
-async def test_vlan_change_fans_out_to_tagged_and_untagged_interface_devices():
-    class VLANClient(_FanoutClient):
-        def __init__(self):
-            super().__init__()
-            self.vid = None
-
-        async def find_switches_by_vlan(self, vlan_vid):
-            self.vid = vlan_vid
-            return [3, 5, 3]
-
-    client = VLANClient()
+async def test_vlan_change_fans_out_to_interface_devices_by_vlan_pk():
+    client = _ParamCapturingClient(
+        rest_list={
+            "dcim/interfaces/": [
+                {"device": {"id": 3}},
+                {"device": {"id": 5}},
+                {"device": {"id": 3}},
+            ]
+        }
+    )
     requests = await _dispatch(_event("ipam.vlan", "9", {"id": 9, "vid": 900}), client)
 
-    assert client.vid == 900
-    assert [request.device_id for request in requests] == ["3", "5"]
+    assert client.params == [("vlan_id", "9")]
+    assert sorted(r.device_id for r in requests) == ["3", "5"]  # deduplicated
 
 
-async def test_vlan_helper_custom_field_change_uses_the_vlan_handler():
-    class VLANClient(_FanoutClient):
-        async def find_switches_by_vlan(self, vlan_vid):
-            return [7]
-
+async def test_vlan_custom_field_change_routes_through_the_vlan_handler():
     event = DCIMChangeEvent.from_dict(
         {
             "provider": "netbox",
@@ -255,7 +262,9 @@ async def test_vlan_helper_custom_field_change_uses_the_vlan_handler():
         }
     )
 
-    requests = await _dispatch(event, VLANClient())
+    client = _FanoutClient(rest_list={"dcim/interfaces/": [{"device": {"id": 7}}]})
+
+    requests = await _dispatch(event, client)
 
     assert [request.device_id for request in requests] == ["7"]
 
