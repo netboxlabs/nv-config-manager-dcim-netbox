@@ -75,6 +75,7 @@ The provider registers render-event handlers for these native object types
 | `dcim.macaddress` | the assigned interface's device (NetBox 4.2+ keeps MACs on their own model) |
 | `dcim.cable` | both termination devices |
 | `ipam.vrf` | devices with an interface in the VRF |
+| `ipam.vlan` | devices with an interface on the VLAN (untagged, tagged or Q-in-Q SVLAN), matched by VLAN id -- VIDs are unique only within a VLAN group. DHCP helper addresses render onto a device's `vlan<vid>` SVI, so an SVI that carries no VLAN assignment is not re-rendered |
 | `ipam.prefix` | devices in the prefix's scope (site/location/region) |
 | `ipam.ipaddress` | the interface's device |
 | `extras.configcontext` | devices matching the context's scope (sites/locations/roles/platforms/tenants/tags…), read from the event record — so a **delete** still re-renders the devices it applied to |
