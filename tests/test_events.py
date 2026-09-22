@@ -295,6 +295,18 @@ async def test_ip_address_delete_not_on_interface_is_noop():
     )
 
 
+async def test_cable_delete_uses_the_record_terminations():
+    # NetBox 4.7.0 emits no interface update on cable delete, so _cable_deleted
+    # reads the terminations off the delete record rather than querying NetBox.
+    record = {
+        "a_terminations": [{"object": {"device": {"id": 1}}}],
+        "b_terminations": [{"object": {"device": {"id": 2}}}],
+    }
+    event = _event("dcim.cable", "2", record, operation="delete")
+    requests = await _dispatch(event, _NoQueryClient())
+    assert sorted(r.device_id for r in requests) == ["1", "2"]
+
+
 async def test_prefix_delete_fans_out_by_the_record_scope():
     class Client(_NoQueryClient):
         async def rest_list(self, path, params=None, **kwargs):
@@ -481,13 +493,13 @@ async def test_mac_address_not_on_an_interface_is_noop():
 
 @pytest.mark.parametrize(
     "object_type",
-    ["ipam.vlan", "ipam.vrf", "dcim.cable", "netbox_bgp.bgppeergroup", "ipam.asn"],
+    ["ipam.vlan", "ipam.vrf", "netbox_bgp.bgppeergroup", "ipam.asn"],
 )
 async def test_cross_object_delete_without_a_delete_resolver_is_noop(object_type):
-    # NetBox re-saves the interfaces (sessions) that carried a deleted VLAN, VRF,
-    # cable or peer group, so their devices re-render from those update events in
-    # the same batch; an ASN referenced by a session cannot be deleted at all. None
-    # of these handlers has a delete path, and the event is skipped, not queried.
+    # NetBox re-saves the interfaces (sessions) that carried a deleted VLAN, VRF or
+    # peer group, so their devices re-render from those update events in the same
+    # batch; an ASN referenced by a session cannot be deleted at all. None of these
+    # handlers has a delete path, and the event is skipped, not queried.
     assert await _dispatch(_event(object_type, "9", operation="delete"), None) == ()
 
 

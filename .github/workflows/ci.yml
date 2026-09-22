@@ -127,7 +127,26 @@ jobs:
   # skipped unless PLUGIN_REPO_TOKEN is set (a token with read access to
   # netboxlabs/netbox_nv_config_manager). GITHUB_TOKEN is scoped to this repo and
   # cannot check it out.
+  # Gate as its own job so that without the token live-netbox is *skipped*, which
+  # is visibly different from a green run. Gating inside the job left every step
+  # skipped under a successful conclusion, indistinguishable from a suite that ran.
+  live-gate:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+    steps:
+      - id: gate
+        run: |
+          if [ -n "${{ secrets.PLUGIN_REPO_TOKEN }}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::PLUGIN_REPO_TOKEN not set; the live NetBox suite will be skipped, not run."
+          fi
+
   live-netbox:
+    needs: live-gate
+    if: needs.live-gate.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
@@ -156,18 +175,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check for the plugin-repo token
-        id: gate
-        run: |
-          if [ -n "${{ secrets.PLUGIN_REPO_TOKEN }}" ]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::PLUGIN_REPO_TOKEN not set; skipping the live NetBox suite."
-          fi
-
       - name: Checkout plugin
-        if: steps.gate.outputs.enabled == 'true'
         uses: actions/checkout@v4
         with:
           repository: netboxlabs/netbox_nv_config_manager
@@ -177,13 +185,11 @@ jobs:
 
       # SDK and the topology blueprint both come from here.
       - name: Fetch NVCM
-        if: steps.gate.outputs.enabled == 'true'
         run: |
           git clone --depth 1 \
             https://github.com/dsx-ai-factory/nv-config-manager.git ../nv-config-manager
 
       - uses: actions/setup-python@v5
-        if: steps.gate.outputs.enabled == 'true'
         with:
           python-version: '3.13'
 
@@ -191,7 +197,6 @@ jobs:
       # job is cheap enough to run per-PR. Keep the pin in step with
       # build/versions.env's NETBOX_VERSION.
       - name: Install NetBox, plugin and provider
-        if: steps.gate.outputs.enabled == 'true'
         run: |
           pip install 'netbox==4.7.0'
           pip install "https://github.com/netbox-community/netbox-bgp/archive/refs/heads/0.20.0.tar.gz"
@@ -201,13 +206,11 @@ jobs:
           pip install pytest pytest-asyncio
 
       - name: Stand up NetBox with the air_trial topology
-        if: steps.gate.outputs.enabled == 'true'
         run: |
           scripts/live-netbox.sh "${RUNNER_TEMP}/netbox" \
             ../nv-config-manager/development/mock_topology/context/air_trial
 
       - name: Live suite
-        if: steps.gate.outputs.enabled == 'true'
         env:
           NVCM_LIVE_SERVER: http://localhost:8000
           NVCM_LIVE_TOKEN: nbt_liveCItoken1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -217,7 +220,7 @@ jobs:
         run: pytest tests/live -v
 
       - name: Logs on failure
-        if: failure() && steps.gate.outputs.enabled == 'true'
+        if: failure()
         run: |
           tail -100 "${RUNNER_TEMP}/netbox/netbox.log" || true
           tail -50 "${RUNNER_TEMP}/netbox/events.log" || true
