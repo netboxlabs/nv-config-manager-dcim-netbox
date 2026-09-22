@@ -244,6 +244,24 @@ async def _vlan_devices(event, client):
     return {_fk_id(i.get("device")) for i in interfaces}
 
 
+async def _vlan_changed(event: DCIMChangeEvent, client: DCIMClient):
+    """Fan out an ``ipam.vlan`` change.
+
+    Not routed through ``_cross`` on delete: NetBox lets a VLAN be deleted while
+    interfaces still carry it (the FKs are nulled), so nothing identifies the
+    devices it was on after the fact. A missed render never reaches the network
+    until an unrelated change comes along, so a delete re-renders every
+    render-enabled device instead.
+    """
+    if event.operation != "delete":
+        return await _cross(event, client, resolver=_vlan_devices)
+    logger.warning("VLAN %s deleted; fanning out to every render-enabled device", event.object_id)
+    device_ids = await _resolve(
+        event, "render-enabled devices", client.get_render_enabled_device_ids(None)
+    )
+    return _requests_multi(event, device_ids)
+
+
 async def _ip_address_devices(event, client):
     ip = await client.rest_request("GET", f"ipam/ip-addresses/{event.object_id}/")
     if not ip or ip.get("assigned_object_type") != "dcim.interface":
@@ -377,7 +395,7 @@ _HANDLERS = {
     "dcim.cable": _cross_handler(_cable_devices),
     "extras.configcontext": _config_context_changed,
     "ipam.vrf": _cross_handler(_vrf_devices),
-    "ipam.vlan": _cross_handler(_vlan_devices),
+    "ipam.vlan": _vlan_changed,
     "ipam.prefix": _cross_handler(_prefix_devices),
     "ipam.ipaddress": _cross_handler(_ip_address_devices),
     # A netbox-bgp session carries only a single ``device`` FK (the local peer);

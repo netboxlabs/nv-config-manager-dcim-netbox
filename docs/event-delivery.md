@@ -75,7 +75,7 @@ The provider registers render-event handlers for these native object types
 | `dcim.macaddress` | the assigned interface's device (NetBox 4.2+ keeps MACs on their own model) |
 | `dcim.cable` | both termination devices |
 | `ipam.vrf` | devices with an interface in the VRF |
-| `ipam.vlan` | devices with an interface on the VLAN (untagged, tagged or Q-in-Q SVLAN), matched by VLAN id -- VIDs are unique only within a VLAN group. DHCP helper addresses render onto a device's `vlan<vid>` SVI, so an SVI that carries no VLAN assignment is not re-rendered |
+| `ipam.vlan` | devices with an interface on the VLAN (untagged, tagged or Q-in-Q SVLAN), matched by VLAN id -- VIDs are unique only within a VLAN group. DHCP helper addresses render onto a device's `vlan<vid>` SVI, so an SVI that carries no VLAN assignment is not re-rendered. A **delete** re-renders every render-enabled device: NetBox nulls the interface FKs, so the affected set is unrecoverable |
 | `ipam.prefix` | devices in the prefix's scope (site/location/region) |
 | `ipam.ipaddress` | the interface's device |
 | `extras.configcontext` | devices matching the context's scope (sites/locations/roles/platforms/tenants/tags…), read from the event record — so a **delete** still re-renders the devices it applied to |
@@ -85,8 +85,8 @@ The provider registers render-event handlers for these native object types
 | `netbox_nv_config_manager.overlayassignment` | the assigned device, or the assigned interface's device |
 | `netbox_nv_config_manager.deviceconfigstatus` | the device |
 
-Cross-object handlers other than `extras.configcontext` skip `delete` events (the
-object can no longer be resolved).
+Cross-object handlers other than `extras.configcontext` and `ipam.vlan` skip `delete`
+events (the object can no longer be resolved).
 
 A handler that cannot reach NetBox (connection error, timeout, 5xx) raises
 `events.NetBoxUnavailableError`, deliberately *not* a `DCIMError`: NVCM's

@@ -269,6 +269,21 @@ async def test_vlan_custom_field_change_routes_through_the_vlan_handler():
     assert [request.device_id for request in requests] == ["7"]
 
 
+async def test_vlan_delete_rerenders_every_render_enabled_device():
+    class Client(_FanoutClient):
+        async def get_render_enabled_device_ids(self, is_aggregate_managed):
+            assert is_aggregate_managed is None
+            return ["3", "5"]
+
+        async def rest_list(self, path, params=None, **kwargs):
+            raise AssertionError("the interface FKs are nulled on delete; nothing to query")
+
+    event = _event("ipam.vlan", "9", {"id": 9, "vid": 900}, operation="delete")
+    requests = await _dispatch(event, Client())
+
+    assert sorted(r.device_id for r in requests) == ["3", "5"]
+
+
 async def test_ip_address_change_fans_out_to_assigned_device():
     client = _FanoutClient(
         rest_get={
