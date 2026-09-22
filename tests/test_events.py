@@ -16,7 +16,6 @@ from nv_config_manager_dcim import (
 
 from nv_config_manager_dcim_netbox.events import (
     _HANDLERS,
-    AFFECTED_DEVICES_FIELD,
     NetBoxUnavailableError,
     _bgp_session_changed,
     _device_changed,
@@ -271,65 +270,13 @@ async def test_vlan_custom_field_change_routes_through_the_vlan_handler():
 
 
 class _NoQueryClient(_FanoutClient):
-    """A delete must be resolved from the record; NetBox has already nulled the FKs."""
-
-    def __init__(self, render_enabled=None):
-        super().__init__()
-        self.render_enabled = render_enabled
-        self.render_enabled_calls = 0
+    """A delete must be resolved from the record; NetBox has already dropped the row."""
 
     async def rest_list(self, path, params=None, **kwargs):
         raise AssertionError(f"unexpected NetBox list on delete: {path}")
 
     async def rest_request(self, method, path, **kwargs):
         raise AssertionError(f"unexpected NetBox read on delete: {path}")
-
-    async def get_render_enabled_device_ids(self, is_aggregate_managed):
-        assert is_aggregate_managed is None
-        self.render_enabled_calls += 1
-        if isinstance(self.render_enabled, Exception):
-            raise self.render_enabled
-        return self.render_enabled
-
-
-@pytest.mark.parametrize("object_type", ["ipam.vlan", "ipam.vrf", "netbox_bgp.bgppeergroup"])
-async def test_nulled_fk_delete_fans_out_to_the_recorded_devices(object_type):
-    record = {"id": 9, AFFECTED_DEVICES_FIELD: [3, 5, 3]}
-    client = _NoQueryClient()
-
-    requests = await _dispatch(_event(object_type, "9", record, operation="delete"), client)
-
-    assert sorted(r.device_id for r in requests) == ["3", "5"]  # deduplicated
-    assert client.render_enabled_calls == 0
-
-
-async def test_nulled_fk_delete_with_no_recorded_devices_renders_nothing():
-    record = {"id": 9, AFFECTED_DEVICES_FIELD: []}
-    assert (
-        await _dispatch(_event("ipam.vlan", "9", record, operation="delete"), _NoQueryClient())
-        == ()
-    )
-
-
-async def test_nulled_fk_delete_without_the_field_falls_back_to_every_render_enabled_device():
-    # A plugin predating the field: the only safe answer is the whole render-enabled fleet.
-    client = _NoQueryClient(render_enabled=["3", "5"])
-
-    requests = await _dispatch(_event("ipam.vlan", "9", {"id": 9}, operation="delete"), client)
-
-    assert sorted(r.device_id for r in requests) == ["3", "5"]
-    assert client.render_enabled_calls == 1
-
-
-async def test_nulled_fk_delete_fallback_with_no_render_enabled_devices_is_noop():
-    client = _NoQueryClient(render_enabled=[])
-    assert await _dispatch(_event("ipam.vlan", "9", {"id": 9}, operation="delete"), client) == ()
-
-
-async def test_nulled_fk_delete_fallback_transient_failure_is_redelivered():
-    client = _NoQueryClient(render_enabled=TimeoutError("netbox down"))
-    with pytest.raises(NetBoxUnavailableError):
-        await _dispatch(_event("ipam.vlan", "9", {"id": 9}, operation="delete"), client)
 
 
 async def test_ip_address_delete_uses_the_record():
@@ -346,17 +293,6 @@ async def test_ip_address_delete_not_on_interface_is_noop():
         await _dispatch(_event("ipam.ipaddress", "4", record, operation="delete"), _NoQueryClient())
         == ()
     )
-
-
-async def test_cable_delete_uses_the_record_terminations():
-    record = {
-        "a_terminations": [{"object": {"device": {"id": 1}}}],
-        "b_terminations": [{"object": {"device": {"id": 2}}}],
-    }
-    requests = await _dispatch(
-        _event("dcim.cable", "2", record, operation="delete"), _NoQueryClient()
-    )
-    assert sorted(r.device_id for r in requests) == ["1", "2"]
 
 
 async def test_prefix_delete_fans_out_by_the_record_scope():
@@ -543,10 +479,16 @@ async def test_mac_address_not_on_an_interface_is_noop():
         assert await _dispatch(_event("dcim.macaddress", "3", record), _FanoutClient()) == ()
 
 
-async def test_cross_object_delete_without_a_delete_resolver_is_noop():
-    # An ASN in use cannot be deleted (netbox-bgp PROTECTs local_as/remote_as), so
-    # its handler has no delete path and the event is skipped rather than queried.
-    assert await _dispatch(_event("ipam.asn", "9", operation="delete"), None) == ()
+@pytest.mark.parametrize(
+    "object_type",
+    ["ipam.vlan", "ipam.vrf", "dcim.cable", "netbox_bgp.bgppeergroup", "ipam.asn"],
+)
+async def test_cross_object_delete_without_a_delete_resolver_is_noop(object_type):
+    # NetBox re-saves the interfaces (sessions) that carried a deleted VLAN, VRF,
+    # cable or peer group, so their devices re-render from those update events in
+    # the same batch; an ASN referenced by a session cannot be deleted at all. None
+    # of these handlers has a delete path, and the event is skipped, not queried.
+    assert await _dispatch(_event(object_type, "9", operation="delete"), None) == ()
 
 
 async def test_cross_object_resolution_error_raises():

@@ -44,16 +44,20 @@ def event_log():
     return EVENT_LOG
 
 
-def _patch_device(device_id, payload):
+def _api(method, path, payload=None):
     request = urllib.request.Request(
-        f"{SERVER}/api/dcim/devices/{device_id}/",
-        data=json.dumps(payload).encode(),
+        f"{SERVER}/api/{path}",
+        data=json.dumps(payload).encode() if payload is not None else None,
         headers={"Authorization": f"Token {TOKEN}", "Content-Type": "application/json"},
-        method="PATCH",
+        method=method,
     )
     with urllib.request.urlopen(request, timeout=30) as response:
-        assert response.status == 200, response.status
-        return json.load(response)
+        assert response.status in (200, 201, 204), response.status
+        return json.load(response) if response.status != 204 else None
+
+
+def _patch_device(device_id, payload):
+    return _api("PATCH", f"dcim/devices/{device_id}/", payload)
 
 
 def _envelopes(path, since=0):
@@ -137,3 +141,118 @@ def test_changed_fields_names_what_actually_changed(event_log, trial_devices):
         ),
     )
     assert envelope is not None, "no envelope reported `comments` as changed"
+
+
+# -- deletes -----------------------------------------------------------------------
+# The provider skips a VLAN / VRF / cable delete because NetBox re-saves the
+# interfaces that carried it, and resolves an IP or prefix delete from the record
+# because nothing else names the device. Both halves are inferred from NetBox
+# source (core.signals.handle_deleted_object, the REST serializers); these pin
+# them against a real NetBox.
+
+
+@pytest.fixture
+def scratch_interface(trial_devices):
+    """A throwaway interface on a trial device, deleted after the test."""
+    device = trial_devices["tan-leaf-03"]
+    interface = _api(
+        "POST",
+        "dcim/interfaces/",
+        {"device": int(device.id), "name": f"nvcm-live-{int(time.time())}", "type": "virtual"},
+    )
+    try:
+        yield device, interface
+    finally:
+        _api("DELETE", f"dcim/interfaces/{interface['id']}/")
+
+
+def test_deleting_a_vlan_emits_an_interface_update_naming_the_device(event_log, scratch_interface):
+    device, interface = scratch_interface
+    vlan = _api("POST", "ipam/vlans/", {"name": f"nvcm-live-{interface['id']}", "vid": 3999})
+    _api(
+        "PATCH",
+        f"dcim/interfaces/{interface['id']}/",
+        {"mode": "access", "untagged_vlan": vlan["id"]},
+    )
+    since = _offset(event_log)
+
+    _api("DELETE", f"ipam/vlans/{vlan['id']}/")
+
+    deleted = _wait_for_envelope(
+        event_log,
+        since,
+        lambda e: e.get("object_type") == "ipam.vlan" and e.get("object_id") == str(vlan["id"]),
+    )
+    assert deleted is not None, "no envelope logged for the VLAN delete"
+    assert deleted["operation"] == "delete"
+
+    # NetBox clears untagged_vlan by re-saving the interface, so the same batch
+    # carries the interface update the provider re-renders the device from.
+    updated = _wait_for_envelope(
+        event_log,
+        since,
+        lambda e: (
+            e.get("object_type") == "dcim.interface"
+            and e.get("object_id") == str(interface["id"])
+            and e.get("operation") == "update"
+        ),
+    )
+    assert updated is not None, "VLAN delete did not emit the interface update"
+    assert (updated["record"].get("device") or {}).get("id") == int(device.id)
+    assert updated["record"].get("untagged_vlan") is None
+
+
+def test_deleting_an_ip_address_leaves_the_interface_device_in_the_record(
+    event_log, scratch_interface
+):
+    device, interface = scratch_interface
+    ip = _api(
+        "POST",
+        "ipam/ip-addresses/",
+        {
+            "address": "198.51.100.77/32",
+            "assigned_object_type": "dcim.interface",
+            "assigned_object_id": interface["id"],
+        },
+    )
+    since = _offset(event_log)
+
+    _api("DELETE", f"ipam/ip-addresses/{ip['id']}/")
+
+    envelope = _wait_for_envelope(
+        event_log,
+        since,
+        lambda e: e.get("object_type") == "ipam.ipaddress" and e.get("object_id") == str(ip["id"]),
+    )
+    assert envelope is not None, "no envelope logged for the IP delete"
+    # Nothing else names the device (the assignment is a GenericForeignKey), so
+    # _ip_address_deleted reads it from here.
+    record = envelope["record"]
+    assert record["assigned_object_type"] == "dcim.interface"
+    assert record["assigned_object"]["device"]["id"] == int(device.id)
+
+
+def test_deleting_a_prefix_leaves_its_scope_in_the_record(event_log, trial_devices):
+    device = _api("GET", f"dcim/devices/{trial_devices['tan-leaf-03'].id}/")
+    prefix = _api(
+        "POST",
+        "ipam/prefixes/",
+        {
+            "prefix": "198.51.100.128/29",
+            "scope_type": "dcim.site",
+            "scope_id": device["site"]["id"],
+        },
+    )
+    since = _offset(event_log)
+
+    _api("DELETE", f"ipam/prefixes/{prefix['id']}/")
+
+    envelope = _wait_for_envelope(
+        event_log,
+        since,
+        lambda e: e.get("object_type") == "ipam.prefix" and e.get("object_id") == str(prefix["id"]),
+    )
+    assert envelope is not None, "no envelope logged for the prefix delete"
+    # _prefix_deleted fans out by these two fields.
+    assert envelope["record"]["scope_type"] == "dcim.site"
+    assert envelope["record"]["scope_id"] == device["site"]["id"]

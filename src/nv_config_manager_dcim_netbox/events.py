@@ -186,17 +186,18 @@ async def _mac_address_changed(event: DCIMChangeEvent, client: DCIMClient):
 
 # -- cross-object fan-out --------------------------------------------------------
 # The changed object is not a device, so the affected devices are resolved with a
-# NetBox query. On delete the object can no longer be read back, so the devices
-# are resolved from the event record instead -- the plugin serializes the object
-# before the row goes, and for the FKs NetBox nulls on delete (VLAN, VRF, BGP peer
-# group) it adds the device ids it was on -- or the delete is skipped where the
-# record cannot name them. The render-enabled gate is applied downstream, so
-# these return candidates unfiltered; ``_recorded_devices`` is the one exception.
-
-# Record field the plugin fills at pre_delete with the ids of the devices a
-# deleted VLAN / VRF / BGP peer group was on (``events_pipeline
-# .AFFECTED_DEVICES_FIELD`` in netbox-nv-config-manager).
-AFFECTED_DEVICES_FIELD = "nvcm_affected_device_ids"
+# NetBox query. On delete the object can no longer be read back, so a handler
+# either resolves from the pre-delete event record (the plugin serializes the
+# object before the row goes) or skips the event. Skipping is correct wherever
+# NetBox itself emits the follow-on changes: deleting a VLAN, VRF or cable
+# re-saves each interface that carried it (core.signals.handle_deleted_object
+# nulls the FK / removes the M2M row; CableTermination.delete() clears the
+# interface's cable) and deleting a BGP peer group re-saves its sessions, so
+# those arrive as dcim.interface / netbox_bgp.bgpsession update events in the
+# same batch and fan out to the device on their own. An IP address (a
+# GenericForeignKey) and a prefix (no reverse relation) leave no such trace, so
+# they are resolved from the record. The render-enabled gate is applied
+# downstream, so these return candidates unfiltered.
 
 # ConfigContext scope dimension -> device-list filter. AND across dimensions, OR
 # within one -- exactly how NetBox evaluates ConfigContext applicability.
@@ -256,31 +257,6 @@ async def _vlan_devices(event, client):
     return {_fk_id(i.get("device")) for i in interfaces}
 
 
-async def _recorded_devices(event, client):
-    """Delete fan-out for a VLAN, VRF or BGP peer group.
-
-    NetBox lets these be deleted while interfaces / sessions still carry them and
-    nulls the FKs, so after the delete nothing names the devices; the plugin
-    records them at pre_delete into ``AFFECTED_DEVICES_FIELD``. A record without
-    the field (a plugin predating it) falls back to every render-enabled device:
-    a missed render never reaches the network until an unrelated change comes
-    along, while a render with no diff is a no-op. That fallback is the one path
-    here that pre-filters to render-enabled -- as a bound on a fleet-wide burst,
-    not as policy; the downstream gate still applies.
-    """
-    device_ids = (event.record or {}).get(AFFECTED_DEVICES_FIELD)
-    if isinstance(device_ids, list):
-        return device_ids
-    logger.warning(
-        "%s %s delete event carries no %s (plugin too old?); fanning out to every "
-        "render-enabled device",
-        event.object_type,
-        event.object_id,
-        AFFECTED_DEVICES_FIELD,
-    )
-    return await client.get_render_enabled_device_ids(None)
-
-
 def _ip_interface_device(ip):
     if not ip or ip.get("assigned_object_type") != "dcim.interface":
         return ()
@@ -297,22 +273,13 @@ async def _ip_address_deleted(event, client):
     return _ip_interface_device(event.record)
 
 
-def _cable_termination_devices(cable):
+async def _cable_devices(event, client):
+    cable = await client.rest_request("GET", f"dcim/cables/{event.object_id}/")
     device_ids = set()
     for side in ("a_terminations", "b_terminations"):
         for termination in (cable or {}).get(side) or []:
             device_ids.add(_fk_id((termination.get("object") or {}).get("device")))
     return device_ids
-
-
-async def _cable_devices(event, client):
-    return _cable_termination_devices(
-        await client.rest_request("GET", f"dcim/cables/{event.object_id}/")
-    )
-
-
-async def _cable_deleted(event, client):
-    return _cable_termination_devices(event.record)
 
 
 async def _prefix_scope_devices(prefix, client):
@@ -438,10 +405,12 @@ _HANDLERS = {
     # NetBox 4.2+ holds MACs on a MACAddress row, so editing one is not an
     # interface change; it fans out to the assigned interface's device.
     "dcim.macaddress": _mac_address_changed,
-    "dcim.cable": _cross_handler(_cable_devices, on_delete=_cable_deleted),
+    # A deleted cable / VRF / VLAN re-saves the interfaces that carried it, so the
+    # devices re-render from those dcim.interface updates -- see the section comment.
+    "dcim.cable": _cross_handler(_cable_devices),
     "extras.configcontext": _config_context_changed,
-    "ipam.vrf": _cross_handler(_vrf_devices, on_delete=_recorded_devices),
-    "ipam.vlan": _cross_handler(_vlan_devices, on_delete=_recorded_devices),
+    "ipam.vrf": _cross_handler(_vrf_devices),
+    "ipam.vlan": _cross_handler(_vlan_devices),
     "ipam.prefix": _cross_handler(_prefix_devices, on_delete=_prefix_deleted),
     "ipam.ipaddress": _cross_handler(_ip_address_devices, on_delete=_ip_address_deleted),
     # A netbox-bgp session carries only a single ``device`` FK (the local peer);
@@ -452,11 +421,13 @@ _HANDLERS = {
     # ipam.asn (referenced by session local_as/remote_as); a peer group is
     # netbox_bgp.bgppeergroup. Mirrors the reference provider's ASN / peer-group
     # fan-out.
-    # An ASN in use cannot be deleted (netbox-bgp PROTECTs a session's
-    # local_as/remote_as), so its delete has nothing to fan out to; a peer group
-    # can (SET_NULL), so the plugin records the sessions' devices.
+    # An ASN referenced by a session cannot be deleted (netbox-bgp PROTECTs
+    # local_as/remote_as). One referenced only through the device ASN custom
+    # field can be -- an object custom field holds a bare pk -- and leaves no
+    # event naming the device; that gap is not closed here. A deleted peer group
+    # re-saves its sessions (SET_NULL), which arrive as bgpsession updates.
     "ipam.asn": _cross_handler(_bgp_asn_devices),
-    "netbox_bgp.bgppeergroup": _cross_handler(_bgp_peer_group_devices, on_delete=_recorded_devices),
+    "netbox_bgp.bgppeergroup": _cross_handler(_bgp_peer_group_devices),
     "netbox_nv_config_manager.overlayassignment": _overlay_assignment_changed,
     "netbox_nv_config_manager.deviceconfigstatus": _parent_device_changed,
 }
