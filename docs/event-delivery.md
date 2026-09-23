@@ -73,20 +73,32 @@ The provider registers render-event handlers for these native object types
 | `dcim.device` | the device itself |
 | `dcim.interface` / `dcim.rearport` / `dcim.frontport` | the parent device |
 | `dcim.macaddress` | the assigned interface's device (NetBox 4.2+ keeps MACs on their own model) |
-| `dcim.cable` | both termination devices |
-| `ipam.vrf` | devices with an interface in the VRF |
-| `ipam.vlan` | devices with an interface on the VLAN (untagged, tagged or Q-in-Q SVLAN), matched by VLAN id -- VIDs are unique only within a VLAN group. DHCP helper addresses render onto a device's `vlan<vid>` SVI, so an SVI that carries no VLAN assignment is not re-rendered |
-| `ipam.prefix` | devices in the prefix's scope (site/location/region) |
-| `ipam.ipaddress` | the interface's device |
+| `dcim.cable` | both termination devices; a **delete** is resolved from the record's terminations -- NetBox 4.7.0 emits no interface update for it (see below) |
+| `ipam.vrf` | devices with an interface in the VRF; a **delete** arrives as `dcim.interface` updates for each of them (see below) |
+| `ipam.vlan` | devices with an interface on the VLAN (untagged, tagged or Q-in-Q SVLAN), matched by VLAN id -- VIDs are unique only within a VLAN group. DHCP helper addresses render onto a device's `vlan<vid>` SVI, so an SVI that carries no VLAN assignment is not re-rendered. A **delete** arrives as `dcim.interface` updates for each interface that carried it (see below) |
+| `ipam.prefix` | devices in the prefix's scope (site/location/region; from the record on **delete**) |
+| `ipam.ipaddress` | the interface's device (from the record on **delete**) |
 | `extras.configcontext` | devices matching the context's scope (sites/locations/roles/platforms/tenants/tags…), read from the event record — so a **delete** still re-renders the devices it applied to |
 | `netbox_bgp.bgpsession` | the session's device |
-| `ipam.asn` | every device whose BGP session references the ASN (`local_as` / `remote_as`) |
-| `netbox_bgp.bgppeergroup` | every device whose BGP session uses the peer group |
+| `ipam.asn` | every device whose BGP session references the ASN (`local_as` / `remote_as`); **delete** is skipped -- netbox-bgp `PROTECT`s those FKs, so an ASN a session uses cannot be deleted. An ASN referenced only through the device ASN custom field can be, and emits nothing naming the device (known gap) |
+| `netbox_bgp.bgppeergroup` | every device whose BGP session uses the peer group; a **delete** arrives as `netbox_bgp.bgpsession` updates (see below) |
 | `netbox_nv_config_manager.overlayassignment` | the assigned device, or the assigned interface's device |
 | `netbox_nv_config_manager.deviceconfigstatus` | the device |
 
-Cross-object handlers other than `extras.configcontext` skip `delete` events (the
-object can no longer be resolved).
+On `delete` the object can no longer be read back. Where NetBox itself emits
+the follow-on changes, the delete is skipped: NetBox does not leave `SET_NULL` to
+the database but clears the relation in its own `pre_delete` handler
+(`core.signals.handle_deleted_object`) by re-saving each related object. So
+deleting a VLAN or VRF puts one `dcim.interface` update per affected interface
+into the same event batch, and deleting a BGP peer group one
+`netbox_bgp.bgpsession` update per session; those fan out to their devices
+through the handlers above (verified against a live NetBox 4.7.0). A cable is the
+exception: NetBox 4.7.0 emits no interface update when one is deleted, so the
+`dcim.cable` handler resolves the delete from the record's `a_terminations` /
+`b_terminations`. An IP address hangs off its interface by a `GenericForeignKey`
+and a prefix has no reverse relation at all, so neither leaves a trace either;
+those handlers resolve from the record too (`assigned_object.device`,
+`scope_type`/`scope_id`).
 
 A handler that cannot reach NetBox (connection error, timeout, 5xx) raises
 `events.NetBoxUnavailableError`, deliberately *not* a `DCIMError`: NVCM's

@@ -269,6 +269,63 @@ async def test_vlan_custom_field_change_routes_through_the_vlan_handler():
     assert [request.device_id for request in requests] == ["7"]
 
 
+class _NoQueryClient(_FanoutClient):
+    """A delete must be resolved from the record; NetBox has already dropped the row."""
+
+    async def rest_list(self, path, params=None, **kwargs):
+        raise AssertionError(f"unexpected NetBox list on delete: {path}")
+
+    async def rest_request(self, method, path, **kwargs):
+        raise AssertionError(f"unexpected NetBox read on delete: {path}")
+
+
+async def test_ip_address_delete_uses_the_record():
+    record = {"assigned_object_type": "dcim.interface", "assigned_object": {"device": {"id": 6}}}
+    requests = await _dispatch(
+        _event("ipam.ipaddress", "4", record, operation="delete"), _NoQueryClient()
+    )
+    assert [r.device_id for r in requests] == ["6"]
+
+
+async def test_ip_address_delete_not_on_interface_is_noop():
+    record = {"assigned_object_type": "virtualization.vminterface"}
+    assert (
+        await _dispatch(_event("ipam.ipaddress", "4", record, operation="delete"), _NoQueryClient())
+        == ()
+    )
+
+
+async def test_cable_delete_uses_the_record_terminations():
+    # NetBox 4.7.0 emits no interface update on cable delete, so _cable_deleted
+    # reads the terminations off the delete record rather than querying NetBox.
+    record = {
+        "a_terminations": [{"object": {"device": {"id": 1}}}],
+        "b_terminations": [{"object": {"device": {"id": 2}}}],
+    }
+    event = _event("dcim.cable", "2", record, operation="delete")
+    requests = await _dispatch(event, _NoQueryClient())
+    assert sorted(r.device_id for r in requests) == ["1", "2"]
+
+
+async def test_prefix_delete_fans_out_by_the_record_scope():
+    class Client(_NoQueryClient):
+        async def rest_list(self, path, params=None, **kwargs):
+            assert (path, params) == ("dcim/devices/", [("site_id", "3")])
+            return [{"id": 10}, {"id": 11}]
+
+    record = {"scope_type": "dcim.site", "scope_id": 3}
+    requests = await _dispatch(_event("ipam.prefix", "8", record, operation="delete"), Client())
+    assert sorted(r.device_id for r in requests) == ["10", "11"]
+
+
+async def test_prefix_delete_without_scope_is_noop():
+    record = {"scope_type": None, "scope_id": None}
+    assert (
+        await _dispatch(_event("ipam.prefix", "8", record, operation="delete"), _NoQueryClient())
+        == ()
+    )
+
+
 async def test_ip_address_change_fans_out_to_assigned_device():
     client = _FanoutClient(
         rest_get={
@@ -434,9 +491,16 @@ async def test_mac_address_not_on_an_interface_is_noop():
         assert await _dispatch(_event("dcim.macaddress", "3", record), _FanoutClient()) == ()
 
 
-async def test_cross_object_delete_is_noop():
-    # The object is gone on delete, so it can no longer be resolved.
-    assert await _dispatch(_event("ipam.vrf", "9", operation="delete"), None) == ()
+@pytest.mark.parametrize(
+    "object_type",
+    ["ipam.vlan", "ipam.vrf", "netbox_bgp.bgppeergroup", "ipam.asn"],
+)
+async def test_cross_object_delete_without_a_delete_resolver_is_noop(object_type):
+    # NetBox re-saves the interfaces (sessions) that carried a deleted VLAN, VRF or
+    # peer group, so their devices re-render from those update events in the same
+    # batch; an ASN referenced by a session cannot be deleted at all. None of these
+    # handlers has a delete path, and the event is skipped, not queried.
+    assert await _dispatch(_event(object_type, "9", operation="delete"), None) == ()
 
 
 async def test_cross_object_resolution_error_raises():
