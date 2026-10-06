@@ -17,6 +17,7 @@ from nv_config_manager_dcim import (
     ProviderSettings,
 )
 
+from nv_config_manager_dcim_netbox.cable_status import NetBoxCableStatusMixin
 from nv_config_manager_dcim_netbox.client import (
     BaseNetBoxClient,
     netbox_connection_settings,
@@ -53,6 +54,7 @@ def _provider_version() -> str:
 
 
 class NetBoxDCIMClient(
+    NetBoxCableStatusMixin,
     NetBoxInventoryMixin,
     NetBoxReferenceMixin,
     NetBoxIPAMMixin,
