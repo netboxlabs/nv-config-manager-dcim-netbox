@@ -9,6 +9,7 @@ from nv_config_manager_dcim import (
     CableStatus,
     CableStatusUpdate,
     DCIMCableStatusClient,
+    DCIMInvalidDataError,
     DCIMNotFoundError,
 )
 
@@ -83,6 +84,32 @@ async def test_update_cable_status_rejects_interface_without_cable():
 
     with pytest.raises(DCIMNotFoundError, match="has no cable"):
         await client.update_cable_status(_update())
+
+
+@pytest.mark.asyncio
+async def test_update_cable_status_rejects_unknown_interface():
+    writes = []
+    client = fake_client(rest_list={"dcim/interfaces/": []}, record=writes)
+
+    with pytest.raises(DCIMNotFoundError, match="No interface named 'Ethernet1/1'"):
+        await client.update_cable_status(_update())
+
+    assert writes == []
+
+
+@pytest.mark.asyncio
+async def test_update_cable_status_rejects_non_mapping_custom_fields():
+    writes = []
+    client = fake_client(
+        rest_list={"dcim/interfaces/": [{"id": 31, "cable": {"id": 42}}]},
+        rest_get={"dcim/cables/42/": {"id": 42, "custom_fields": ["validation_status"]}},
+        record=writes,
+    )
+
+    with pytest.raises(DCIMInvalidDataError, match="invalid cable custom-field data"):
+        await client.update_cable_status(_update())
+
+    assert writes == [("GET", "dcim/cables/42/", None)]
 
 
 def test_netbox_exposes_cable_status_capability():

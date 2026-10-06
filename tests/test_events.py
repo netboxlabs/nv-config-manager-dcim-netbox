@@ -369,6 +369,25 @@ async def test_cable_validation_status_only_change_does_not_render():
     assert await _dispatch(event, _FanoutClient()) == ()
 
 
+async def test_cable_delete_renders_despite_validation_status_only_change():
+    # The validation_status skip is update-only; a delete still resolves the
+    # terminations from the record via _cable_deleted.
+    record = {
+        "a_terminations": [{"object": {"device": {"id": 1}}}],
+        "b_terminations": [{"object": {"device": {"id": 2}}}],
+    }
+    event = _event(
+        "dcim.cable",
+        "2",
+        record,
+        operation="delete",
+        changed_fields=["custom_fields.validation_status"],
+    )
+
+    requests = await _dispatch(event, _NoQueryClient())
+    assert sorted(r.device_id for r in requests) == ["1", "2"]
+
+
 async def test_cable_mixed_change_still_renders():
     client = _FanoutClient(
         rest_get={
