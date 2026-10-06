@@ -14,6 +14,7 @@ from pathlib import Path
 
 import click
 import yaml
+from nv_config_manager_dcim import DCIM_EVENT_CONTRACT_VERSION
 from nv_config_manager_installer.deployer import DeployOptions, DeployStep, StepStatus
 from nv_config_manager_installer.schema import ImageSource, NVConfigManagerInstallConfig
 
@@ -871,6 +872,26 @@ def verify(namespace: str, device_id: str) -> None:
             f"{cfg.EVENT_SUBJECT!r}; every change event is dropped by the broker.\n"
             "Align nvcm.eventSubject in deploy/netbox with dcim.event_subject in the "
             "install config."
+        )
+    # The stream is the other half of that agreement. A wrong one no longer
+    # discards events silently -- the plugin's publisher checks it at connect and
+    # every publish raises -- but the failure lands in NetBox's log, where nobody
+    # is looking until a render goes missing. Cheaper to catch here.
+    if publisher.stream and publisher.stream != cfg.EVENT_STREAM:
+        raise click.ClickException(
+            f"NetBox publishes to the {publisher.stream!r} JetStream stream but NVCM "
+            f"provisions {cfg.EVENT_STREAM!r}; every publish fails at connect.\n"
+            "Align nvcm.eventStream in deploy/netbox with dcim.event_stream in the "
+            "install config."
+        )
+    # And the envelope contract. DCIMChangeEvent.from_dict exact-matches this, so
+    # a plugin and an SDK built against different versions of it means every event
+    # is rejected as invalid -- with the publish itself reporting success.
+    if publisher.contract_version and publisher.contract_version != DCIM_EVENT_CONTRACT_VERSION:
+        raise click.ClickException(
+            f"NetBox stamps events with contract_version {publisher.contract_version!r} but this "
+            f"provider's SDK parses {DCIM_EVENT_CONTRACT_VERSION!r}; every event is rejected as "
+            "invalid.\nUpgrade the plugin and nv-config-manager-dcim together."
         )
     if backend == "nats" and not importable:
         click.secho(

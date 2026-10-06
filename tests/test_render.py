@@ -149,6 +149,46 @@ _REST_MAP = {
 }
 
 
+# REST filters the fake honours, as `param -> row field`. Scoping is the whole
+# point of several of these queries (a device must not receive every fabric VNI),
+# so a fake that returned the full canned list for every call would let rows reach
+# assembly that production has already filtered out -- and would then exercise
+# error paths that are unreachable against a real NetBox. Filters not listed here
+# are ignored, which is safe: the assembly code re-checks scope in Python.
+_FAKE_FILTERS = {
+    "id": "id",
+    "overlay_id": "overlay",
+    "vrf_id": "vrf",
+    "vlan_id": "vlan",
+    "interface_id": "assigned_object",
+}
+
+
+def _fk(value):
+    """The row's FK as a string id, whether nested (`{"id": 8}`) or bare (`8`)."""
+    if isinstance(value, dict):
+        value = value.get("id")
+    return None if value is None else str(value)
+
+
+def _fake_rows(rest_map, path, params=None):
+    """The rows a NetBox list endpoint would return for *params*.
+
+    Shared by every fake in this module, including the ones that wrap it to spy on
+    the params: a fake that ignored filters would hand assembly rows production has
+    already excluded.
+    """
+    rows = rest_map.get(path, [])
+    # NetBox ANDs across distinct filter names and ORs repeated values.
+    wanted: dict[str, set[str]] = {}
+    for key, value in params or []:
+        if (field := _FAKE_FILTERS.get(key)) is not None:
+            wanted.setdefault(field, set()).add(str(value))
+    for field, values in wanted.items():
+        rows = [row for row in rows if _fk(row.get(field)) in values]
+    return rows
+
+
 def _client_with(device, rest_map):
     client = create_dcim_client("netbox", _SETTINGS)
 
@@ -156,7 +196,7 @@ def _client_with(device, rest_map):
         return {"device": device}
 
     async def fake_rest_list(path, params=None):
-        return rest_map.get(path, [])
+        return _fake_rows(rest_map, path, params)
 
     client.graphql_query = fake_graphql
     client.rest_list = fake_rest_list
@@ -397,6 +437,124 @@ async def test_console_server_ports_from_native_dcim():
     assert ports[1].connected_device_name is None
 
 
+async def test_bgp_peer_ipv6_comes_from_the_peer_interface():
+    """Dual-stack peer: the other family is read off the peer interface by interface_id."""
+    rest = copy.deepcopy(_REST_MAP)
+    rest["ipam/ip-addresses/"].append(
+        {
+            "id": 43,
+            "address": "2001:db8::4/127",
+            "assigned_object_type": "dcim.interface",
+            "assigned_object": {"id": 41, "name": "Ethernet1", "device": {"id": 42}},
+        }
+    )
+    # A v6 address on another interface of the peer must not be mistaken for this one.
+    rest["ipam/ip-addresses/"].append(
+        {
+            "id": 44,
+            "address": "2001:db8::ff/127",
+            "assigned_object": {"id": 45, "name": "Ethernet2"},
+        }
+    )
+    client = _client_with(_DEVICE, rest)
+    try:
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+    peer = rd.device.routing.bgp_instances[0].peers[0]
+    assert (str(peer.peer_ipv4), str(peer.peer_ipv6)) == ("10.0.0.4", "2001:db8::4")
+
+
+async def test_bgp_session_local_address_off_the_device_fails_the_render():
+    """A WAN session sourced from an address this device does not hold must not land
+    in VRF default; the error names the device and session."""
+    rest = copy.deepcopy(_REST_MAP)
+    rest["plugins/bgp/session/"][0]["local_address"] = {"id": 39, "address": "10.99.0.1/31"}
+    client = _client_with(_DEVICE, rest)
+    try:
+        with pytest.raises(DCIMInvalidDataError, match="device 'leaf-01'.*'peer-1'.*10.99.0.1"):
+            await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+
+def _cabled_to(device, peer):
+    device = copy.deepcopy(device)
+    device["interfaces"][0]["connected_endpoints"] = [
+        {"name": "eth1", "vrf": None, "ip_addresses": [], "device": peer}
+    ]
+    return device
+
+
+async def test_connected_peer_asn_falls_back_to_the_asn_custom_field():
+    """A peer whose ASN exists only as ``nvcm_bgp_asn`` (a bare ipam.asn pk over GraphQL)
+    must not render ``remote-as external``."""
+    peer = {"id": "99", "name": "oob-server", "role": {"name": "OOB-Server"}, "tags": []}
+    rest = {**_REST_MAP, "ipam/asns/": [{"id": 7, "asn": 65077}, {"id": 8, "asn": 65088}]}
+    client = _client_with(
+        _cabled_to(_DEVICE, {**peer, "config_context": {}, "custom_fields": {"nvcm_bgp_asn": 7}}),
+        rest,
+    )
+    try:
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+    assert rd.device.interfaces[0].connected_interface.device.routing_asn == "65077"
+
+    # The REST shape nests the referenced ASN; no lookup needed.
+    client = _client_with(
+        _cabled_to(_DEVICE, {**peer, "custom_fields": {"nvcm_bgp_asn": {"id": 8, "asn": 65088}}}),
+        _REST_MAP,
+    )
+    try:
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+    assert rd.device.interfaces[0].connected_interface.device.routing_asn == "65088"
+
+
+async def test_connected_peer_asn_falls_back_to_the_sessions_remote_as():
+    # spine-01 holds the session's remote address (remote_as 65001) and has neither
+    # config_context nor custom field.
+    peer = {"id": "42", "name": "spine-01", "role": {"name": "Spine"}, "tags": []}
+    client = _client_with(_cabled_to(_DEVICE, peer), _REST_MAP)
+    try:
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+    assert rd.device.interfaces[0].connected_interface.device.routing_asn == "65001"
+
+
+async def test_connected_peer_asn_prefers_config_context():
+    peer = {
+        "id": "42",
+        "name": "spine-01",
+        "role": {"name": "Spine"},
+        "tags": [],
+        "config_context": {"bgp": {"asn": "65500"}},
+        "custom_fields": {"nvcm_bgp_asn": 7},
+    }
+    client = _client_with(_cabled_to(_DEVICE, peer), _REST_MAP)
+    try:
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+    assert rd.device.interfaces[0].connected_interface.device.routing_asn == "65500"
+
+
+async def test_site_tags_reach_the_location():
+    device = copy.deepcopy(_DEVICE)
+    device["site"]["tags"] = [{"name": "superpod"}]
+    client = _client_with(device, _REST_MAP)
+    try:
+        rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+    assert rd.location.location.tags == ("superpod",)
+    assert rd.device.identity.location.parent.parent.tags == ("superpod",)
+
+
 async def test_bgp_peer_ttl_from_peer_group_extra_attributes():
     """netbox-bgp keeps multihop TTL in extra_attributes, on the session or its group."""
     rest = copy.deepcopy(_REST_MAP)
@@ -453,7 +611,8 @@ async def test_location_topology_route_servers_and_wan_routers():
     ip_queries: list[list[tuple[str, str]]] = []
 
     async def fake_rest_list(path, params=None):
-        if path == "dcim/devices/":
+        # The id-filtered read is the BGP peer's role lookup, not a topology selection.
+        if path == "dcim/devices/" and not any(k == "id" for k, _ in params or []):
             seen.append(list(params or []))
             tags = [v for k, v in (params or []) if k == "tag"]
             if tags == ["route-server"]:
@@ -462,11 +621,11 @@ async def test_location_topology_route_servers_and_wan_routers():
         if path == "dcim/interfaces/":
             starts_with = [v for k, v in (params or []) if k == "name__isw"]
             if not starts_with:
-                return rest.get(path, [])
+                return _fake_rows(rest, path, params)
             # One query covers every device, so the rows carry their own device.
             device_ids = {v for k, v in (params or []) if k == "device_id"}
             return [{"id": 50, "name": "lo", "device": {"id": 5}} for _ in [1] if "5" in device_ids]
-        if path == "ipam/ip-addresses/":
+        if path == "ipam/ip-addresses/" and not any(k == "id" for k, _ in params or []):
             ip_queries.append(list(params or []))
             selected = {v for k, v in (params or []) if k == "interface_id"}
             addresses = {"50": "10.9.9.9/32", "51": "10.1.1.0/31"}
@@ -475,7 +634,7 @@ async def test_location_topology_route_servers_and_wan_routers():
                 for i in sorted(selected)
                 if i in addresses
             ]
-        return rest.get(path, [])
+        return _fake_rows(rest, path, params)
 
     client.graphql_query = fake_graphql
     client.rest_list = fake_rest_list
@@ -530,7 +689,7 @@ async def test_location_topology_degrades_when_netbox_rejects_the_tag_or_role_sl
     async def fake_rest_list(path, params=None):
         if path == "dcim/devices/" and any(k in ("tag", "role") for k, _ in params or []):
             raise DCIMInvalidDataError("NetBox rejected the request (400)")
-        return rest.get(path, [])
+        return _fake_rows(rest, path, params)
 
     client.graphql_query = fake_graphql
     client.rest_list = fake_rest_list
@@ -600,6 +759,54 @@ async def test_l2_vni_vrfs_excludes_interface_only_overlays():
     assert rd.device.overlays.l2_vni_vrfs == ()
 
 
+async def test_an_unresolvable_l2_vlan_fails_the_render_instead_of_dropping_the_vni():
+    """A VNI missing from a rendered config is deployed to the switch.
+
+    The VXLAN names a VLAN, so the data says the VNI exists; if the follow-up
+    lookup cannot return that VLAN, the device cannot be described correctly and
+    the render must fail rather than emit a config quietly missing it. Matches the
+    reference provider ("L2 VNI is missing its VLAN assignment").
+    """
+    rest = copy.deepcopy(_REST_MAP)
+    rest["ipam/vlans/"] = [v for v in rest["ipam/vlans/"] if str(v.get("id")) != "100"]
+    client = _client_with(_DEVICE, rest)
+    try:
+        with pytest.raises(DCIMInvalidDataError, match="VLAN 100"):
+            await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+
+async def test_an_unresolvable_l3_vrf_fails_the_render():
+    rest = copy.deepcopy(_REST_MAP)
+    rest["ipam/vrfs/"] = []
+    client = _client_with(_DEVICE, rest)
+    try:
+        with pytest.raises(DCIMInvalidDataError, match="VRF 8"):
+            await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+
+async def test_a_vxlan_naming_no_vlan_is_skipped_not_fatal(caplog):
+    """The other half of the split: VXLAN.vlan is nullable and the plugin does not
+    require it per vni_type, so a VXLAN that names nothing is incomplete data --
+    logged and skipped, never a failed render for every device on the overlay."""
+    rest = copy.deepcopy(_REST_MAP)
+    for vxlan in rest["plugins/nv-config-manager/vxlans/"]:
+        if vxlan.get("vni_type") == "l2":
+            vxlan["vlan"] = None
+    client = _client_with(_DEVICE, rest)
+    try:
+        with caplog.at_level("WARNING"):
+            rd = await client.get_render_data(RenderDataRequest(device_id="1"))
+    finally:
+        await client.close()
+
+    assert rd.device.overlays.l2_vnis == ()
+    assert "names no VLAN" in caplog.text
+
+
 async def test_l2_vnis_include_attached_vlans_whose_overlay_is_unassigned():
     """The reference admits an L2 VNI on overlay assignment *or* VLAN attachment.
 
@@ -641,7 +848,7 @@ async def test_peer_groups_are_scoped_to_the_ids_the_sessions_reference():
     async def fake_rest_list(path, params=None):
         if path == "plugins/bgp/peer-group/":
             seen.append(list(params or []))
-        return rest.get(path, [])
+        return _fake_rows(rest, path, params)
 
     client.graphql_query = fake_graphql
     client.rest_list = fake_rest_list
@@ -665,7 +872,7 @@ async def test_no_peer_group_read_when_no_session_references_one():
     async def fake_rest_list(path, params=None):
         if path == "plugins/bgp/peer-group/":
             raise AssertionError("must not read peer groups when none are referenced")
-        return rest.get(path, [])
+        return _fake_rows(rest, path, params)
 
     async def fake_graphql(query, variables=None):
         return {"device": _DEVICE}
@@ -697,9 +904,9 @@ async def test_topology_device_in_both_lists_is_fetched_once_and_appears_in_both
         if path == "dcim/interfaces/" and any(k == "name__isw" for k, _ in params or []):
             loopback_calls.append(dict(params or [])["device_id"])
             return [{"id": 50, "name": "lo"}]
-        if path == "ipam/ip-addresses/":
+        if path == "ipam/ip-addresses/" and ("interface_id", "50") in (params or []):
             return [{"address": "10.9.9.9/32"}]
-        return rest.get(path, [])
+        return _fake_rows(rest, path, params)
 
     client.graphql_query = fake_graphql
     client.rest_list = fake_rest_list
@@ -735,7 +942,7 @@ async def test_one_wan_role_query_per_role_so_an_undefined_role_keeps_the_other(
             return []
         if path == "dcim/interfaces/" and any(k == "name__isw" for k, _ in params or []):
             return []
-        return rest.get(path, [])
+        return _fake_rows(rest, path, params)
 
     client.graphql_query = fake_graphql
     client.rest_list = fake_rest_list

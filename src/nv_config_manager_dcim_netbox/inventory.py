@@ -13,6 +13,7 @@ from nv_config_manager_dcim import (
     DCIMDeviceSelection,
     DCIMInvalidDataError,
     DCIMNotFoundError,
+    dcim_location_type,
 )
 
 from nv_config_manager_dcim_netbox._mappers import (
@@ -24,7 +25,18 @@ from nv_config_manager_dcim_netbox._mappers import (
     slug_or_id,
     status_slug,
 )
-from nv_config_manager_dcim_netbox.fabric_common import DEVICES_PATH, INTERFACES_PATH, chunked
+from nv_config_manager_dcim_netbox._mappers import device_pk as _device_pk
+from nv_config_manager_dcim_netbox.fabric_common import (
+    DEVICES_PATH,
+    INTERFACES_PATH,
+    LOCATION_SCOPE_TYPE,
+    REGION_SCOPE_TYPE,
+    SITE_SCOPE_TYPE,
+    SITEGROUP_SCOPE_TYPE,
+    STATUS_PATH,
+    chunked,
+    scope_type_for,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -101,6 +113,21 @@ query ($ids: [ID!]!) {{
 """
 
 
+# NetBox device filter for each level a location reference can name. An untyped
+# reference stays on ``site``: that is what NVCM's /parameter/site hands out.
+_DEVICE_LOCATION_FILTERS = {
+    REGION_SCOPE_TYPE: "region",
+    SITEGROUP_SCOPE_TYPE: "site_group",
+    SITE_SCOPE_TYPE: "site",
+    LOCATION_SCOPE_TYPE: "location",
+}
+
+
+def _device_location_filter(value: object) -> str:
+    """Return the device-list filter key a location reference should use."""
+    return _DEVICE_LOCATION_FILTERS.get(scope_type_for(dcim_location_type(value)), "site")
+
+
 class NetBoxInventoryMixin:
     """Device and interface inventory reads."""
 
@@ -119,10 +146,20 @@ class NetBoxInventoryMixin:
             return None
         return device_metadata_from_gql(device, self.get_device_ui_url(device_id))
 
+    async def managed_device_ids(self) -> set[str]:
+        """Device PKs that have a ``DeviceConfigStatus`` record.
+
+        "Managed" means the record exists, whatever its flags -- the reference
+        provider's ``config_manager_devices`` / ``nv_config_manager_device_status``
+        filters. A device with ``render_enabled=False`` is still managed; the
+        render gate is a separate filter.
+        """
+        rows = await self.rest_list(STATUS_PATH)
+        return {pk for row in rows if (pk := _device_pk(row))}
+
     async def get_managed_device_metadata(self, page_size: int = 100) -> list[DeviceMetadata]:
-        # "Managed" is DeviceConfigStatus.render_enabled; see status_flag_device_ids.
-        managed_ids = await self.status_flag_device_ids(render_enabled=True)
-        devices = await self.devices_by_ids(managed_ids or (), page_size=page_size)
+        managed_ids = await self.managed_device_ids()
+        devices = await self.devices_by_ids(managed_ids, page_size=page_size)
         return [device_metadata_from_rest(d, self.get_device_ui_url(str(d["id"]))) for d in devices]
 
     async def get_device_serial(self, device_id: str) -> str:
@@ -169,6 +206,11 @@ class NetBoxInventoryMixin:
                     params.append((key, status_slug(value)))
                 elif key == "device_type_id":
                     params.append((key, str(value)))
+                elif key == "site":
+                    # A location filter names whichever level it came from: NetBox
+                    # keys each of the four separately, and a Location id sent as
+                    # `site_id` matches the Site of that pk instead.
+                    params.append(slug_or_id(_device_location_filter(value), value))
                 else:
                     # Name-or-id: NetBox keys these by slug, with the id under
                     # `<key>_id`. Workflows send either. See ``slug_or_id``.
@@ -179,8 +221,8 @@ class NetBoxInventoryMixin:
             return []
         params.extend(platform_params)
         if filters.managed_only:
-            # render_enabled ids, ANDed with the rest of the filter.
-            managed_ids = await self.status_flag_device_ids(render_enabled=True)
+            # Managed ids, ANDed with the rest of the filter.
+            managed_ids = await self.managed_device_ids()
             if not managed_ids:
                 return []
             devices = await self.devices_by_ids(managed_ids, params)
@@ -375,16 +417,14 @@ class NetBoxInventoryMixin:
         params.extend(platform_params)
 
         # Every filter that narrows to a set of device ids, collected for
-        # intersection. managed_only proxies to render_enabled, so it only applies
-        # when no explicit render filter was given.
+        # intersection.
         id_sets: list[set[str]] = []
         if filters.device_ids:
             id_sets.append({str(value) for value in filters.device_ids})
-        render_enabled = filters.render_enabled
-        if filters.managed_only and render_enabled is None:
-            render_enabled = True
+        if filters.managed_only:
+            id_sets.append(await self.managed_device_ids())
         status_ids = await self.status_flag_device_ids(
-            render_enabled=render_enabled,
+            render_enabled=filters.render_enabled,
             deploy_enabled=filters.deploy_enabled,
             backup_enabled=filters.backup_enabled,
             ztp_enabled=filters.ztp_enabled,

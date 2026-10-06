@@ -41,28 +41,46 @@ class NetBoxFirmwareMixin:
 
     async def get_os_image_versions(self, device_id: str) -> OSImageVersions:
         device = await self.rest_request("GET", f"dcim/devices/{device_id}/")
-        cc = (device or {}).get("config_context") or {}
-        intended = (cc.get("intended-firmware") or {}).get("version") or ""
+        if not device:
+            raise DCIMNotFoundError(f"NetBox device {device_id} not found")
+        cc = device.get("config_context") or {}
+        intended = (cc.get("intended-firmware") or {}).get("version")
+        if not intended:
+            raise DCIMInvalidDataError(
+                f"NetBox device {device_id} has no intended-firmware.version in config context"
+            )
         ztp_ipv4_list = (cc.get("ztp") or {}).get("ipv4") or []
-        ztp_ipv4 = ztp_ipv4_list[0] if ztp_ipv4_list else ""
-        # Key the firmware-targets table by role + platform *slug* on both sides
-        # (NetBox's canonical, stable identifiers) so lookups don't silently miss.
+        if not ztp_ipv4_list:
+            raise DCIMInvalidDataError(
+                f"NetBox device {device_id} has no ztp.ipv4 address in config context"
+            )
+        # The firmware-targets table is keyed by role slug, then platform *name*
+        # ("Cumulus Linux") as the reference provider keys it. The slug is accepted
+        # as a fallback so a table written with NetBox slugs still resolves.
         role = slug_of(device.get("role"))
-        platform = slug_of(device.get("platform"))
+        platform_name = name_of(device.get("platform"))
+        platform_slug = slug_of(device.get("platform"))
+        if not role or not (platform_name or platform_slug):
+            raise DCIMInvalidDataError(f"NetBox device {device_id} has no role or platform")
         # NetBox devices carry a direct site FK; scope the targets table to the
         # device's site so per-site desired versions don't leak across sites.
         site = name_of(device.get("site"))
-        desired = ""
-        if role and platform:
-            targets = await self._firmware_targets(site)
-            desired = (targets.get(role) or {}).get(platform) or ""
+        targets = (await self._firmware_targets(site)).get(role) or {}
+        desired = targets.get(platform_name) if platform_name else None
+        if not desired and platform_slug:
+            desired = targets.get(platform_slug)
+        if not desired:
+            raise DCIMInvalidDataError(
+                f"No firmware target for role {role!r} / platform "
+                f"{platform_name or platform_slug!r} in {_FIRMWARE_TARGETS_PROFILE}"
+            )
         # The SDK's OSImageVersions, not a bare tuple: it is a NamedTuple and
         # NVCM reads it by attribute (`versions.intended_firmware` in
         # temporal/ngc/activities/os.py). A plain tuple carries the same three
         # values in the same order and fails only at that attribute access,
         # inside the activity, as an AttributeError with no mention of the DCIM.
         return OSImageVersions(
-            intended_firmware=intended, desired_firmware=desired, ztp_address=ztp_ipv4
+            intended_firmware=intended, desired_firmware=desired, ztp_address=ztp_ipv4_list[0]
         )
 
     async def set_intended_os_image(self, device_id: str, desired_firmware: str) -> None:

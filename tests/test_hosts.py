@@ -41,6 +41,12 @@ async def test_get_interface_hosts_by_mac():
     assert [i.name for i in result] == ["p0"] and result[0].vrf_id == "8"
 
 
+async def test_host_device_interface_macs_are_netaddr_canonical():
+    client = _client(gql={"device": _HOST_GQL})
+    host = await client.get_host_device("1")
+    assert [i.mac_address for i in host.interfaces] == ["AA-BB-CC-00-00-01"]
+
+
 async def test_find_host_devices_by_mac():
     # interfaces -> device ids -> host_devices_by_ids (graphql device_list)
     client = _client(

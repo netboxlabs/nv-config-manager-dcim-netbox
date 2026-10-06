@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import pytest
-from nv_config_manager_dcim import OSImageVersions
+from nv_config_manager_dcim import DCIMInvalidDataError, OSImageVersions
 
 from tests._fake import fake_client
 
@@ -42,6 +42,72 @@ async def test_get_os_image_versions():
     assert versions.intended_firmware == "5.1.0"
     assert versions.desired_firmware == "5.2.0"
     assert versions.ztp_address == "10.0.0.9"
+
+
+def _os_device(**overrides):
+    device = {
+        "id": 1,
+        "role": {"slug": "leaf"},
+        "platform": {"name": "Cumulus Linux", "slug": "cumulus-linux"},
+        "config_context": {
+            "intended-firmware": {"version": "5.1.0"},
+            "ztp": {"ipv4": ["10.0.0.9"]},
+        },
+    }
+    device.update(overrides)
+    return device
+
+
+def _targets(table):
+    async def targets(name, site=None):
+        return [{"data": {"firmware-targets": table}}]
+
+    return targets
+
+
+async def test_get_os_image_versions_keys_targets_by_platform_name_first():
+    # Parity: the reference keys firmware-targets by role, then platform *name*.
+    # The slug is only a fallback, so when both are present the name wins.
+    client = fake_client(
+        rest_get={_DEVICE_PATH: _os_device()},
+        patch={
+            "config_contexts_for_profile": _targets(
+                {"leaf": {"Cumulus Linux": "5.3.0", "cumulus-linux": "5.2.0"}}
+            )
+        },
+    )
+    assert (await client.get_os_image_versions("1")).desired_firmware == "5.3.0"
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        # Missing intended-firmware.version
+        _os_device(config_context={"ztp": {"ipv4": ["10.0.0.9"]}}),
+        # Missing ztp.ipv4
+        _os_device(config_context={"intended-firmware": {"version": "5.1.0"}}),
+        # No role / no platform
+        _os_device(role=None),
+        _os_device(platform=None),
+    ],
+)
+async def test_get_os_image_versions_raises_when_device_data_is_missing(device):
+    # Parity: the reference raises DCIMInvalidDataError rather than returning "".
+    client = fake_client(
+        rest_get={_DEVICE_PATH: device},
+        patch={"config_contexts_for_profile": _targets({"leaf": {"Cumulus Linux": "5.2.0"}})},
+    )
+    with pytest.raises(DCIMInvalidDataError):
+        await client.get_os_image_versions("1")
+
+
+async def test_get_os_image_versions_raises_when_no_target_matches():
+    client = fake_client(
+        rest_get={_DEVICE_PATH: _os_device()},
+        patch={"config_contexts_for_profile": _targets({"spine": {"Cumulus Linux": "5.2.0"}})},
+    )
+    with pytest.raises(DCIMInvalidDataError, match="No firmware target"):
+        await client.get_os_image_versions("1")
 
 
 async def test_get_firmware_bundle():

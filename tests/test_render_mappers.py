@@ -27,6 +27,7 @@ from nv_config_manager_dcim_netbox.render import (
     _endpoint_set,
     _evpn,
     _firmware_from_context,
+    _prefix_set,
     _render_interface,
     _render_ip,
     _render_vlan,
@@ -95,9 +96,18 @@ def test_render_ip_malformed_address_returns_none():
 def test_render_ip_derives_host_version_and_ancestry():
     ip = _render_ip("10.0.0.5/31", {"value": "loopback"}, _NETWORKS)
     assert isinstance(ip, RenderIPAddress)
-    assert str(ip.host) == "10.0.0.5" and ip.version == 4 and ip.role == "loopback"
+    assert str(ip.host) == "10.0.0.5" and ip.version == 4 and ip.role == "Loopback"
     # nearest parent first
     assert tuple(str(p) for p in ip.parent_prefixes) == ("10.0.0.4/31", "10.0.0.0/24")
+
+
+def test_render_ip_role_is_the_label_not_the_choice_value():
+    """The templates compare against the Nautobot Role name (``VIP``), not NetBox's ``vip``."""
+    assert _render_ip("10.0.0.5/32", "vip", []).role == "VIP"
+    assert _render_ip("10.0.0.5/32", {"value": "anycast", "label": "Anycast"}, []).role == "Anycast"
+    # Unknown values pass through; no role stays None.
+    assert _render_ip("10.0.0.5/32", "custom", []).role == "custom"
+    assert _render_ip("10.0.0.5/32", None, []).role is None
 
 
 def test_render_ip_ipv6():
@@ -155,6 +165,7 @@ _BGP_PEER_ENDPOINTS = {
         "interface_name": "Ethernet49",
         "device_name": "example-wan-2",
         "device_role": "TAN-BBR",
+        "addresses": ("10.76.245.72/31", "2001:db8:1::72/127"),
     }
 }
 
@@ -179,6 +190,25 @@ def test_bgp_peer_identity_derived_from_the_remote_address():
     # No peer group on the session, so the peer device's role names it.
     assert (peer.peer_role, peer.peer_group) == ("TAN-BBR", "TAN-BBR")
     assert (peer.status, instance.status) == ("Active", "Active")
+
+
+def test_bgp_peer_addresses_cover_both_families_of_the_peer_interface():
+    """A v6 session to a dual-stack peer interface reports the peer's v4 address too.
+
+    The reference derives peer_ipv4 and peer_ipv6 from every address on the
+    peer's source interface, not from the one address the session names.
+    """
+    session = {**_BGP_SESSION, "remote_address": {"id": 9, "address": "2001:db8:1::72/127"}}
+    (instance,) = _bgp_instances([session], _BGP_INTERFACES, "lo", None, _BGP_PEER_ENDPOINTS)
+    peer = instance.peers[0]
+    assert (str(peer.peer_ipv4), str(peer.peer_ipv6)) == ("10.76.245.72", "2001:db8:1::72")
+
+
+def test_bgp_local_address_on_no_device_interface_raises():
+    """Unresolved, the session would fall into VRF default and misplace a WAN peer."""
+    session = {**_BGP_SESSION, "local_address": {"id": 8, "address": "10.99.0.1/31"}}
+    with pytest.raises(DCIMInvalidDataError, match="local address 10.99.0.1/31"):
+        _bgp_instances([session], _BGP_INTERFACES, "lo", None, _BGP_PEER_ENDPOINTS)
 
 
 def test_bgp_peer_identity_survives_an_uncabled_source_interface():
@@ -215,13 +245,11 @@ def test_bgp_unidentifiable_peer_without_a_peer_group_raises():
         _bgp_instances([_BGP_SESSION], _BGP_INTERFACES, "lo", None, {})
 
 
-def test_bgp_unidentifiable_peer_named_by_its_own_peer_group_still_renders():
-    """Narrower than the reference, which requires the peer endpoint unconditionally."""
+def test_bgp_unidentifiable_peer_raises_even_with_its_own_peer_group():
+    """As the reference: a peer group names the group, not the peer."""
     session = {**_BGP_SESSION, "peer_group": {"id": 3, "name": "underlay"}}
-    (instance,) = _bgp_instances([session], _BGP_INTERFACES, "lo", None, {})
-    peer = instance.peers[0]
-    assert (peer.peer_group, peer.peer_role) == ("underlay", "")
-    assert peer.name == "oobspine-example-wan-2" and peer.source_interface is None
+    with pytest.raises(DCIMInvalidDataError, match="assigned to no interface"):
+        _bgp_instances([session], _BGP_INTERFACES, "lo", None, {}, None, "leaf-01")
 
 
 def test_peerless_device_asn_still_reports_a_routing_instance():
@@ -267,9 +295,20 @@ def test_endpoint_set_empty_or_wrong_type_returns_none():
     assert _endpoint_set(["10.0.0.1"]) is None  # must be a {ipv4,ipv6} mapping
 
 
-def test_endpoint_set_invalid_address_raises():
+def test_endpoint_set_accepts_a_hostname():
+    """An endpoint may be a hostname, so the SDK models these as plain strings.
+
+    Only prefixes are still validated as networks; see the prefix-set test below.
+    """
+    es = _endpoint_set({"ipv4": ["ntp.example.com"]})
+    assert tuple(es.ipv4) == ("ntp.example.com",)
+
+
+def test_prefix_set_invalid_prefix_raises():
+    """The prefix set is still ``IPvAnyNetwork``, so this is the live half of
+    ``_address_family_set``'s error path."""
     with pytest.raises(DCIMInvalidDataError):
-        _endpoint_set({"ipv4": ["not-an-ip"]})
+        _prefix_set({"ipv4": ["not-a-prefix"]})
 
 
 def test_services_from_context_only_sets_present_keys():

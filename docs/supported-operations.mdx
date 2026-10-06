@@ -18,16 +18,16 @@ render-data field mapping see [NetBox data mapping](./netbox-data-mapping.mdx).
 | **Device inventory & selection** (10) | `get_device_metadata`, `get_managed_device_metadata`, `get_device_serial`, `get_device_selection_by_name`, `list_devices`, `get_device_interfaces`, `get_network_device`, `get_network_devices`, `get_host_device`, `get_host_devices` | `list_devices` returns only devices with a **primary IP**. |
 | **Reference lookups** (6) | `list_locations`, `list_tenants`, `list_roles`, `list_namespace_tags`, `list_overlays`, `list_statuses` | `list_statuses` reads OPTIONS choices; namespaces are VRF tags. |
 | **Render** (2) | `get_render_data`, `get_intended_interface_neighbors` | Returns the provider-neutral `RenderData`; portable REST + one GraphQL query. |
-| **Config lifecycle / state** (9) | `get_render_device_status`, `get_render_enabled_device_ids`, `get_render_template_versions`, `upsert_intended_configuration`, `update_render_template_version`, `get_backup_enabled_device_ids`, `get_configuration_backup_metadata`, `record_configuration_backup`, `has_recorded_config_drift` | Backed by the plugin's `DeviceConfigStatus` / `IntendedConfig` / `BackupConfig` models, not device custom fields. |
+| **Config lifecycle / state** (9) | `get_render_device_status`, `get_render_enabled_device_ids`, `get_render_template_versions`, `upsert_intended_configuration`, `update_render_template_version`, `get_backup_enabled_device_ids`, `get_configuration_backup_metadata`, `record_configuration_backup`, `has_recorded_config_drift` | Backed by the plugin's `DeviceConfigStatus` / `IntendedConfig` / `BackupConfig` models, not device custom fields. A device is **managed** when it has a `DeviceConfigStatus` row, regardless of `render_enabled`. |
 | **DHCP** (4) | `get_dhcp_site_options`, `get_dhcp_contexts`, `get_dhcp_static_data`, `get_dhcp_auto_subnets` | **Read-only** (generates Kea config); does not write DCIM. |
-| **ZTP** (2) | `get_ztp_device`, `mark_ztp_device_provisioned` | Writes NetBox device status `provisioned` — an extra choice the companion plugin registers (see below). |
+| **ZTP** (2) | `get_ztp_device`, `mark_ztp_device_provisioned` | `get_ztp_device` serves only managed devices (a `DeviceConfigStatus` row; `DCIMNotFoundError` otherwise) with a platform. Writes NetBox device status `provisioned` — an extra choice the companion plugin registers (see below). |
 | **Cable validation** (1) | `update_cable_status` | Stores Connected, Disconnected, or Invalid in the cable's `validation_status` custom field. |
-| **Firmware** (4) | `get_os_image_versions`, `set_intended_os_image`, `get_firmware_bundle`, `set_device_firmware_intent` | Sourced from the merged `config_context`. |
+| **Firmware** (4) | `get_os_image_versions`, `set_intended_os_image`, `get_firmware_bundle`, `set_device_firmware_intent` | Sourced from the merged `config_context`; `firmware-targets` is keyed by role slug then platform **name** (slug as fallback), and missing data raises. |
 | **Hosts / MAC correlation** (6) | `find_host_devices_by_mac`, `update_dpu_device_inventory`, `get_interface_hosts_by_mac`, `get_host_metadata_by_macs`, `get_host_metadata_by_names`, `get_connected_switch_port_by_remote_mac` | MAC is a first-class `MACAddress` object. |
 | **Secrets** (3) | `get_device_password_mapping_users`, `get_device_secret_versions`, `get_device_password_secret_names` | Returns secret **references** from `config_context`; no secret store. |
-| **IPAM / VRF** (4) | `get_device_vrfs`, `assign_vrf_to_device`, `assign_vrf_to_interface`, `get_namespace_route_distinguishers` | `assign_vrf_to_device` sets the VRF on **all** the device's interfaces. |
-| **Spectrum-X overlays** (5) | `get_spectrum_x_vrfs`, `provision_spectrum_x_vrf`, `delete_spectrum_x_vrf`, `delete_spectrum_x_overlay_if_unused`, `reconcile_spectrum_x_overlay_assignments` | One VRF per tenant (no NetBox Namespace); overlays live in the fabric plugin. |
-| **InfiniBand** (16) | `get_ib_switch_topology`, `get_ib_interface_guid(s)`, `set_ib_interface_guid`, `get_ib_interface_records`, `find_ib_interfaces_by_guids`, `ensure_ib_pkey_partition`, `ensure_orphan_ib_pkey`, `cleanup_ib_pkey_partition`, `ensure_ib_pkey_assignments`, `remove_ib_pkey_assignments`, `get_ib_pkey_assignments`, `sync_ib_pkey_assignments`, `canonicalize_ib_host`, `resolve_ib_host_site`, `resolve_ib_pkey_context` | PKeys/partitions are plugin models; hosts resolve by name or primary IPv4. |
+| **IPAM / VRF** (4) | `get_device_vrfs`, `assign_vrf_to_device`, `assign_vrf_to_interface`, `get_namespace_route_distinguishers` | `assign_vrf_to_device` / `remove_unmapped_device_vrfs` are no-ops: the ports stage is the association. The RD taken set is install-wide (see below). |
+| **Spectrum-X overlays** (5) | `get_spectrum_x_vrfs`, `provision_spectrum_x_vrf`, `delete_spectrum_x_vrf`, `delete_spectrum_x_overlay_if_unused`, `reconcile_spectrum_x_overlay_assignments` | One VRF per tenant (no NetBox Namespace); overlays live in the fabric plugin, scoped to a `dcim.Site`. A named tenant must exist. |
+| **InfiniBand** (16) | `get_ib_switch_topology`, `get_ib_interface_guid(s)`, `set_ib_interface_guid`, `get_ib_interface_records`, `find_ib_interfaces_by_guids`, `ensure_ib_pkey_partition`, `ensure_orphan_ib_pkey`, `cleanup_ib_pkey_partition`, `ensure_ib_pkey_assignments`, `remove_ib_pkey_assignments`, `get_ib_pkey_assignments`, `sync_ib_pkey_assignments`, `canonicalize_ib_host`, `resolve_ib_host_site`, `resolve_ib_pkey_context` | PKeys/partitions are plugin models; hosts resolve by name or primary IPv4; GUID lookups are case-insensitive (`cf_ib_guid__ie`). |
 
 Provider-lifecycle methods (outside `DCIMClient`): `validate_settings`,
 `create_client`, `normalize_event`, `register_render_event_handlers`.
@@ -41,9 +41,17 @@ NetBox-native concept rather than a 1:1 equivalent:
   (an isolated zone of unique IP space) is modeled as a **VRF**. A namespace
   *zone* is a set of VRFs sharing a `namespace_tag`; `list_namespace_tags` /
   `get_namespace_route_distinguishers` operate on that tag.
-- **`assign_vrf_to_device` → all interfaces.** NetBox has no device↔VRF link
-  (VRFs attach to interfaces/prefixes/IPs), so the VRF is set on every one of the
-  device's interfaces — which is exactly how `get_device_vrfs` reads them back.
+- **RDs and VNIs are unique install-wide.** A Nautobot namespace scopes RD/VNI
+  uniqueness; NetBox makes `ipam.VRF.rd` and the plugin's `VXLAN.vnid` unique
+  globally. `get_namespace_route_distinguishers` therefore lists the namespaces
+  at the requested site but reports, for each, the RDs of **every** VRF plus
+  `*:<vnid>` for every plugin VXLAN, so the allocator never hands back a value
+  another site already holds.
+- **No device↔VRF link.** VRFs attach to interfaces/prefixes/IPs, never to
+  devices, so `assign_vrf_to_device` and `remove_unmapped_device_vrfs` change
+  nothing; the ports stage assigns the selected interfaces and `get_device_vrfs`
+  reads the union of their VRFs back. Setting the VRF on every interface would
+  move other tenants' ports on a shared switch.
 - **Statuses** are per-model **choice fields**, not `Status` objects.
   `list_statuses` reads them from the endpoint's `OPTIONS` response
   (`actions.POST.status.choices`) and returns the status **value** (e.g.
@@ -69,9 +77,12 @@ NetBox-native concept rather than a 1:1 equivalent:
   intentionally excluded from selection (faithful to the reference).
 - **BGP via `netbox-bgp`, REST only.** The plugin exposes no GraphQL, so BGP is
   read over REST (`plugins/bgp/session/`); a session has no VRF association.
-- **"Site" is a NetBox Location name.** Overlay/Spectrum-X operations key on
-  `dcim.Location` (the `Overlay.location` FK); a NetBox *Site* name resolves only
-  if a Location of that name exists.
+- **"Site" is a NetBox Site.** An `Overlay` is anchored through its `scope`
+  generic FK, which points at a `dcim.Site` or a `dcim.Location`. Spectrum-X
+  overlays anchor on the Site (`list_locations` hands out Site pks; a Site name
+  or slug also resolves). InfiniBand partitions anchor on the host's Site, which
+  is what `resolve_ib_host_site` returns, or on a Location when
+  `ensure_ib_pkey_partition` is given one by name.
 - **Interface `role`** has no native NetBox field; it is read from the
   `nvcm_interface_role` custom field, which the render and DHCP paths both use to
   gate per-role behaviour (uplink/downlink templates, per-role DHCP options).

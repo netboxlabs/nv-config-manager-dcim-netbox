@@ -267,12 +267,15 @@ the Helm charts, images, operator pins and offline installer for both.
 On a machine with network access:
 
 ```bash
-make images
+make images            # PLATFORM=linux/amd64 when the target is x86_64
 export NVCM_REPO=../nv-config-manager
 make airgapped         # or: deploy/airgapped/create-airgapped.sh --version v0.1.0 --arch amd64
 ```
 
-Every argument is forwarded to NVCM's script, so its flags work unchanged.
+Every argument is forwarded to NVCM's script, so its flags work unchanged. One
+exception to their defaults: a bundle is built for one architecture, the build
+host's unless `--arch` says otherwise, because the two images this adds are built
+by `make images` one architecture at a time.
 
 On the target, upload the images and charts, then install NetBox **before**
 NVCM, since NetBox issues the API token:
@@ -285,6 +288,8 @@ cd nv-config-manager-netbox-airgapped-v0.1.0-amd64
   --chart-registry registry.example.com/nv-config-manager/charts \
   --username '<user>' --password-stdin
 
+# --registry-username/--registry-password-stdin, or --pull-secret NAME, when
+# the registry needs credentials to pull from.
 ./install-netbox.sh --registry registry.example.com/nv-config-manager
 
 ./installer/nv-config-manager-installer deploy install.yaml \

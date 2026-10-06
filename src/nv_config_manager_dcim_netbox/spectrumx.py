@@ -20,7 +20,13 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from nv_config_manager_dcim import DCIMConflictError, DCIMInvalidDataError, SpectrumXVRF
+from nv_config_manager_dcim import (
+    DCIMConflictError,
+    DCIMInvalidDataError,
+    DCIMLocationIdentifier,
+    SpectrumXVRF,
+    dcim_location_id,
+)
 
 from nv_config_manager_dcim_netbox._mappers import tag_names
 from nv_config_manager_dcim_netbox.fabric_common import (
@@ -74,7 +80,7 @@ class NetBoxSpectrumXMixin:
     """Spectrum-X VRF/overlay provisioning and reconciliation."""
 
     async def get_spectrum_x_vrfs(
-        self, overlay_name: str, site: str, namespace: str | None = None
+        self, overlay_name: str, site: DCIMLocationIdentifier, namespace: str | None = None
     ) -> list[SpectrumXVRF]:
         overlay = await self._find_overlay(overlay_name, site, scope_type=SITE_SCOPE_TYPE)
         if not overlay:
@@ -84,6 +90,10 @@ class NetBoxSpectrumXMixin:
         if not vrf_ids:
             return []
         data = await self.graphql_query(_SPECTRUMX_VRFS_QUERY, {"ids": vrf_ids})
+        # NVCM passes the Site pk; the workflow shows ``site`` to a person, so a
+        # VRF with no interface to derive it from reports the Site's name.
+        site_row = await self._resolve_scope(site, scope_type=SITE_SCOPE_TYPE)
+        site_name = (site_row or {}).get("name") or str(dcim_location_id(site))
         out: list[SpectrumXVRF] = []
         for vrf in data.get("vrf_list") or []:
             # Namespace is emulated as a VRF tag; derive it from the data (and
@@ -99,21 +109,23 @@ class NetBoxSpectrumXMixin:
                 if i.get("device")
             )
             # NetBox VRFs carry no location, so derive the site from an attached
-            # interface's device, falling back to the overlay's site.
+            # interface's device, falling back to the overlay's site name.
+            # ``SpectrumXVRF.site`` is a plain string in the SDK contract, so the
+            # fallback is the resolved name -- never the reference NVCM sent.
             vrf_site = next(
                 (
                     ((i.get("device") or {}).get("site") or {}).get("name")
                     for i in interface_rows
                     if ((i.get("device") or {}).get("site") or {}).get("name")
                 ),
-                site,
+                site_name,
             )
             out.append(
                 SpectrumXVRF(
                     vrf_id=str(vrf["id"]),
                     name=vrf["name"],
                     namespace=vrf_namespace,
-                    site=vrf_site or site,
+                    site=vrf_site,
                     route_distinguisher=vrf.get("rd") or "",
                     interfaces=interfaces,
                 )
@@ -126,10 +138,9 @@ class NetBoxSpectrumXMixin:
         route_distinguisher: str,
         vnid: int,
         overlay_name: str,
-        site: str,
+        site: DCIMLocationIdentifier,
         tenant: str,
     ) -> None:
-        tenant_id = await self._resolve_tenant_id(tenant)
         vrf_name = f"SpXTenant{vnid}"
         created_overlay_id: int | None = None
         # Track every object created across all namespaces for reverse-order rollback.
@@ -140,8 +151,11 @@ class NetBoxSpectrumXMixin:
         # overlay's scope and the VRFs' cf_nvcm_site.
         site_row = await self._resolve_scope(site, scope_type=SITE_SCOPE_TYPE)
         if site_row is None:
-            raise DCIMInvalidDataError(f"NetBox has no Site {site!r} for the Spectrum-X overlay")
+            raise DCIMInvalidDataError(
+                f"NetBox has no Site {dcim_location_id(site)!r} for the Spectrum-X overlay"
+            )
         site_pk = site_row["id"]
+        tenant_id = await self._resolve_tenant_id(tenant)
 
         overlay = await self._find_overlay(overlay_name, site, scope_type=SITE_SCOPE_TYPE)
         if overlay:
@@ -247,7 +261,9 @@ class NetBoxSpectrumXMixin:
                 await self._safe_delete(f"{self.ASSIGNMENTS_PATH}{assignment['id']}/")
         await self._safe_delete(f"{VRFS_PATH}{vrf_id}/")
 
-    async def delete_spectrum_x_overlay_if_unused(self, overlay_name: str, site: str) -> bool:
+    async def delete_spectrum_x_overlay_if_unused(
+        self, overlay_name: str, site: DCIMLocationIdentifier
+    ) -> bool:
         overlay = await self._find_overlay(overlay_name, site, scope_type=SITE_SCOPE_TYPE)
         if not overlay:
             return False
@@ -260,7 +276,7 @@ class NetBoxSpectrumXMixin:
     async def reconcile_spectrum_x_overlay_assignments(
         self,
         overlay_name: str | None,
-        site: str,
+        site: DCIMLocationIdentifier,
         device_id: str,
         interface_ids: list[str],
         device_interface_ids: list[str],
@@ -290,6 +306,8 @@ class NetBoxSpectrumXMixin:
         isolation_cache: dict[int, str | None] = {}
 
         # One query per object; the device and its interfaces are independent.
+        # ``assigned_object_id`` is a GFK id shared by devices, interfaces and
+        # VRFs, so every read below also matches on ``assigned_object_type``.
         selected = [str(i) for i in interface_ids]
         every = list(dict.fromkeys([*selected, *(str(i) for i in device_interface_ids)]))
         device_rows, *interface_rows = await asyncio.gather(
@@ -307,13 +325,23 @@ class NetBoxSpectrumXMixin:
                 await self._create_overlay_assignment(target_overlay_id, "dcim.device", device_id)
                 created += 1
             for interface_id in selected:
-                rows = by_interface.get(interface_id, [])
-                if not any(str(self._fk_id(r.get("overlay"))) == target_overlay_id for r in rows):
+                rows = by_interface.setdefault(interface_id, [])
+                if not any(
+                    str(self._fk_id(r.get("overlay"))) == target_overlay_id
+                    for r in rows
+                    if str(r.get("assigned_object_type")) == "dcim.interface"
+                ):
                     await self._create_overlay_assignment(
                         target_overlay_id, "dcim.interface", interface_id
                     )
                     created += 1
-                    rows.append({"id": "created", "overlay": target_overlay_id})
+                    rows.append(
+                        {
+                            "id": "created",
+                            "overlay": target_overlay_id,
+                            "assigned_object_type": "dcim.interface",
+                        }
+                    )
 
         # Selected ports leave every other Spectrum-X overlay. With no target
         # that is the whole operation.
@@ -339,7 +367,8 @@ class NetBoxSpectrumXMixin:
             str(overlay)
             for rows in by_interface.values()
             for row in rows
-            if (overlay := self._fk_id(row.get("overlay"))) is not None
+            if str(row.get("assigned_object_type")) == "dcim.interface"
+            and (overlay := self._fk_id(row.get("overlay"))) is not None
         }
         orphaned = []
         for row in device_rows:

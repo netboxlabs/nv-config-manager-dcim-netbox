@@ -4,15 +4,13 @@
 
 from __future__ import annotations
 
-import logging
-import re
+import asyncio
 
 from nv_config_manager_dcim import DCIMInvalidDataError, DCIMNotFoundError, ZTPDevice
 
 from nv_config_manager_dcim_netbox._mappers import require_device_name, strip_mask
 from nv_config_manager_dcim_netbox.fabric_common import INTENDED_PATH as _INTENDED_PATH
-
-logger = logging.getLogger(__name__)
+from nv_config_manager_dcim_netbox.fabric_common import STATUS_PATH as _STATUS_PATH
 
 # ``_INTENDED_PATH`` holds the per-device intended-config records written by the
 # render pipeline; each carries the config_store_instance the device's rendered
@@ -27,25 +25,6 @@ logger = logging.getLogger(__name__)
 # target NetBox to register that choice (see the plugin's field_choices.py); a
 # NetBox without it will reject the status write with a 400.
 ZTP_PROVISIONED_STATUS = "provisioned"
-
-# The config store's mTLS API is the same host as its UI with the leading `ui`
-# label swapped for `api-mtls`. Anchored on that label: an unanchored replace also
-# rewrites `ui` inside later labels, producing a host that does not resolve.
-_UI_LABEL_RE = re.compile(r"(?<=//)ui(?=\.)")
-_MTLS_LABEL = "api-mtls"
-
-
-def _mtls_endpoint(config_store_instance: str) -> str:
-    """Return the mTLS API endpoint for a config-store UI URL."""
-    endpoint, replaced = _UI_LABEL_RE.subn(_MTLS_LABEL, config_store_instance, count=1)
-    if not replaced:
-        logger.warning(
-            "config_store_instance %r has no leading 'ui' host label; ZTP will use it "
-            "unchanged, which may be the browser UI rather than the mTLS API",
-            config_store_instance,
-        )
-    return endpoint
-
 
 _ZTP_DEVICE_QUERY = """
 query ($id: ID!) {
@@ -66,10 +45,20 @@ class NetBoxZTPMixin:
     """Zero-touch-provisioning device reads and status writes."""
 
     async def get_ztp_device(self, device_id: str) -> ZTPDevice:
-        data = await self.graphql_query(_ZTP_DEVICE_QUERY, {"id": device_id})
+        # ZTP serves managed devices only: like the reference's
+        # ``config_manager_device`` lookup, a device with no DeviceConfigStatus
+        # record is "not found" here even though the device exists.
+        data, status, intended = await asyncio.gather(
+            self.graphql_query(_ZTP_DEVICE_QUERY, {"id": device_id}),
+            self.rest_list(_STATUS_PATH, [("device_id", str(device_id))]),
+            self.rest_list(_INTENDED_PATH, [("device_id", str(device_id))]),
+        )
         device = data.get("device")
-        if not device:
-            raise DCIMNotFoundError(f"NetBox device {device_id} not found")
+        if not device or not status:
+            raise DCIMNotFoundError(f"No managed NetBox device {device_id} for ZTP")
+        platform_name = (device.get("platform") or {}).get("name")
+        if not platform_name:
+            raise DCIMInvalidDataError(f"NetBox device {device_id} has no platform")
         try:
             addresses = sorted(
                 {
@@ -82,12 +71,9 @@ class NetBoxZTPMixin:
             config_context = device.get("config_context") or {}
             firmware = (config_context.get("intended-firmware") or {}).get("version")
             # The render pipeline records the config-store instance on the
-            # intended-config. ZTP's load_file requires it non-None, and uses it as
-            # the endpoint for external mTLS.
-            config_store_instance = None
-            intended = await self.rest_list(_INTENDED_PATH, [("device_id", str(device_id))])
-            if intended and intended[0].get("config_store_instance"):
-                config_store_instance = _mtls_endpoint(intended[0]["config_store_instance"])
+            # intended-config; passed through verbatim, as the reference does.
+            # ZTP's load_file only requires it non-None.
+            config_store_instance = intended[0].get("config_store_instance") if intended else None
             return ZTPDevice(
                 # Keys the config-store lookup for the boot-script/config files.
                 device_id=str(device["id"]),
@@ -96,7 +82,7 @@ class NetBoxZTPMixin:
                 # handler below does not catch.
                 name=require_device_name(device),
                 addresses=addresses,
-                platform_name=(device.get("platform") or {}).get("name") or "",
+                platform_name=platform_name,
                 firmware_version=firmware,
                 config_store_instance=config_store_instance,
             )

@@ -154,11 +154,15 @@ async def test_provisioned_vrf_is_visible_to_the_rd_allocator():
 
     async def rest_list(path, params=None, **kwargs):
         seen_params.extend(params or [])
+        if path != _VRFS:
+            return []
         site = dict(params or []).get("cf_nvcm_site")
+        if site is None:
+            return [written]  # the unfiltered, install-wide read
         # An object field filters through MultiValueNumberFilter, so NetBox coerces
         # the query param; compare as strings rather than str-vs-int.
         stored = written["custom_fields"]["nvcm_site"]
-        return [written] if site is not None and str(site) == str(stored) else []
+        return [written] if str(site) == str(stored) else []
 
     client.rest_list = rest_list
     result = await client.get_namespace_route_distinguishers("dm-akron", "spectrumx")
@@ -194,6 +198,35 @@ async def test_provision_rolls_back_created_objects_on_failure():
     assert f"{_VRFS}42/" in deletes
     assert f"{_ASSIGN}42/" in deletes
     assert f"{_OVERLAYS}42/" in deletes
+
+
+async def test_provision_raises_when_the_tenant_is_unknown():
+    """The reference raises "Tenant 'X' not found in DCIM"; provisioning with the
+    tenant silently nulled left the overlay and VRF unowned."""
+    record = []
+
+    async def no_overlay(name, scope=None, *, scope_type=None):
+        return None
+
+    async def resolve_scope(value, *, scope_type):
+        return {"id": SITE_PK, "name": "SPO01", "slug": "spo01"}
+
+    # ``_resolve_tenant_id`` is the real one; the tenants read returns nothing.
+    client = fake_client(
+        record=record,
+        rest_list={"tenancy/tenants/": []},
+        patch={"_find_overlay": no_overlay, "_resolve_scope": resolve_scope},
+    )
+    with pytest.raises(DCIMInvalidDataError, match="Tenant 'ghost' not found"):
+        await client.provision_spectrum_x_vrf(
+            namespaces=["ns1"],
+            route_distinguisher="65001:1",
+            vnid=1500,
+            overlay_name="SpX",
+            site="rack-1",
+            tenant="ghost",
+        )
+    assert not [m for m, _, _ in record if m == "POST"]
 
 
 # -- Fix 2: namespace/site derivation ------------------------------------------

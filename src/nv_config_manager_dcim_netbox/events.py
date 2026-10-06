@@ -16,7 +16,13 @@ import logging
 from functools import partial
 from typing import TYPE_CHECKING
 
-from nv_config_manager_dcim import RenderEventRequest
+import aiohttp
+from nv_config_manager_dcim import (
+    DCIMConnectivityError,
+    DCIMError,
+    DCIMInvalidDataError,
+    RenderEventRequest,
+)
 
 from nv_config_manager_dcim_netbox._mappers import fk_id as _fk_id
 from nv_config_manager_dcim_netbox.client import is_netbox_pk
@@ -31,6 +37,42 @@ if TYPE_CHECKING:
     from nv_config_manager_dcim import DCIMChangeEvent, DCIMClient, DCIMRenderEventRegistry
 
 logger = logging.getLogger(__name__)
+
+
+class NetBoxUnavailableError(Exception):
+    """NetBox could not be reached; deliberately *not* a DCIMError so the render
+    consumer naks the message for redelivery instead of acknowledging it."""
+
+
+# Failures that a retry can fix. ``client`` maps aiohttp/timeouts to
+# DCIMConnectivityError already; the raw forms are listed in case one escapes.
+_TRANSIENT_ERRORS = (DCIMConnectivityError, TimeoutError, aiohttp.ClientConnectionError)
+
+
+async def _resolve(event: DCIMChangeEvent, what: str, awaitable):
+    """Await a NetBox lookup for ``event``, classifying its failures.
+
+    A transient failure (NetBox down, 5xx, timeout) is re-raised as
+    ``NetBoxUnavailableError``: the dispatcher swallows every DCIMError as a
+    processed-and-failed event, and only a non-DCIM exception makes the consumer
+    nak so the change is redelivered once NetBox is back. Any other DCIMError
+    (400, GraphQL errors, not found) is deterministic and propagates as-is;
+    anything else is wrapped in DCIMInvalidDataError rather than left to escape,
+    which would redeliver a deterministic failure forever.
+    """
+    try:
+        return await awaitable
+    except _TRANSIENT_ERRORS as exc:
+        raise NetBoxUnavailableError(
+            f"NetBox unavailable while resolving {what} for {event.object_type} "
+            f"{event.object_id}: {exc}"
+        ) from exc
+    except DCIMError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - external client
+        raise DCIMInvalidDataError(
+            f"Render fan-out failed for {event.object_type} {event.object_id}: {exc}"
+        ) from exc
 
 
 def _commit_message(event: DCIMChangeEvent) -> str:
@@ -89,6 +131,16 @@ _interface_changed = _parent_device_changed
 _bgp_session_changed = _parent_device_changed
 
 
+async def _interface_device_id(event: DCIMChangeEvent, client: DCIMClient, interface_id):
+    """Device id of a NetBox interface, looked up by pk."""
+    interface = await _resolve(
+        event,
+        f"interface {interface_id}",
+        client.rest_request("GET", f"dcim/interfaces/{interface_id}/"),
+    )
+    return _fk_id((interface or {}).get("device"))
+
+
 async def _overlay_assignment_changed(event: DCIMChangeEvent, client: DCIMClient):
     record = event.record or {}
     assigned_type = record.get("assigned_object_type")
@@ -98,21 +150,49 @@ async def _overlay_assignment_changed(event: DCIMChangeEvent, client: DCIMClient
     if assigned_type == "dcim.device":
         return _requests(event, assigned_id)
     if assigned_type == "dcim.interface":
-        try:
-            interface = await client.rest_request("GET", f"dcim/interfaces/{assigned_id}/")
-        except Exception:  # noqa: BLE001 - fan-out resolution is best-effort
-            logger.exception("Failed to resolve interface %s for render fan-out", assigned_id)
-            return ()
-        device = (interface or {}).get("device") or {}
-        return _requests(event, device.get("id") if isinstance(device, dict) else device)
+        return _requests(event, await _interface_device_id(event, client, assigned_id))
     return ()
+
+
+async def _mac_address_changed(event: DCIMChangeEvent, client: DCIMClient):
+    """Fan out a ``dcim.macaddress`` change (NetBox 4.2+) to the interface's device.
+
+    The record carries the GFK (``assigned_object_type`` / ``assigned_object_id``,
+    with the assigned interface's brief ``device`` under ``assigned_object``). A
+    record without it is fetched -- except on delete, where the row is gone and
+    the pre-delete snapshot is all there is.
+    """
+    record = event.record or {}
+    if "assigned_object_type" not in record and event.operation != "delete":
+        record = (
+            await _resolve(
+                event,
+                "MAC address",
+                client.rest_request("GET", f"dcim/mac-addresses/{event.object_id}/"),
+            )
+            or {}
+        )
+    if record.get("assigned_object_type") != "dcim.interface":
+        return ()
+    assigned_id = record.get("assigned_object_id")
+    if not assigned_id:
+        return ()
+    device_id = _fk_id((record.get("assigned_object") or {}).get("device"))
+    if device_id is None:
+        # The interface outlives the MAC on delete, so this is safe on every path.
+        device_id = await _interface_device_id(event, client, assigned_id)
+    return _requests(event, device_id)
 
 
 # -- cross-object fan-out --------------------------------------------------------
 # The changed object is not a device, so the affected devices are resolved with a
-# NetBox query. Skipped on delete, and best-effort: a failed resolution logs and
-# drops rather than stalling the dispatcher. The render-enabled gate is applied
-# downstream, so these return candidates unfiltered.
+# NetBox query. On delete the object cannot be read back, so a handler resolves
+# from the pre-delete event record or skips the event. Delete is skipped where
+# NetBox re-saves the related objects itself (handle_deleted_object): VLAN/VRF
+# delete emits dcim.interface updates, peer-group delete emits bgpsession updates,
+# which fan out on their own. Cable, IP and prefix delete leave no such trace
+# (verified on 4.7.0, tests/live), so they resolve from the record. The
+# render-enabled gate is applied downstream, so these return candidates unfiltered.
 
 # ConfigContext scope dimension -> device-list filter. AND across dimensions, OR
 # within one -- exactly how NetBox evaluates ConfigContext applicability.
@@ -139,14 +219,25 @@ _PREFIX_SCOPE_FILTERS = {
 }
 
 
-async def _cross(event: DCIMChangeEvent, client: DCIMClient, resolver):
+async def _cross(event: DCIMChangeEvent, client: DCIMClient, resolver, on_delete=None):
+    """Resolve the devices a non-device change affects, and fail loudly if it cannot.
+
+    A failed resolution is *not* swallowed. The dispatcher counts a handler that
+    returns normally as a processed event and acknowledges it, so catching here
+    would file a lost render under EVENT_PROCESSED_COUNTER -- the change is gone
+    and the failure metric says nothing happened. A deterministic failure raises
+    a DCIMError (EVENT_FAILED_COUNTER, acked), as the reference provider does; a
+    transient one raises NetBoxUnavailableError so the message is redelivered.
+    See ``_resolve``.
+
+    ``on_delete`` resolves a delete from the pre-delete event record; without one
+    the delete is skipped, as the object can no longer be read back.
+    """
     if event.operation == "delete":
-        return ()
-    try:
-        device_ids = await resolver(event, client)
-    except Exception:  # noqa: BLE001 - fan-out resolution is best-effort
-        logger.exception("Render fan-out failed for %s %s", event.object_type, event.object_id)
-        return ()
+        if on_delete is None:
+            return ()
+        resolver = on_delete
+    device_ids = await _resolve(event, "affected devices", resolver(event, client))
     return _requests_multi(event, device_ids)
 
 
@@ -155,20 +246,45 @@ async def _vrf_devices(event, client):
     return {_fk_id(i.get("device")) for i in interfaces}
 
 
-async def _ip_address_devices(event, client):
-    ip = await client.rest_request("GET", f"ipam/ip-addresses/{event.object_id}/")
+async def _vlan_devices(event, client):
+    # ``vlan_id`` is the VLAN PK; ``vlan`` would match by VID, which is not unique.
+    interfaces = await client.rest_list(INTERFACES_PATH, [("vlan_id", str(event.object_id))])
+    return {_fk_id(i.get("device")) for i in interfaces}
+
+
+def _ip_interface_device(ip):
     if not ip or ip.get("assigned_object_type") != "dcim.interface":
         return ()
     return {_fk_id((ip.get("assigned_object") or {}).get("device"))}
 
 
-async def _cable_devices(event, client):
-    cable = await client.rest_request("GET", f"dcim/cables/{event.object_id}/")
+async def _ip_address_devices(event, client):
+    return _ip_interface_device(
+        await client.rest_request("GET", f"ipam/ip-addresses/{event.object_id}/")
+    )
+
+
+async def _ip_address_deleted(event, client):
+    return _ip_interface_device(event.record)
+
+
+def _cable_termination_devices(cable):
     device_ids = set()
     for side in ("a_terminations", "b_terminations"):
         for termination in (cable or {}).get(side) or []:
             device_ids.add(_fk_id((termination.get("object") or {}).get("device")))
     return device_ids
+
+
+async def _cable_devices(event, client):
+    return _cable_termination_devices(
+        await client.rest_request("GET", f"dcim/cables/{event.object_id}/")
+    )
+
+
+async def _cable_deleted(event, client):
+    # 4.7.0 emits no interface update on cable delete; resolve from the record.
+    return _cable_termination_devices(event.record)
 
 
 async def _cable_changed(event: DCIMChangeEvent, client: DCIMClient):
@@ -179,17 +295,26 @@ async def _cable_changed(event: DCIMChangeEvent, client: DCIMClient):
         and set(event.changed_fields) <= {"custom_fields.validation_status"}
     ):
         return ()
-    return await _cross(event, client, _cable_devices)
+    return await _cross(event, client, _cable_devices, on_delete=_cable_deleted)
 
 
-async def _prefix_devices(event, client):
-    prefix = await client.rest_request("GET", f"ipam/prefixes/{event.object_id}/")
+async def _prefix_scope_devices(prefix, client):
     param = _PREFIX_SCOPE_FILTERS.get((prefix or {}).get("scope_type"))
     scope_id = (prefix or {}).get("scope_id")
     if not param or not scope_id:
         return ()
     devices = await client.rest_list(DEVICES_PATH, [(param, str(scope_id))])
     return {device.get("id") for device in devices}
+
+
+async def _prefix_devices(event, client):
+    return await _prefix_scope_devices(
+        await client.rest_request("GET", f"ipam/prefixes/{event.object_id}/"), client
+    )
+
+
+async def _prefix_deleted(event, client):
+    return await _prefix_scope_devices(event.record, client)
 
 
 async def _bgp_asn_devices(event, client):
@@ -226,14 +351,44 @@ async def _bgp_peer_group_devices(event, client):
     return {_fk_id(session.get("device")) for session in sessions}
 
 
-async def _config_context_devices(event, client):
-    context = await client.rest_request("GET", f"extras/config-contexts/{event.object_id}/")
+def _config_context_filters(context: dict) -> list[tuple[str, str]]:
     filters = []
     for field, param in _CONFIG_CONTEXT_FILTERS.items():
-        for item in (context or {}).get(field) or []:
+        for item in context.get(field) or []:
+            if not isinstance(item, dict):
+                continue
             value = item.get("slug") if param == "tag" else item.get("id")
             if value is not None:
                 filters.append((param, str(value)))
+    return filters
+
+
+async def _config_context_changed(event: DCIMChangeEvent, client: DCIMClient):
+    """Fan out an ``extras.configcontext`` change to every device in its scope.
+
+    Not routed through ``_cross``: the scope lives on the event record (the
+    plugin serializes the context itself, and on delete that is the pre-delete
+    snapshot), so a deleted context can still re-render the devices it applied
+    to -- as the reference provider does. The record is read back from NetBox
+    only when it carries no scope at all and the context still exists.
+    """
+    record = event.record or {}
+    context = record if any(field in record for field in _CONFIG_CONTEXT_FILTERS) else None
+    if context is None:
+        if event.operation == "delete":
+            raise DCIMInvalidDataError(
+                f"Config context {event.object_id} delete event carries no scope; "
+                "cannot resolve the devices it applied to"
+            )
+        context = (
+            await _resolve(
+                event,
+                "config context",
+                client.rest_request("GET", f"extras/config-contexts/{event.object_id}/"),
+            )
+            or {}
+        )
+    filters = _config_context_filters(context)
     if not filters:
         # A context with no scope assignments genuinely applies to every device, so
         # this correctly fans out fleet-wide -- but that is an unbounded render
@@ -242,17 +397,17 @@ async def _config_context_devices(event, client):
             "Config context %s has no scope assignments; fanning out to every device",
             event.object_id,
         )
-    devices = await client.rest_list(DEVICES_PATH, filters)
-    return {device.get("id") for device in devices}
+    devices = await _resolve(event, "scoped devices", client.rest_list(DEVICES_PATH, filters))
+    return _requests_multi(event, (device.get("id") for device in devices))
 
 
-def _cross_handler(resolver):
-    """Bind a cross-object resolver into a handler.
+def _cross_handler(resolver, on_delete=None):
+    """Bind a cross-object resolver (and optional delete resolver) into a handler.
 
     One _HANDLERS entry per object type instead of an entry plus a wrapper, so a
     wrapper naming the wrong resolver cannot silently fan out to the wrong devices.
     """
-    return partial(_cross, resolver=resolver)
+    return partial(_cross, resolver=resolver, on_delete=on_delete)
 
 
 # object_type -> handler. Mirrors the reference DCIM provider's coverage,
@@ -263,11 +418,19 @@ _HANDLERS = {
     "dcim.interface": _parent_device_changed,
     "dcim.rearport": _parent_device_changed,
     "dcim.frontport": _parent_device_changed,
+    # NetBox 4.2+ holds MACs on a MACAddress row, so editing one is not an
+    # interface change; it fans out to the assigned interface's device.
+    "dcim.macaddress": _mac_address_changed,
+    # A deleted cable / VRF / VLAN re-saves the interfaces that carried it, so the
+    # devices re-render from those dcim.interface updates -- see the section comment.
+    # Cable delete emits no interface update on 4.7.0; resolve from the record.
+    # A validation_status-only cable update is skipped (see _cable_changed).
     "dcim.cable": _cable_changed,
-    "extras.configcontext": _cross_handler(_config_context_devices),
+    "extras.configcontext": _config_context_changed,
     "ipam.vrf": _cross_handler(_vrf_devices),
-    "ipam.prefix": _cross_handler(_prefix_devices),
-    "ipam.ipaddress": _cross_handler(_ip_address_devices),
+    "ipam.vlan": _cross_handler(_vlan_devices),
+    "ipam.prefix": _cross_handler(_prefix_devices, on_delete=_prefix_deleted),
+    "ipam.ipaddress": _cross_handler(_ip_address_devices, on_delete=_ip_address_deleted),
     # A netbox-bgp session carries only a single ``device`` FK (the local peer);
     # it has no FK to the remote peer's device -- unlike the reference provider's
     # two-ended peering -- so editing a session re-renders the local device only.
@@ -276,6 +439,11 @@ _HANDLERS = {
     # ipam.asn (referenced by session local_as/remote_as); a peer group is
     # netbox_bgp.bgppeergroup. Mirrors the reference provider's ASN / peer-group
     # fan-out.
+    # An ASN referenced by a session cannot be deleted (netbox-bgp PROTECTs
+    # local_as/remote_as). One referenced only through the device ASN custom
+    # field can be -- an object custom field holds a bare pk -- and leaves no
+    # event naming the device; that gap is not closed here. A deleted peer group
+    # re-saves its sessions (SET_NULL), which arrive as bgpsession updates.
     "ipam.asn": _cross_handler(_bgp_asn_devices),
     "netbox_bgp.bgppeergroup": _cross_handler(_bgp_peer_group_devices),
     "netbox_nv_config_manager.overlayassignment": _overlay_assignment_changed,
