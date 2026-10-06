@@ -287,6 +287,17 @@ async def _cable_deleted(event, client):
     return _cable_termination_devices(event.record)
 
 
+async def _cable_changed(event: DCIMChangeEvent, client: DCIMClient):
+    """Avoid rendering when validation only changes its cable custom field."""
+    if (
+        event.operation == "update"
+        and event.changed_fields
+        and set(event.changed_fields) <= {"custom_fields.validation_status"}
+    ):
+        return ()
+    return await _cross(event, client, _cable_devices, on_delete=_cable_deleted)
+
+
 async def _prefix_scope_devices(prefix, client):
     param = _PREFIX_SCOPE_FILTERS.get((prefix or {}).get("scope_type"))
     scope_id = (prefix or {}).get("scope_id")
@@ -413,7 +424,8 @@ _HANDLERS = {
     # A deleted cable / VRF / VLAN re-saves the interfaces that carried it, so the
     # devices re-render from those dcim.interface updates -- see the section comment.
     # Cable delete emits no interface update on 4.7.0; resolve from the record.
-    "dcim.cable": _cross_handler(_cable_devices, on_delete=_cable_deleted),
+    # A validation_status-only cable update is skipped (see _cable_changed).
+    "dcim.cable": _cable_changed,
     "extras.configcontext": _config_context_changed,
     "ipam.vrf": _cross_handler(_vrf_devices),
     "ipam.vlan": _cross_handler(_vlan_devices),
