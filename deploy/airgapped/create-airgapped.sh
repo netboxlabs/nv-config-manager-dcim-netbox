@@ -201,9 +201,10 @@ with, so NVCM cannot come up correctly before it exists.
 That prints the API token. Put it in `install.yaml` under
 `secrets.k8s.dcim.values.token`, then deploy NVCM as described above.
 
-`install.yaml` must also keep `dcim.provider: netbox`, `services.nautobot: false`
-and a `dcim.provider_packages` entry pointing at the provider wheelhouse image
-in this bundle. Without that entry NVCM never installs the provider.
+`install.yaml` must also keep `dcim.provider: netbox`, `dcim.local: false`,
+`dcim.server: http://netbox` and a `dcim.provider_packages` entry pointing at
+the provider wheelhouse image in this bundle. Without that entry NVCM never
+installs the provider.
 BUNDLE_README
 
     log "Repacking"

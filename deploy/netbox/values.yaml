@@ -1,8 +1,9 @@
 # NetBox as NVCM's DCIM provider.
 #
-# Normally driven by `nvcm-netbox up`, which fills in the generated values
-# (API token, NATS password). It is a plain chart, so `helm install` works too --
-# see docs/deployment.md for the manual sequence.
+# Normally driven by the `netbox` installer provider inside
+# `nv-config-manager-installer deploy`, which fills in the generated values (API
+# token, NATS password, stream, hostnames). It is a plain chart, so `helm
+# install` works too; see docs/deployment.md for the manual sequence.
 
 # --- our settings ------------------------------------------------------------
 nvcm:
@@ -16,10 +17,10 @@ nvcm:
   # empty the publisher stays in `log` mode rather than failing, which is what
   # lets NetBox be installed standalone.
   #
-  # `nvcm-netbox up` sets it on the FIRST install: it either reads an
-  # already-deployed NATS secret or mints the value it will hand NVCM in the
-  # install config, so the release never has to be upgraded just to switch the
-  # publisher on. The cost is that NetBox is pointed at nv-config-manager-nats
+  # The installer provider sets it on the FIRST install, from the same secret
+  # state NVCM's own NATS Secrets are created from, so the release never has to
+  # be upgraded just to switch the publisher on. The cost is that NetBox is
+  # pointed at nv-config-manager-nats
   # before that Service exists; the publisher connects synchronously when it
   # publishes, so a UI/API write during the NVCM deploy blocks on connection
   # retries before it logs. `nvcm_init` and the topology load both suppress
@@ -46,9 +47,9 @@ nvcm:
   # plain status text rather than links to nowhere, which is what lets NetBox
   # be installed standalone.
   #
-  # `nvcm-netbox up` derives it from the install config's cluster hostname --
-  # the same value NVCM's own chart renders its gateway routes from. Set it
-  # yourself if you are driving helm directly.
+  # The installer provider derives it from the install config's cluster
+  # hostname, the same value NVCM's own chart renders its gateway routes from.
+  # Set it yourself if you are driving helm directly.
   workflowUrl: ""
 
   # Browser access through NVCM's Gateway, so NetBox is reachable the same way

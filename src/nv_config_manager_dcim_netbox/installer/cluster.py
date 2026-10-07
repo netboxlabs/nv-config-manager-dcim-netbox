@@ -586,14 +586,14 @@ def publish_test_event(
 def dcim_consumer_logs(namespace: str, since: str = "60s", runner: Runner | None = None) -> str:
     """Return recent DCIM render-consumer logs.
 
-    The upstream label is `consumer-nautobot`; the container it
-    selects runs NATS_CONSUMER=dcim and is the DCIM consumer.
+    The Deployment is labelled `consumer-dcim` in current NVCM charts and
+    `consumer-nautobot` in older ones; both run the DCIM consumer.
     """
     try:
         return kubectl(
             "logs",
             "-l",
-            "component=consumer-nautobot",
+            "component in (consumer-dcim,consumer-nautobot)",
             "-c",
             "consumer",
             f"--since={since}",

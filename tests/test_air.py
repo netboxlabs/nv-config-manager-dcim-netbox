@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NetBox Labs. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""DSX Air path: config, the install-config patch, and the bring-up sequence.
+"""DSX Air path: the provider hooks, the sim settings and the bring-up sequence.
 
 No simulation and no cluster. The parts that need one are covered by the
 end-to-end steps in docs/air-sim.md.
@@ -8,9 +8,6 @@ end-to-end steps in docs/air-sim.md.
 
 from __future__ import annotations
 
-import builtins
-import importlib
-import sys
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -19,194 +16,141 @@ import yaml
 from click.testing import CliRunner
 
 from nv_config_manager_dcim_netbox.installer import cluster
-from nv_config_manager_dcim_netbox.installer import config as base_config
-from nv_config_manager_dcim_netbox.installer.air import AirSupportUnavailable
 from nv_config_manager_dcim_netbox.installer.tokens import generate_api_token, is_valid_api_token
 
 pytestmark = pytest.mark.air
 
-# Everything below the config patch needs nv-config-manager-installer, which
-# comes from an NVCM checkout rather than an index (see `make setup-air`).
-# exc_type is required: the modules exist, so importing one without the extra raises
-# AirSupportUnavailable, not the ModuleNotFoundError importorskip defaults to.
-air_config = pytest.importorskip(
-    "nv_config_manager_dcim_netbox.installer.air.config",
-    reason="the `air` extra is not installed",
-    exc_type=ImportError,
+# Everything here needs nv-config-manager-installer, which comes from an NVCM
+# checkout rather than an index (see `make setup`).
+pytest.importorskip("nv_config_manager_installer", reason="the `installer` extra is not installed")
+
+from nv_config_manager_installer.air_sim.installer_config import (  # noqa: E402
+    build_template_plugins,
+    generate_air_sim_install_config,
 )
-air_callback = pytest.importorskip(
-    "nv_config_manager_dcim_netbox.installer.air.callback",
-    reason="the `air` extra is not installed",
-    exc_type=ImportError,
+from nv_config_manager_installer.air_sim.orchestrator import SimOrchestrator  # noqa: E402
+from nv_config_manager_installer.air_sim.sim_config import SimConfig  # noqa: E402
+
+from nv_config_manager_dcim_netbox.installer import air_hooks  # noqa: E402
+from nv_config_manager_dcim_netbox.installer.air import callback as air_callback  # noqa: E402
+from nv_config_manager_dcim_netbox.installer.air import cli as air_cli  # noqa: E402
+from nv_config_manager_dcim_netbox.installer.air import images as air_images  # noqa: E402
+from nv_config_manager_dcim_netbox.installer.settings import (  # noqa: E402
+    NetBoxAirSettings,
+    NetBoxInstallerSettings,
 )
-air_images = pytest.importorskip(
-    "nv_config_manager_dcim_netbox.installer.air.images",
-    reason="the `air` extra is not installed",
-    exc_type=ImportError,
-)
-air_cli = pytest.importorskip(
-    "nv_config_manager_dcim_netbox.installer.air.cli",
-    reason="the `air` extra is not installed",
-    exc_type=ImportError,
-)
-air_installer_config = pytest.importorskip(
-    "nv_config_manager_installer.air_sim.installer_config",
-    reason="the `air` extra is not installed",
-    exc_type=ImportError,
-)
-air_orchestrator = pytest.importorskip(
-    "nv_config_manager_installer.air_sim.orchestrator",
-    reason="the `air` extra is not installed",
-    exc_type=ImportError,
-)
-air_tui = pytest.importorskip(
-    "nv_config_manager_dcim_netbox.installer.air.tui",
-    reason="the `air` extra is not installed",
-    exc_type=ImportError,
-)
-netbox_air_orchestrator = pytest.importorskip(
-    "nv_config_manager_dcim_netbox.installer.air.orchestrator",
-    reason="the `air` extra is not installed",
-    exc_type=ImportError,
-)
-NetBoxSimConfig = air_config.NetBoxSimConfig
+
 NetBoxAirCallback = air_callback.NetBoxAirCallback
 BRING_UP_MARKER = air_callback.BRING_UP_MARKER
-build_content_jobs = air_installer_config.build_content_jobs
-build_template_plugins = air_installer_config.build_template_plugins
-SimOrchestrator = air_orchestrator.SimOrchestrator
-NetBoxSimOrchestrator = netbox_air_orchestrator.NetBoxSimOrchestrator
-NetBoxAirSimApp = air_tui.NetBoxAirSimApp
-NetBoxAirSimulationManager = air_tui.NetBoxAirSimulationManager
-NetBoxLaunchScreen = air_tui.NetBoxLaunchScreen
-NetBoxPopulationPanel = air_tui.NetBoxPopulationPanel
-NetBoxTopologyScreen = air_tui.NetBoxTopologyScreen
+
+
+def _sim(**kwargs) -> SimConfig:
+    kwargs.setdefault("dcim_provider", "netbox")
+    return SimConfig(**kwargs)
 
 
 # -- independent fabric generation and DCIM population ------------------------
 
 
-def test_blueprint_still_builds_the_fabric_and_templates_without_the_dcim_job():
-    """NetBox uses the blueprint without registering Nautobot's population job."""
-    cfg = NetBoxSimConfig(mock_blueprint="air_trial", deployment_name="demo")
+def test_blueprint_still_builds_the_fabric_without_the_nautobot_job():
+    """NetBox loads the blueprint itself; the generated install config carries
+    no Nautobot population job."""
+    cfg = _sim(mock_blueprint="air_trial", deployment_name="demo")
 
     # 1. The sim still gets a fabric to boot.
-    topology_path = SimOrchestrator(cfg, _Recorder())._resolve_topology_path(cfg)
+    topology_path = SimOrchestrator(cfg, Mock())._resolve_topology_path(cfg)
     design = yaml.safe_load(Path(topology_path).read_text())
     assert design["devices"], "the generated site design has no devices"
 
-    # 2. The job that would load it into a DCIM we do not deploy is gone.
-    jobs, run_after_deploy = build_content_jobs(cfg)
-    assert not jobs and not run_after_deploy
+    # 2. The job that would load it into a DCIM we do not deploy is not written.
+    generated = generate_air_sim_install_config(
+        cfg, "air-trial", ["192.0.2.0/24"], air_hooks.NetBoxAirHooks()
+    )
+    assert generated["dcim"]["provider"] == "netbox"
+    assert generated["dcim"]["local"] is True
+    assert "jobs" not in generated["dcim"].get("settings", {})
+    assert "nautobot" not in generated["services"]
 
     # 3. The templates that render the demo fabric survive.
     assert any("superpod-template-plugin" in e["path"] for e in build_template_plugins(cfg))
 
 
-def test_an_explicit_topology_is_not_overwritten():
-    cfg = NetBoxSimConfig(
-        mock_blueprint="air_trial", deployment_name="demo", topology_path="/my/topology.yaml"
-    )
-    assert SimOrchestrator(cfg, _Recorder())._resolve_topology_path(cfg) == "/my/topology.yaml"
+# -- sim settings -------------------------------------------------------------
 
 
-# -- config -------------------------------------------------------------------
+def test_air_settings_default_to_the_demo_login_and_the_package_images():
+    settings = NetBoxAirSettings()
+    assert settings.superuser_name == "demo"
+    assert settings.superuser_password == "demo"
+    assert settings.token == ""
+    assert settings.load_blueprint is True
+    assert settings.netbox_image == NetBoxInstallerSettings().netbox_image
+    assert settings.netbox_hostname("nvcm.air") == "netbox.nvcm.air"
 
 
-def test_sim_clones_the_branch_this_provider_is_built_against():
-    # cloud-init clones this ref onto the sim box. It tracks NVCM_BRANCH so a
-    # move off the default branch reaches the sim as well as local checkouts.
-    assert NetBoxSimConfig().config_manager_ref == base_config.NVCM_BRANCH
-
-
-def test_extra_keys_survive_from_yaml(tmp_path):
-    # SimConfig.from_yaml filters on dataclasses.fields(cls), so the subclass's
-    # fields load only because it resolves through cls.
+def test_air_settings_load_from_dcim_settings(tmp_path):
     path = tmp_path / "sim.yaml"
     path.write_text(
         yaml.safe_dump(
             {
                 "mock_blueprint": "air_trial",
-                "dcim_server": "http://netbox",
-                "netbox_image_tag": "9.9.9",
-                "load_blueprint": False,
+                "dcim_provider": "netbox",
+                "dcim_settings": {"image_tag": "9.9.9", "load_blueprint": False},
             }
         )
     )
-    cfg = NetBoxSimConfig.from_yaml(path)
-    assert cfg.mock_blueprint == "air_trial"
-    assert cfg.dcim_server == "http://netbox"
-    assert cfg.netbox_image_tag == "9.9.9"
-    assert cfg.load_blueprint is False
+    cfg = SimConfig.from_yaml(path)
+    settings = air_hooks.air_settings(cfg)
+    assert settings.image_tag == "9.9.9"
+    assert settings.load_blueprint is False
+    assert air_hooks.NetBoxAirHooks().validate_config(cfg) == ""
+
+
+def test_unknown_dcim_settings_are_a_launch_error():
+    cfg = _sim(dcim_settings={"netbox_image": "x"})
+    assert "dcim_settings is invalid" in air_hooks.NetBoxAirHooks().validate_config(cfg)
+
+
+def test_install_settings_point_the_box_at_the_uploaded_chart():
+    """The install config NVCM uploads runs this provider's pre-Helm hook on the
+    box, where the chart is wherever the bring-up unpacked it."""
+    cfg = _sim(dcim_settings={"image_tag": "9.9.9", "token": "nbt_secret.x"})
+    settings = air_hooks.NetBoxAirHooks().install_settings(cfg)
+
+    assert settings["chart"] == f"{air_callback.REMOTE_CHART_DIR}/netbox"
+    assert settings["image_tag"] == "9.9.9"
+    # Demo login survives even though it is the AIR default.
+    assert settings["superuser_name"] == "demo"
+    assert settings["superuser_password"] == "demo"
+    # The token is a secret, not a setting.
+    assert "token" not in settings
+    NetBoxInstallerSettings.model_validate(settings)
 
 
 def test_blueprint_dir_points_into_the_clone_on_the_box():
-    cfg = NetBoxSimConfig(mock_blueprint="air_trial")
-    assert cfg.blueprint_dir("/home/nvcm/nv-config-manager").endswith(
+    assert air_callback.blueprint_dir(_sim(mock_blueprint="air_trial")).endswith(
         "/development/mock_topology/context/air_trial"
     )
 
 
-def test_air_dcim_ui_url_uses_the_tunneled_netbox_route():
-    assert NetBoxSimConfig().dcim_ui_url() == "https://netbox.nvcm.air"
-    assert (
-        NetBoxSimConfig(dcim_public_url="https://netbox.example.com").dcim_ui_url()
-        == "https://netbox.example.com"
-    )
+# -- hooks ---------------------------------------------------------------------
 
 
-# -- the install-config patch --------------------------------------------------
+class _FakeDeployment:
+    instances: list = []
 
-
-def _generated_config() -> dict:
-    """The shape NVCM's own generator emits: no DCIM block, bundled DCIM on."""
-    return {
-        "version": "1",
-        "cluster": {"namespace": "nv-config-manager", "size": "medium"},
-        "services": {"render": True, "nautobot": True},
-        "sites": [{"name": "air-trial"}],
-    }
-
-
-def test_apply_dcim_selects_netbox():
-    token = generate_api_token()
-    patched = base_config.apply_dcim(
-        _generated_config(),
-        base_config.ConfigOptions(
-            api_token=token,
-            provider_image="reg.example/provider:1.2",
-            netbox_server="http://netbox",
-            netbox_public_url="http://netbox",
-        ),
-    )
-    assert patched["dcim"]["provider"] == base_config.PROVIDER_NAME
-    assert patched["dcim"]["server"] == "http://netbox"
-    # Without this block the provider is never installed into NVCM's pods.
-    assert patched["dcim"]["provider_packages"][0]["image"] == "reg.example/provider:1.2"
-    assert patched["secrets"]["k8s"]["dcim"]["values"]["token"] == token
-    assert patched["services"]["nautobot"] is False
-
-
-def test_apply_dcim_leaves_the_generators_own_fields_alone():
-    # cluster.* is theirs on the Air path; only the kind path sets it.
-    patched = base_config.apply_dcim(
-        _generated_config(), base_config.ConfigOptions(api_token=generate_api_token())
-    )
-    assert patched["cluster"] == {"namespace": "nv-config-manager", "size": "medium"}
-    assert patched["sites"] == [{"name": "air-trial"}]
-    assert patched["services"]["render"] is True
-
-
-class _FakeProviderDeployment:
-    api_token = "nbt_SECRETKEY123." + "B" * 40
-    nats_password = "NatsProbePassword123"
-
-    def __init__(self) -> None:
-        self._manager = None
+    def __init__(self, log, cfg, settings, manager=None):
+        self.cfg = cfg
+        self.settings = settings
+        self.manager = manager
         self.calls: list[tuple] = []
+        _FakeDeployment.instances.append(self)
 
-    def bring_up_netbox(self, host, port, *, patch_install_config=True):
-        self.calls.append(("pre", host, port, patch_install_config))
+    def set_manager(self, manager):
+        self.manager = manager
+
+    def bring_up_netbox(self, host, port):
+        self.calls.append(("pre", host, port))
 
     def wait_for_intended_configs(self, host, port, expected_total):
         self.calls.append(("wait", host, port, expected_total))
@@ -215,67 +159,110 @@ class _FakeProviderDeployment:
         self.calls.append(("post", host, port))
 
 
-def test_netbox_orchestrator_configures_provider_before_upload():
-    provider = _FakeProviderDeployment()
-    cfg = NetBoxSimConfig(mock_blueprint="air_trial")
-    orchestrator = NetBoxSimOrchestrator(
-        cfg,
-        _Recorder(),
-        provider_deployment=provider,
-    )
-
-    generated = yaml.safe_load(
-        orchestrator._generate_install_yaml(cfg, "air-trial", ["192.0.2.0/24"])
-    )
-
-    assert generated["dcim"]["provider"] == "netbox"
-    assert generated["dcim"]["public_url"] == "https://netbox.nvcm.air"
-    assert generated["dcim"]["provider_packages"][0]["image"] == (cfg.dcim_provider_package_image)
-    assert generated["secrets"]["k8s"]["nats"]["values"]["password"] == (provider.nats_password)
-    assert generated["services"]["nautobot"] is False
+@pytest.fixture
+def fake_deployment(monkeypatch):
+    _FakeDeployment.instances = []
+    monkeypatch.setattr(air_hooks, "NetBoxAirCallback", _FakeDeployment)
+    yield _FakeDeployment
 
 
-def test_netbox_orchestrator_owns_provider_lifecycle():
-    provider = _FakeProviderDeployment()
-    cfg = NetBoxSimConfig()
-    orchestrator = NetBoxSimOrchestrator(cfg, _Recorder(), provider_deployment=provider)
+def test_hooks_own_the_provider_lifecycle(fake_deployment, monkeypatch):
+    hooks = air_hooks.NetBoxAirHooks()
+    cfg = _sim(mock_blueprint="air_trial")
+    built = []
+    monkeypatch.setattr(air_hooks, "ensure_air_images", lambda p, n, log: built.append((p, n)))
     manager = object()
 
-    orchestrator._run_provider_pre_deploy(manager, "worker.example", 17117)
-    orchestrator._wait_for_provider_configs(manager, "worker.example", 17117, 7)
-    orchestrator._run_provider_post_deploy(manager, "worker.example", 17117)
+    hooks.prepare_images(cfg, lambda line: None)
+    hooks.pre_deploy(manager, "worker.example", 17117)
+    hooks.wait_for_configs(manager, "worker.example", 17117, 7)
+    hooks.post_deploy(manager, "worker.example", 17117)
 
-    assert provider.calls == [
-        ("pre", "worker.example", 17117, False),
+    settings = NetBoxAirSettings()
+    assert built == [(settings.provider_image, settings.netbox_image)]
+    (deployment,) = fake_deployment.instances
+    assert deployment.cfg is cfg
+    assert deployment.manager is manager
+    assert deployment.calls == [
+        ("pre", "worker.example", 17117),
         ("wait", "worker.example", 17117, 7),
         ("post", "worker.example", 17117),
     ]
-    assert orchestrator._provider_gateway_hostnames(cfg) == (cfg.netbox_hostname(),)
+    assert hooks.gateway_hostnames(cfg) == ("netbox.nvcm.air",)
 
 
-def test_netbox_orchestrator_prepares_images_before_common_air_flow(monkeypatch):
-    cfg = NetBoxSimConfig()
-    recorder = _Recorder()
-    orchestrator = NetBoxSimOrchestrator(
-        cfg,
-        recorder,
-        provider_deployment=_FakeProviderDeployment(),
-    )
-    calls = []
-    monkeypatch.setattr(
-        netbox_air_orchestrator,
-        "ensure_air_images",
-        lambda provider, netbox, log: calls.append((provider, netbox)),
-    )
-    monkeypatch.setattr(SimOrchestrator, "_run_impl", lambda self: ("box", 22))
+def test_hooks_need_the_sim_config_before_the_per_host_stages(fake_deployment):
+    with pytest.raises(RuntimeError, match="prepare_images"):
+        air_hooks.NetBoxAirHooks().pre_deploy(object(), "box", 22)
 
-    assert orchestrator._run_impl() == ("box", 22)
-    assert calls == [
-        (
-            cfg.dcim_provider_package_image,
-            f"{cfg.netbox_image}:{cfg.netbox_image_tag}",
-        )
-    ]
+
+def test_a_failed_route_publish_does_not_fail_the_deploy(fake_deployment):
+    hooks = air_hooks.NetBoxAirHooks()
+    logs = []
+    hooks._log = logs.append
+    hooks.install_settings(_sim())
+
+    def boom(host, port):
+        raise RuntimeError("no gateway")
+
+    fake_deployment.publish_route = boom
+    hooks.post_deploy(object(), "box", 22)
+    assert any("Could not publish the NetBox route" in line for line in logs)
+
+
+def test_netbox_provisioning_status_uses_netbox_shell():
+    manager = Mock()
+    manager.run_remote.return_value = Mock(returncode=0, stdout="2/3|leaf-03\n")
+
+    status = air_hooks.NetBoxAirHooks().provisioning_status(manager, "worker.example", 17117)
+
+    assert status == (2, 3, ["leaf-03"])
+    command = manager.run_remote.call_args.args[2]
+    assert manager.run_remote.call_args.kwargs == {"timeout": 30}
+    assert "-n nv-config-manager" in command
+    assert "deployment/netbox" in command
+    assert "-c netbox" in command
+    assert "/opt/netbox/venv/bin/python" in command
+    assert "DeviceConfigStatus" in command
+    assert "nautobot" not in command.lower()
+
+
+def test_a_failed_provisioning_probe_reads_as_nothing_provisioned():
+    manager = Mock()
+    manager.run_remote.side_effect = OSError("ssh down")
+    assert air_hooks.NetBoxAirHooks().provisioning_status(manager, "box", 22) == (0, 0, [])
+
+
+def test_launch_status_watches_the_netbox_web_pod():
+    status = air_hooks.NETBOX_LAUNCH_STATUS
+    assert status.display_name == "NetBox"
+    assert status.access_url == "https://netbox.nvcm.air"
+    assert status.is_web_pod({"name": "netbox-7d9f"})
+    assert not status.is_web_pod({"name": "netbox-worker-7d9f"})
+    assert not status.is_web_pod({"name": "netbox-postgresql-0"})
+
+
+@pytest.mark.asyncio
+async def test_population_panel_writes_load_blueprint_into_dcim_settings():
+    from nv_config_manager_installer.tui.widgets import LabeledSwitch
+    from textual.app import App
+
+    cfg = _sim(dcim_settings={"load_blueprint": False})
+
+    class _Host(App[None]):
+        def compose(self):
+            yield air_hooks.NetBoxPopulationPanel(cfg, id="population-panel")
+
+    app = _Host()
+    async with app.run_test(size=(120, 40)):
+        panel = app.query_one("#population-panel", air_hooks.NetBoxPopulationPanel)
+        assert panel.query_one("#load-blueprint", LabeledSwitch).value is False
+        panel.query_one("#load-blueprint", LabeledSwitch).value = True
+        panel.write_to_config(cfg)
+        assert cfg.dcim_settings == {}
+        panel.query_one("#load-blueprint", LabeledSwitch).value = False
+        panel.write_to_config(cfg)
+        assert cfg.dcim_settings == {"load_blueprint": False}
 
 
 # -- the bring-up sequence -----------------------------------------------------
@@ -324,56 +311,16 @@ class _Recorder:
         self.events.append(f"complete:{success}")
 
 
-def test_bring_up_runs_before_the_deploy_is_reported(monkeypatch):
-    # on_deploy_started is the only window between "install config uploaded" and
-    # "deploy runs", so the NetBox work has to finish before it is passed on.
-    order: list[str] = []
-    cfg = NetBoxSimConfig(mock_blueprint="air_trial")
-    callback = NetBoxAirCallback(_Recorder(), cfg, manager=_FakeManager())
-    monkeypatch.setattr(callback, "bring_up_netbox", lambda h, p: order.append("bring_up"))
-    monkeypatch.setattr(callback._inner, "on_deploy_started", lambda h, p: order.append("inner"))
-
-    callback.on_deploy_started("host", 22)
-    assert order == ["bring_up", "inner"]
-
-
-def test_inner_callback_still_runs_when_bring_up_fails(monkeypatch):
-    # A failed bring-up must not swallow the orchestrator's own reporting.
-    recorder = _Recorder()
-    callback = NetBoxAirCallback(recorder, NetBoxSimConfig(), manager=_FakeManager())
-
-    def _boom(host, port):
-        raise RuntimeError("no cluster")
-
-    monkeypatch.setattr(callback, "bring_up_netbox", _boom)
-    with pytest.raises(RuntimeError):
-        callback.on_deploy_started("host", 22)
-    assert "deploy_started" in recorder.events
-
-
 def test_a_generated_token_is_valid_and_reused():
-    cfg = NetBoxSimConfig()
-    callback = NetBoxAirCallback(_Recorder(), cfg, manager=_FakeManager())
+    callback = NetBoxAirCallback(lambda line: None, _sim(), manager=_FakeManager())
     assert is_valid_api_token(callback.api_token)
     # Supplied tokens win, so both sides can be given a known value.
     supplied = generate_api_token()
     other = NetBoxAirCallback(
-        _Recorder(), NetBoxSimConfig(dcim_token=supplied), manager=_FakeManager()
+        lambda line: None, _sim(dcim_settings={"token": supplied}), manager=_FakeManager()
     )
     assert other.api_token == supplied
-
-
-def test_a_failed_post_deploy_step_does_not_fail_a_good_deploy(monkeypatch):
-    # The sim is up by this point; a cosmetic step failing must not turn a
-    # working deploy into a reported failure.
-    recorder = _Recorder()
-    callback = NetBoxAirCallback(recorder, NetBoxSimConfig(), manager=_FakeManager())
-    monkeypatch.setattr(
-        callback, "publish_hostname", lambda h, p: (_ for _ in ()).throw(RuntimeError("nope"))
-    )
-    callback.on_complete(True, "host", 22)
-    assert "complete:True" in recorder.events
-    assert any("/etc/hosts" in e for e in recorder.events)
+    assert other.settings.token == supplied
 
 
 def test_netbox_is_installed_once_with_the_nats_password():
@@ -392,8 +339,8 @@ def test_air_netbox_uses_overridable_demo_login():
     assert "netbox.superuser.password=demo" in script
 
     custom = _callback_for_script(
-        netbox_superuser_name="operator",
-        netbox_superuser_password="lab-password",
+        superuser_name="operator",
+        superuser_password="lab-password",
     ).bring_up_script("/i.tar", "/c.tgz")
     assert "netbox.superuser.name=operator" in custom
     assert "netbox.superuser.password=lab-password" in custom
@@ -408,7 +355,7 @@ def test_air_netbox_login_escapes_helm_separators():
     construction -- but these two are free-form config values.
     """
     script = _callback_for_script(
-        netbox_superuser_password=r"lab,pass\word",
+        superuser_password=r"lab,pass\word",
     ).bring_up_script("/i.tar", "/c.tgz")
     assert r"netbox.superuser.password=lab\,pass\\word" in script
 
@@ -418,115 +365,6 @@ def test_helm_set_value_escapes_only_what_helm_reads():
     assert cluster.helm_set_value("a.b") == "a.b"
     assert cluster.helm_set_value("a,b") == r"a\,b"
     assert cluster.helm_set_value("a\\b") == r"a\\b"
-
-
-def test_tui_import_failure_stays_air_support_unavailable(monkeypatch):
-    """textual arrives with the `air` extra, so without it the import must not
-    raise a bare ImportError.
-
-    cli.py guards this import with `except AirSupportUnavailable`; anything else
-    escaping here takes down every `air` subcommand, including `air tunnel`,
-    which is documented to work without the extra.
-    """
-    module = "nv_config_manager_dcim_netbox.installer.air.tui"
-    real_import = builtins.__import__
-
-    def without_textual(name, *args, **kwargs):
-        if name == "textual" or name.startswith("textual."):
-            raise ImportError("No module named 'textual'")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.delitem(sys.modules, module, raising=False)
-    monkeypatch.setattr(builtins, "__import__", without_textual)
-    with pytest.raises(AirSupportUnavailable):
-        importlib.import_module(module)
-
-
-def test_generated_config_pins_the_box_password():
-    """SimConfig mints a new one per run, and nothing records it.
-
-    cloud-init sets the box's `nvcm` password from this value, so an unrecorded
-    one cannot be used to SSH in for diagnosis and cannot match a box that was
-    already provisioned. Re-running then fails in rsync with
-    "Permission denied (publickey,password)".
-    """
-    body = air_cli._render_example("air_trial", "demo")
-    written = yaml.safe_load(body)
-    assert written["oob_ssh_password"], "no password pinned in the generated config"
-    assert written["oob_ssh_password"].isalnum()
-
-    # It must survive the round trip rather than being regenerated on load.
-    cfg = NetBoxSimConfig(**{k: v for k, v in written.items() if k != "ngc_api_key"})
-    assert cfg.oob_ssh_password == written["oob_ssh_password"]
-
-
-def test_generated_configs_do_not_share_a_password():
-    a = yaml.safe_load(air_cli._render_example("air_trial", "demo"))
-    b = yaml.safe_load(air_cli._render_example("air_trial", "demo"))
-    assert a["oob_ssh_password"] != b["oob_ssh_password"]
-
-
-# -- shared TUI adapter --------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_tui_uses_netbox_config_and_population_controls():
-    cfg = NetBoxSimConfig(ngc_api_key="nvapi-test", load_blueprint=False)
-    app = NetBoxAirSimApp(config=cfg)
-
-    async with app.run_test(size=(180, 100)):
-        topology = app.query_one("#screen-topology", NetBoxTopologyScreen)
-        panel = topology.query_one("#population-panel", NetBoxPopulationPanel)
-        assert not panel.query_one("#load-blueprint").value
-        assert not topology.query("#run-mock-topology-job")
-
-        panel.query_one("#load-blueprint").value = True
-        topology.write_to_config(cfg)
-        assert cfg.load_blueprint is True
-
-
-@pytest.mark.asyncio
-async def test_tui_launch_uses_netbox_orchestrator_and_dashboard():
-    cfg = NetBoxSimConfig(ngc_api_key="nvapi-test")
-    app = NetBoxAirSimApp(config=cfg)
-
-    async with app.run_test(size=(180, 100)) as pilot:
-        app.switch_section("launch")
-        await pilot.pause()
-        launch = app.query_one("#screen-launch", NetBoxLaunchScreen)
-
-        assert isinstance(launch.create_orchestrator(_Recorder()), NetBoxSimOrchestrator)
-        assert isinstance(launch.create_simulation_manager(), NetBoxAirSimulationManager)
-        assert launch._provider_status.display_name == "NetBox"
-        assert launch._provider_status.access_url == "https://netbox.nvcm.air"
-
-
-def test_netbox_provisioning_status_uses_netbox_shell(monkeypatch):
-    manager = NetBoxAirSimulationManager(ngc_api_key="nvapi-test", ssh_password="test")
-    monkeypatch.setattr(manager, "_ssh_cmd", lambda host, port: ["ssh", host, str(port)])
-    completed = Mock(returncode=0, stdout="2/3|leaf-03\n")
-    run = Mock(return_value=completed)
-    monkeypatch.setattr(air_tui.subprocess, "run", run)
-
-    assert manager.get_provisioning_status("worker.example", 17117) == (
-        2,
-        3,
-        ["leaf-03"],
-    )
-    command = run.call_args.args[0][-1]
-    assert "-n nv-config-manager" in command
-    assert "deployment/netbox" in command
-    assert "-c netbox" in command
-    assert "/opt/netbox/venv/bin/python" in command
-    assert "DeviceConfigStatus" in command
-    assert "nautobot" not in command.lower()
-
-
-def test_generated_config_exposes_air_inside_setting():
-    generated = air_cli._render_example("air_trial", "demo")
-    assert "# use_internal: false" in generated
-    assert "# netbox_superuser_name: demo" in generated
-    assert "# netbox_superuser_password: demo" in generated
 
 
 # -- SSH retry -----------------------------------------------------------------
@@ -588,9 +426,10 @@ def test_ssh_retries_are_bounded(monkeypatch):
 
 
 def _callback_for_script(**overrides):
-    cfg = NetBoxSimConfig(mock_blueprint="air_trial", deployment_name="demo", **overrides)
     cb = NetBoxAirCallback.__new__(NetBoxAirCallback)
-    cb.cfg = cfg
+    cb.cfg = _sim(mock_blueprint="air_trial", deployment_name="demo")
+    cb.settings = NetBoxAirSettings(**overrides)
+    cb._log = lambda line: None
     cb.chart = Path("deploy/netbox")
 
     cb.api_token = "nbt_SECRETKEY123." + "B" * 40
@@ -773,7 +612,8 @@ def _arch_callback(monkeypatch, box_arch, image_arch):
     from nv_config_manager_dcim_netbox.installer.air import callback as cb_mod
 
     cb = NetBoxAirCallback.__new__(NetBoxAirCallback)
-    cb.cfg = NetBoxSimConfig(mock_blueprint="air_trial")
+    cb.cfg = _sim(mock_blueprint="air_trial")
+    cb.settings = NetBoxAirSettings()
     cb.on_log = lambda _line: None
 
     class _Runner:
@@ -1049,68 +889,6 @@ def test_a_failed_remote_command_does_not_print_the_box_password(monkeypatch):
     assert excinfo.value.__suppress_context__
 
 
-def test_publishing_is_skipped_when_nothing_was_deployed(monkeypatch):
-    """NVCM's orchestrator calls on_complete(success=True) even when `wait-setup`
-    failed and it skipped `upload-files` and `run-deploy`.
-
-    Trusting that produced two confusing errors -- a chart directory that was
-    never uploaded, then "no NVCM hosts entry yet" -- instead of saying plainly
-    that nothing had been deployed.
-    """
-    cb = _callback_for_script()
-    cb._inner = _Recorder()
-    logs: list[str] = []
-    cb.on_log = logs.append
-    cb.host, cb.port = "box", 22
-
-    called = []
-    cb.publish_route = lambda h, p: called.append("route")
-    cb.publish_hostname = lambda h, p: called.append("hostname")
-    # Stubbed, or building a real SshRunner raises and the check would answer
-    # "not deployed" for the wrong reason.
-    cb.runner = lambda h, p: object()
-    monkeypatch.setattr(
-        air_callback.cluster, "netbox_service_exists", lambda ns, runner=None: False
-    )
-
-    cb.on_complete(True, "box", 22)
-
-    assert called == [], "published against a cluster with no NetBox on it"
-    assert any("not on the sim's cluster" in line for line in logs), logs
-
-
-def test_an_unreachable_box_counts_as_not_deployed():
-    # The check runs over SSH, and the box may be gone by the time on_complete
-    # fires. That must not turn a cosmetic step into a traceback.
-    cb = _callback_for_script()
-    cb._inner = _Recorder()
-    cb.on_log = lambda _line: None
-
-    def _explode(host, port):
-        raise OSError("connection refused")
-
-    cb.runner = _explode
-    assert cb._netbox_is_deployed("box", 22) is False
-
-
-def test_publishing_runs_once_netbox_is_actually_there(monkeypatch):
-    cb = _callback_for_script()
-    cb._inner = _Recorder()
-    cb.on_log = lambda _line: None
-    cb.host, cb.port = "box", 22
-
-    called = []
-    cb.publish_route = lambda h, p: called.append("route")
-    cb.publish_hostname = lambda h, p: called.append("hostname")
-    cb.runner = lambda h, p: object()
-    monkeypatch.setattr(air_callback.cluster, "netbox_service_exists", lambda ns, runner=None: True)
-
-    cb.on_complete(True, "box", 22)
-
-    # Route first: the hostname entry is only useful once something answers on it.
-    assert called == ["route", "hostname"]
-
-
 def test_the_bring_up_waits_out_a_settling_sshd(monkeypatch):
     """The uploads prove the box is reachable; the bring-up then opens a fresh
     connection, and a settling sshd refuses the odd one with 255.
@@ -1275,27 +1053,3 @@ def test_tunnel_still_reports_a_genuinely_missing_key(tmp_path, monkeypatch):
 
     assert result.exit_code != 0
     assert "needs an NGC API key" in result.output
-
-
-def test_patch_install_config_carries_the_nats_password_netbox_was_installed_with():
-    """bring_up_script installs NetBox with `cb.nats_password`.
-
-    Leaving it out of the uploaded install config makes NVCM's deployer mint its
-    own for `nats-nv-config-manager`, so NetBox's publisher authenticates with a
-    password NATS rejects and renders silently never happen.
-    """
-    from nv_config_manager_dcim_netbox.installer.air.callback import (
-        CONFIG_MANAGER_INSTALL_CONFIG,
-        NVCM_BOX_USER,
-    )
-
-    remote = f"/home/{NVCM_BOX_USER}/{CONFIG_MANAGER_INSTALL_CONFIG}"
-    manager = _FakeManager(files={remote: yaml.safe_dump({"cluster": {"size": "small"}})})
-    cb = _callback_for_script()
-    cb._manager = manager
-
-    cb.patch_install_config("host", 22)
-
-    uploaded = yaml.safe_load(manager.files[remote])
-    assert uploaded["secrets"]["k8s"]["nats"]["values"]["password"] == cb.nats_password
-    assert uploaded["dcim"]["provider"] == "netbox"

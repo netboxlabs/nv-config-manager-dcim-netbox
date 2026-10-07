@@ -3,56 +3,98 @@
 Running [NVIDIA Config Manager](https://github.com/nvidia/nv-config-manager) with
 NetBox as its DCIM provider.
 
-## What the installer does
+## How it fits together
 
-`nvcm-netbox up`:
+NVCM's installer is pluggable: a DCIM provider package registers an installer
+provider through the `nv_config_manager.installer.dcim` entry point, and the
+stock `nv-config-manager-installer` composes that provider's steps, Helm values
+and screens into its own pipeline. This package's `installer` extra registers
+the `netbox` provider. Selecting it is one line in the install config:
 
-1. Creates the kind cluster if it is missing, from NVCM's `deploy/kind-config.yaml`.
-   That config maps the Gateway NodePorts (30443/30080) onto host 443/80; a plain
-   `kind create cluster` leaves the Gateway unreachable.
-2. Loads the two locally-built images into the kind node. Neither is in a
-   registry and both are pulled `IfNotPresent`, so the node needs them up front.
-3. Writes NVCM's installer config from `deploy/configs/local-netbox.yaml`, filling
-   in the API token, image refs and cluster size.
-4. Runs a `NetBoxDeployer` derived from NVCM's deployer. Its pre-Helm hook
-   deploys NetBox with this provider's plugin, PostgreSQL, Valkey, and the same
-   NATS password the common installer provisions.
-5. Installs NVCM through the common deployment pipeline.
-6. Uses the provider post-Helm hook to run `nvcm_init` (API token, custom fields,
-   bootstrap data) and publish NetBox through NVCM's Gateway.
-7. Publishes a test event and checks NVCM's render consumer handles it.
+```yaml
+dcim:
+  provider: netbox
+  local: true
+```
 
-Re-running it is safe.
+With `dcim.local: true`, `nv-config-manager-installer deploy`:
+
+1. Generates the shared secrets. The DCIM token is a NetBox v2 token
+   (`nbt_<key>.<secret>`); the provider seeds it so NVCM's own default is never
+   used.
+2. Runs the provider's `install-netbox` and `bootstrap-netbox` steps before the
+   umbrella Helm release: `helm upgrade --install` of `deploy/netbox` with that
+   token, the NATS password and the event stream/subject from
+   `dcim.settings`, then `nvcm_init` (API token, custom fields, bootstrap data).
+3. Installs NVCM with Helm values the provider merges in: `dcim.server:
+   http://netbox`, `dcim.readiness.path: /login/`, the `netbox` JetStream stream
+   and consumer, the provider wheelhouse image, and the bundled Nautobot NATS
+   account disabled.
+4. Runs `publish-netbox` after the release: a second, values-preserving Helm pass
+   over the NetBox release so its HTTPRoute renders now that the Gateway API CRDs
+   exist.
+
+Re-running it is safe. The deployer keeps Secrets that already exist, and the
+provider reads the deployed DCIM token and NATS password back before installing
+NetBox, so NetBox and NVCM stay on the same values.
+
+With `dcim.local: false` and `dcim.server` set, every provider step is skipped
+and NVCM is pointed at an existing NetBox.
 
 ## Requirements
 
-- Docker with ≥24 GB for the `small` profile (`--size medium` / `large` need more)
+- Docker with at least 24 GB for the `small` profile (`cluster.size: medium` /
+  `large` need more)
 - `kind`, `kubectl`, `helm`, `uv`
 - A checkout of [nv-config-manager](https://github.com/nvidia/nv-config-manager)
 - A checkout of [netbox-nv-config-manager](https://github.com/netboxlabs/netbox-nv-config-manager),
   which the NetBox image build installs the plugin from
+
+The installer provider must be installed into the same Python environment as
+`nv-config-manager-installer`: entry points are discovered per environment, so
+an installer in one venv cannot see a provider in another. `make setup` installs
+both into `.venv`. Check with:
+
+```bash
+.venv/bin/nv-config-manager-installer providers list
+```
+
+which must list `netbox`.
 
 ## Quick start
 
 ```bash
 export NVCM_REPO=/path/to/nv-config-manager
 make setup
-make images
-.venv/bin/nvcm-netbox up
+make kind-up
 ```
 
-`NVCM_REPO` is read by both `make` and `nvcm-netbox`; `--nvcm-repo` overrides it
-for a single run. Without either, both assume `../nv-config-manager`, which only
-holds if the repos were cloned side by side.
+`make kind-up` builds the two images, creates the kind cluster from NVCM's
+`deploy/kind-config.yaml` if it is missing, loads the images into the node, and
+runs:
 
-| Flag | Effect |
-| --- | --- |
-| `--size {small,medium,large}` | NVCM resource profile (`cluster.size`) |
-| `--namespace` | Target namespace (default `nv-config-manager`) |
-| `--token` | Use a specific v2 token instead of generating one |
-| `--skip-nvcm` | Deploy NetBox only, and print the NVCM command to run |
-| `--skip-verify` | Skip the closing event-loop check |
-| `--config-out` | Where to write the generated installer config |
+```bash
+.venv/bin/nv-config-manager-installer deploy deploy/configs/local-netbox.yaml \
+  --project-root $NVCM_REPO --image-source local --build-images --load-kind \
+  --kind-cluster nv-config-manager \
+  --install-envoy-gateway --install-cnpg-operator --install-cert-manager
+.venv/bin/nvcm-netbox verify
+```
+
+`--project-root` is where NVCM's Helm chart and image build contexts live. The
+NetBox chart and images come from this repository and are not built by the
+installer; `make images` builds them and `make kind-up` loads them.
+
+To tune the config first, copy the profile and open it in the installer's wizard.
+The External Services screen offers the `netbox` provider and its fields (image
+tag, hostname, superuser name):
+
+```bash
+cp deploy/configs/local-netbox.yaml my.yaml
+.venv/bin/nv-config-manager-installer init -c my.yaml
+.venv/bin/nv-config-manager-installer validate my.yaml
+make kind-up INSTALL_CONFIG=my.yaml
+```
 
 Afterwards:
 
@@ -61,9 +103,30 @@ kubectl -n nv-config-manager port-forward svc/netbox 8080:80
 .venv/bin/nvcm-netbox verify
 ```
 
-The generated config holds a live API token, so it is written `0600` into
-`generated/`, which is gitignored. Keep it: it can be used with the standalone
-installer commands.
+## Provider settings
+
+`dcim.settings` holds the NetBox-specific options. Every key is optional:
+
+| Key | Default | |
+| --- | --- | --- |
+| `chart` | `deploy/netbox` in this checkout | NetBox Helm chart directory |
+| `release` | `netbox` | Helm release name |
+| `image_repository` | `nv-config-manager-netbox` | NetBox image (plugin layered on netbox-docker) |
+| `image_tag` | the package version | Built by `make netbox-image` |
+| `provider_image` | `nv-config-manager-dcim-netbox:<version>` | Wheelhouse, used when `dcim.provider_packages` is empty |
+| `hostname` | `netbox.<cluster.hostname>` | Gateway hostname NetBox is published under |
+| `superuser_name` | `admin` | |
+| `superuser_password` | generated by the chart | |
+| `event_stream` / `event_subject` | `netbox` / `netbox.change` | Must equal the chart's `nvcm.eventStream` / `nvcm.eventSubject` |
+| `consumer_name` | `nv-config-manager-dcim` | NVCM's durable consumer on that stream |
+| `readiness_path` | `/login/` | Polled by NVCM's init containers |
+| `helm_set` | `[]` | Extra `--set key=value` overrides for the NetBox chart |
+
+The chart is bound to the deployment at install time with `--set` overrides the
+provider derives from the installer: `nvcm.natsService`, `nvcm.natsUser`,
+`nvcm.natsPassword`, `nvcm.eventStream`, `nvcm.eventSubject`,
+`nvcm.workflowUrl` and `nvcm.gateway.baseHostname`. `dcim.settings` is the single
+source of truth for the stream and subject.
 
 ## NetBox image
 
@@ -72,14 +135,30 @@ published NetBox image. The pins are in
 [`build/versions.env`](../build/versions.env).
 
 The base must be a **released** 4.7 tag. A `-betaN` tag still satisfies the
-plugin's `min_version` -- NetBox compares `RELEASE.version`, and a beta reports a
-plain `4.7.0` -- but the betas differ from the release in ways the plugin depends
+plugin's `min_version` (NetBox compares `RELEASE.version`, and a beta reports a
+plain `4.7.0`) but the betas differ from the release in ways the plugin depends
 on, so its migrations do not apply there. CI's `netbox-pin` job rejects a
 pre-release tag and asserts the one pinned exists upstream.
 
 `make version-check` asserts that the pinned version sits inside the plugin's
 `min_version`/`max_version`, so bumping one without the other fails before a
 build starts rather than at the image's plugin-import assert.
+
+## NetBox first, NVCM later
+
+`nvcm-netbox netbox up` runs the provider's pre-Helm steps on their own, for a
+cluster NVCM will be deployed to afterwards:
+
+```bash
+.venv/bin/nvcm-netbox netbox up -c deploy/configs/local-netbox.yaml
+.venv/bin/nv-config-manager-installer deploy deploy/configs/local-netbox.yaml \
+  --project-root $NVCM_REPO ...
+```
+
+It creates the `dcim-token`, `nats-sys` and `nats-nv-config-manager` Secrets with
+the names NVCM's deploy uses, adopting any that already exist, so the later
+deploy keeps them and both sides share one token. `make netbox-up` is the same
+command.
 
 ## Doing it by hand
 
@@ -95,10 +174,11 @@ export SUPERUSER_API_TOKEN='$TOKEN'
 exec /opt/netbox/venv/bin/python /opt/netbox/netbox/manage.py nvcm_init --bootstrap
 EOF
 
-# 3. NVCM.
-.venv/bin/nvcm-netbox config -o my.yaml --token "$TOKEN"
-.venv/bin/nvcm-netbox deploy my.yaml --image-source local \
-  --build-images --load-kind --kind-cluster nv-config-manager \
+# 3. NVCM, pointed at the NetBox from step 1 rather than installing its own.
+#    In my.yaml: dcim.local: false, dcim.server: http://netbox,
+#    secrets.k8s.dcim.values.token: $TOKEN, secrets.k8s.nats.values.password: $PW
+.venv/bin/nv-config-manager-installer deploy my.yaml --project-root $NVCM_REPO \
+  --image-source local --build-images --load-kind --kind-cluster nv-config-manager \
   --install-envoy-gateway --install-cnpg-operator --install-cert-manager
 
 # 4. Publish NetBox through NVCM's Gateway.
@@ -106,29 +186,18 @@ helm upgrade netbox deploy/netbox -n nv-config-manager --reuse-values --wait
 kubectl -n nv-config-manager get httproute netbox
 ```
 
-Run steps 1 and 2 before step 3: NVCM authenticates to NetBox with `$TOKEN`.
-
-Step 4 is not optional if you want to reach NetBox at
-`https://netbox.<cluster.hostname>`. Its HTTPRoute is skipped during step 1
-because rendering one before the Gateway API CRDs exist fails the whole release,
-and those CRDs arrive with `--install-envoy-gateway` in step 3 — so the release
-has to be upgraded once more afterwards to create it. Nothing else about the
-release changes, and `nvcm-netbox up` does this for you.
+Step 4 is what `dcim.local: true` does for you in `publish-netbox`. The
+HTTPRoute is skipped during step 1 because rendering one before the Gateway API
+CRDs exist fails the whole release, and those CRDs arrive with
+`--install-envoy-gateway` in step 3.
 
 `$PW` is a NATS password you choose, at least 16 characters matching
-`[A-Za-z][A-Za-z0-9]*`. It goes into the install config at
-`secrets.k8s.nats.values.password`, which `nvcm-netbox config` fills in,
-and NVCM uses it rather than generating its own. That is what lets NetBox be
-installed once with the publisher already configured.
-
-`nvcm-netbox deploy` is NVCM's own `deploy` with its arguments forwarded
-unchanged, so its flags are documented in
-[NVIDIA's repository](https://github.com/nvidia/nv-config-manager). The same
-holds for `validate`, `generate-values` and `init`. They run inside your NVCM
-checkout, so relative paths in their flags resolve there; pass absolute ones.
+`[A-Za-z][A-Za-z0-9]*`. Supplying it in the install config makes NVCM use it
+rather than generating its own.
 
 `$TOKEN` must be a NetBox v2 token: `nbt_` + a 12-character key + `.` + a
-40-character secret, all alphanumeric. Generate one with:
+40-character secret, all alphanumeric. The installer validates a supplied one.
+Generate one with:
 
 ```bash
 python -c "from nv_config_manager_dcim_netbox.installer import generate_api_token as g; print(g())"
@@ -138,12 +207,9 @@ python -c "from nv_config_manager_dcim_netbox.installer import generate_api_toke
 
 To iterate on the plugin, run NetBox on the host with only NVCM in the cluster.
 
-1. Generate a config and set `dcim.server: http://host.docker.internal:8000` and
-   `public_url: http://127.0.0.1:8000`:
-
-   ```bash
-   .venv/bin/nvcm-netbox config -o host.yaml
-   ```
+1. Copy the profile and set `dcim.local: false`, `dcim.server:
+   http://host.docker.internal:8000` and `dcim.public_url: http://127.0.0.1:8000`.
+   Put the token NetBox holds under `secrets.k8s.dcim.values.token`.
 
 2. Deploy NVCM with it, then expose the cluster's NATS to the host:
 
@@ -162,7 +228,7 @@ nbt_<key>.<secret>`). The installer's token belongs to the superuser the chart
 mints (`netbox.superuser`), which is a bring-up convenience and nothing more:
 no code path in the provider or the plugin tests `is_superuser`, and the token is
 never rotated. Past a lab, point NVCM at a service account holding only the
-grants below — the deployment works unchanged, and a leaked token then reads
+grants below. The deployment works unchanged, and a leaked token then reads
 fabric data instead of owning the NetBox instance.
 
 Grant the token's user:
@@ -180,14 +246,21 @@ Grant the token's user:
 
 ## Troubleshooting
 
-**Provider not discovered, or NVCM cannot reach NetBox.** Check the generated
-config has a `dcim.provider_packages` entry. Without it NVCM never installs the
-provider.
+**`DCIM provider "netbox" is not installed`.** The installer and this package's
+`installer` extra are in different environments. Run `make setup`, or
+`uv pip install -e $NVCM_REPO/installer -e '.[installer]'` into the same venv, and
+check `nv-config-manager-installer providers list`.
+
+**Provider not discovered in the pods, or NVCM cannot reach NetBox.** Check the
+config has a `dcim.provider_packages` entry, or that `dcim.settings.provider_image`
+names an image loaded into the cluster. Without the wheelhouse NVCM never installs
+the provider.
 
 **Events publish but nothing renders.** Three values must match: the plugin's
 `nats_subject` (`nvcm.eventSubject` in `deploy/netbox/values.yaml`), NVCM's
-`dcim.event_subject`, and `dcim.event_stream`. Run `nvcm-netbox verify` to test
-the path.
+stream subject, and the stream name. The provider sets all three from
+`dcim.settings.event_subject` / `event_stream`. Run `nvcm-netbox verify -c
+<install.yaml>` to test the path.
 
 **`verify` reports `0 queued ... not enabled`.** The event got through; the device
 just is not render-enabled. Enable it:
@@ -200,6 +273,11 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 
 **NetBox pod not ready.** Usually memory. Check
 `kubectl -n nv-config-manager get pods` and raise Docker's allocation.
+
+**`secrets.method: eso`.** Not supported with `dcim.local: true` yet: the
+provider needs the DCIM token and NATS password in the installer's secret state,
+which ESO deployments leave to Vault. Use `dcim.local: false` with a NetBox you
+installed by hand, or `secrets.method: kubernetes`.
 
 ## DSX Air
 

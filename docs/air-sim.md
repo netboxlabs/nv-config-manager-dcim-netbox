@@ -2,117 +2,108 @@
 
 Running a simulated fabric in NVIDIA AIR with NVCM and NetBox on it.
 
-NVCM's own installer creates the simulation, boots an NVCM box inside it and
-deploys NVCM onto a kind cluster on that box. `nvcm-netbox air up` adds the DCIM
-half: it deploys NetBox into the same cluster, loads the simulated fabric into
-NetBox, and points NVCM at it.
+NVCM's installer owns the simulation: `nv-config-manager-installer air-sim`
+creates the sim, boots an NVCM box inside it and deploys NVCM onto a kind cluster
+on that box. Its wizard and orchestrator call the selected DCIM provider's AIR
+hooks at fixed points, and this package supplies the NetBox hooks. Selecting them
+is one line in the sim config:
 
-## What it does
+```yaml
+dcim_provider: netbox
+```
 
-1. Runs NVCM's orchestrator, which creates the sim, boots the NVCM box and
-   uploads NVCM's install config.
-2. Ships the provider and NetBox images into the sim's kind cluster. Neither is
-   in a registry, so both are `docker save`d, uploaded once and `kind load`ed.
-3. Deploys NetBox with `deploy/netbox`, already holding the NATS password, and
-   runs `nvcm_init` (migrations, superuser, API token, custom fields, bootstrap
-   data).
-4. Loads the sim's topology into NetBox with `nvcm_load_dcim`. This replaces the
-   topology job the bundled-DCIM path runs.
-5. Rewrites the install config on the box to select NetBox, then lets NVCM's
-   deploy run.
-6. Publishes NetBox on the sim's Gateway at `netbox.nvcm.air`, once the deploy has
-   finished. Its HTTPRoute cannot be created before then — the Gateway API CRDs
-   arrive with NVCM — so this is a second, values-preserving helm pass over the
-   NetBox release, followed by the `/etc/hosts` entry for the name.
+## What the hooks do
+
+1. **Before the sim is allocated**, build the provider and NetBox images for
+   `linux/amd64` (`prepare_images`). Docker's layer cache makes an unchanged
+   rebuild quick while still picking up source changes under an existing tag. A
+   separate `make images` step is neither required nor recommended.
+2. **When NVCM's install config is generated**, write `dcim: {provider: netbox,
+   local: true, settings: ...}` into it (`install_settings`), with the chart path
+   pointing at where step 3 unpacks it on the box.
+3. **Before NVCM deploys**, ship both images and the chart into the sim over SSH,
+   `kind load` them, install NetBox with `deploy/netbox` already holding a NATS
+   password, run `nvcm_init`, and load the sim's topology into NetBox with
+   `nvcm_load_dcim` (`pre_deploy`). This runs as one uploaded script in a single
+   SSH session.
+4. **After NVCM deploys**, add `netbox.nvcm.air` to the box's `/etc/hosts`
+   alongside NVCM's own names (`gateway_hostnames`), wait for NetBox to hold
+   intended configs for the render-enabled devices (`wait_for_configs`), and
+   publish NetBox on the sim's Gateway with a values-preserving Helm pass now that
+   the Gateway API CRDs exist (`post_deploy`).
+5. **While the dashboard runs**, report switch provisioning from NetBox's
+   `DeviceConfigStatus` records (`provisioning_status`).
 
 ## Requirements
 
 - Everything in [deployment.md](deployment.md), plus an AIR account and
   `NGC_API_KEY` in the environment
-- The `air` extra, which needs an NVCM checkout:
+- The `installer` extra in the same environment as `nv-config-manager-installer`,
+  which is what `make setup` does:
 
   ```bash
   export NVCM_REPO=/path/to/nv-config-manager
-  make setup-air
+  make setup
+  .venv/bin/nv-config-manager-installer providers list   # must list netbox
   ```
 
-The sim clones the same ref onto its box, from `config_manager_ref`, which
-`NetBoxSimConfig` defaults to NVCM's default branch.
+The sim clones NVCM's `config_manager_ref` onto its box (`main` by default).
+That checkout must carry the pluggable installer, and the box's installer
+environment must have this package's `installer` extra for `dcim.provider:
+netbox` to resolve there. See NOTES.md for the current state of that.
 
 ## Running it
 
 ```bash
 export NGC_API_KEY=<your key>
+cp deploy/configs/air-trial.yaml air-trial.yaml
 
-.venv/bin/nvcm-netbox air config     # writes ~/.nvcm-air-sim.yaml
-.venv/bin/nvcm-netbox air tui        # guided setup and launch
+.venv/bin/nv-config-manager-installer air-sim init -c air-trial.yaml    # guided setup and launch
+.venv/bin/nv-config-manager-installer air-sim deploy -c air-trial.yaml  # headless
 ```
 
-The TUI is built on NVCM's shared Air wizard, with NetBox-specific topology
-population, launch orchestration, pod readiness, provisioning status, and UI
-link behavior. To use the internal `air-inside` service, turn off **Use Public
-DSX Air** on the Options screen. The equivalent YAML setting is
-`use_internal: true`.
-
-For a non-interactive deployment, use `.venv/bin/nvcm-netbox air up` with the
-same config file.
+The wizard is NVCM's shared Air wizard. With `dcim_provider: netbox` its
+Topology screen shows the NetBox population switch (load the generated fabric
+into NetBox), and its Launch screen tracks the `netbox` pod, reports
+provisioning from NetBox and links to `https://netbox.nvcm.air`. To use the
+internal `air-inside` service, turn off **Use Public DSX Air** on the Options
+screen; the equivalent YAML setting is `use_internal: true`.
 
 The disposable AIR deployment logs into the NetBox UI with `demo` / `demo` by
-default. Override `netbox_superuser_name` and `netbox_superuser_password` in the
-simulation config when needed. Non-AIR deployments continue to use credentials
-generated by the chart.
+default. Override `superuser_name` and `superuser_password` under
+`dcim_settings` when needed. Non-AIR deployments use `admin` and a password the
+chart generates.
 
-The TUI and `air up` build their provider-owned images for `linux/amd64`
-automatically before allocating the simulation. Docker's layer cache makes an
-unchanged rebuild quick, while still picking up source changes under an existing
-tag. A separate `make images` step is neither required nor recommended. The final
-upload boundary checks the architecture too, so a custom arm64 image cannot
-surface later as an opaque Helm timeout.
+### Sim config
+
+[`deploy/configs/air-trial.yaml`](../deploy/configs/air-trial.yaml) is NVCM's
+air-sim format with `dcim_provider: netbox`. The NetBox options live under
+`dcim_settings` and are validated by `NetBoxAirSettings`; every key is optional:
+
+| Key | Default | |
+| --- | --- | --- |
+| `image_repository`, `image_tag` | `nv-config-manager-netbox`, the package version | Built for `linux/amd64` before the sim is allocated |
+| `provider_image` | `nv-config-manager-dcim-netbox:<version>` | The wheelhouse, built the same way |
+| `token` | generated | NetBox v2 token to install; otherwise one is minted |
+| `superuser_name`, `superuser_password` | `demo`, `demo` | |
+| `load_blueprint` | `true` | Load the sim's topology with `nvcm_load_dcim`; off leaves an empty NetBox, which renders nothing |
+| `helm_set` | `[]` | Extra `--set` arguments for the NetBox chart |
+
+`ngc_api_key` is deliberately absent from the example, so it comes from
+`$NGC_API_KEY`. Add it to the file only to override that.
 
 The plugin layer is built from the ref in
 [`build/versions.env`](../build/versions.env) (`NETBOX_PLUGIN_REF`, `main` by
 default). Set it to a commit to make a simulation reproducible, or point
 `NETBOX_NVCM_PLUGIN_REPO` at a local checkout to build what you are editing.
-
-The config path matches NVCM's air-sim: `~/.nvcm-air-sim.yaml` by default,
-overridden by `$NVCM_AIR_CONFIG` or `--config`, so their documentation applies
-here unchanged.
-
-`make setup-air` installs the CLI into the repo's virtualenv rather than on your
-PATH, hence the `.venv/bin/` prefix. `source .venv/bin/activate` once and you can
-drop it.
-
-`air config` writes only the fields you must choose; everything NetBox needs
-already defaults correctly:
-
-| Field | Why it is written |
-| --- | --- |
-| `mock_blueprint` | `air_trial` (7 devices) or `air_superpod` (24) |
-| `deployment_name`, `simulation_name` | Name the sim |
-| `oob_ssh_password` | Pinned so you can SSH to the box, and so a re-run matches one already provisioned |
-
-`ngc_api_key` is deliberately absent, so it comes from `$NGC_API_KEY` as the
-guide describes. Add it to the file only to override that. The optional `dcim_*`
-and `netbox_*` keys are listed commented-out at their defaults.
-
-> **Do not replace it with NVCM's `development/air_sim/configs/air_trial.yaml`.**
-> That sets `config_manager_ref: main`, which has no pluggable-DCIM framework, so
-> the sim would clone a tree this provider cannot run on. `air up` refuses that
-> config rather than deploying something broken.
-
-| Flag | Effect |
-| --- | --- |
-| `--config`, `-c` | Sim config to use |
-| `--token` | Use a specific v2 token instead of generating one |
-| `--chart` | NetBox chart directory (defaults to `deploy/netbox`) |
-| `--no-blueprint` | Skip the topology load, for a NetBox that already holds the fabric |
+`NVCM_NETBOX_SKIP_IMAGE_BUILD=1` ships the images already built.
 
 Start with `air_trial` (7 devices). `air_superpod` is 24 and needs more headroom
 on the NVCM box.
 
 ## Accessing it
 
-Everything on the sim is reached through **one SOCKS tunnel** — not one per
+Everything on the sim is reached through **one SOCKS tunnel**, not one per
 service. Open it with:
 
 ```bash
@@ -121,31 +112,31 @@ make tunnel                    # or: .venv/bin/nvcm-netbox air tunnel
 
 It takes no arguments and needs no secrets on the command line. AIR allocates the
 box's SSH host and port per simulation, so they change every run and cannot be
-written down — but the sim config already names the simulation, which AIR can be
+written down, but the sim config already names the simulation, which AIR can be
 asked about, and already holds `oob_ssh_password`. The password is handed to ssh
 down a pipe, so it never reaches a command line, a file, or the terminal.
 
 | Flag | `make` | Effect |
 | --- | --- | --- |
+| `--config`, `-c` | `CONFIG=` | Sim config to read; defaults to `$NVCM_AIR_CONFIG`, then `~/.nvcm-air-sim.yaml` |
 | `--print` | `PRINT=1` | Print the command instead of opening the tunnel (prompting form, no password in it) |
 | `--browser` | `BROWSER=1` | Also launch a Chromium-family browser through the tunnel |
 | `--socks-port` | `SOCKS_PORT=` | Move it off 8080, which is a busy port locally |
-| `--url` | — | What `--browser` opens. Defaults to NetBox's |
+| `--url` | | What `--browser` opens. Defaults to NetBox's |
 
 Three things about the tunnel are worth knowing, because they are what goes wrong:
 
 - **DNS must resolve remotely.** `nvcm.air` and `netbox.nvcm.air` exist only in
-  the *box's* `/etc/hosts` — NVCM writes its own services there and `air up` adds
-  NetBox. A SOCKS proxy resolves names at the far end, which is why this works at
-  all. Chrome does that for `socks5://` by default; in Firefox you must enable
-  `network.proxy.socks_remote_dns`, or the names will not resolve.
+  the *box's* `/etc/hosts`. A SOCKS proxy resolves names at the far end, which is
+  why this works at all. Chrome does that for `socks5://` by default; in Firefox
+  you must enable `network.proxy.socks_remote_dns`, or the names will not resolve.
 - **The certificate is internal.** The Gateway's cert is issued by the sim's own
   CA, so a browser will refuse it until told not to (`--browser` passes
   `--ignore-certificate-errors`, scoped to a throwaway profile).
 - **`make port-forward` in NVCM's repo is a different thing.** It is
-  `kubectl port-forward` against your *current kubeconfig* — a local Kind
-  cluster — and it forwards `svc/nautobot`, which this deployment does not have
-  (NetBox replaces the bundled DCIM). It cannot reach a sim.
+  `kubectl port-forward` against your *current kubeconfig*, a local kind cluster,
+  and it forwards `svc/nautobot`, which this deployment does not have. It cannot
+  reach a sim.
 
 With the tunnel up, the service URLs work as in NVIDIA's
 [DSX Air simulation user guide](https://docs.nvidia.com/switch-infrastructure/config-manager/getting-started/dsx-air-simulation-user-guide),
@@ -160,29 +151,20 @@ alongside the rest:
 | Config Store API | `https://config-store.nvcm.air` |
 | Render API | `https://render.nvcm.air` |
 
-`air up` publishes NetBox on the sim's Gateway and adds `netbox.nvcm.air` to the
-box's `/etc/hosts`, alongside the entries NVCM writes for its own services, so
-the name resolves through the same tunnel with nothing extra to configure.
-
-The tunnel also works for the API, which is handy for the checks below — `socks5h`
-rather than `socks5`, so curl resolves the name remotely too:
+The tunnel also works for the API (`socks5h` rather than `socks5`, so curl
+resolves the name remotely too):
 
 ```bash
 curl -k --proxy socks5h://localhost:8080 \
-  -H "Authorization: Token $TOKEN" https://netbox.nvcm.air/api/dcim/devices/?limit=1
+  -H "Authorization: Bearer $TOKEN" https://netbox.nvcm.air/api/dcim/devices/?limit=1
 ```
 
-The NetBox admin password and API token are in the `netbox-superuser` secret:
-
-```bash
-kubectl -n nv-config-manager get secret netbox-superuser -o jsonpath='{.data.password}' | base64 -d && echo
-```
-
-`air up` also prints the API token when it starts, and the box's SSH address, so
-you can work on it directly:
+The NetBox admin password and API token are in the `netbox-superuser` secret on
+the box:
 
 ```bash
 ssh nvcm@<box>            # password is oob_ssh_password from the config
+kubectl -n nv-config-manager get secret netbox-superuser -o jsonpath='{.data.api_token}' | base64 -d && echo
 kubectl -n nv-config-manager get pods    # NetBox and NVCM, no bundled DCIM
 ```
 
@@ -201,7 +183,8 @@ DCIM:
    that they would silently read `Active`.
 
 `nvcm-netbox verify` exercises the change-event loop the same way it does for a
-kind cluster.
+kind cluster; run it on the box, or through the tunnel with a kubeconfig that
+points at the sim.
 
 ## Workflow Support
 
@@ -239,35 +222,35 @@ crashloops with `No ZTP server found ... in DHCP context`:
 TOKEN=$(kubectl -n nv-config-manager get secret netbox-superuser \
           -o jsonpath='{.data.api_token}' | base64 -d)
 API=https://netbox.nvcm.air/api/extras/config-contexts
-CTX=$(curl -sk -H "Authorization: Token $TOKEN" \
+CTX=$(curl -sk -H "Authorization: Bearer $TOKEN" \
         "$API/?q=network-management-services" \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["results"][0]["id"])')
 
-curl -sk -H "Authorization: Token $TOKEN" "$API/$CTX/" \
+curl -sk -H "Authorization: Bearer $TOKEN" "$API/$CTX/" \
   | python3 -c 'import json,sys
 ctx = json.load(sys.stdin)["data"]
 ctx.setdefault("dns", {}).setdefault("ipv4", []).append("8.8.4.4")
 print(json.dumps({"data": ctx}))' \
-  | curl -sk -X PATCH -H "Authorization: Token $TOKEN" -H "Content-Type: application/json" \
+  | curl -sk -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
       --data-binary @- "$API/$CTX/"
 ```
 
 Editing it in the NetBox UI is safer, since the form round-trips the whole
-object. The plugin publishes an
-`extras.configcontext` change, this provider resolves the context's scope to the
-devices it applies to, the render service produces new intended configs, and
-Multi-Deploy groups the identical diffs for approval.
+object. The plugin publishes an `extras.configcontext` change, this provider
+resolves the context's scope to the devices it applies to, the render service
+produces new intended configs, and Multi-Deploy groups the identical diffs for
+approval.
 
 To watch it happen:
 
 ```bash
-kubectl -n nv-config-manager logs -l component=consumer-nautobot -c consumer -f
+kubectl -n nv-config-manager logs -l 'component in (consumer-dcim,consumer-nautobot)' -c consumer -f
 ```
 
 Renders bump `commit_id` on the affected devices:
 
 ```bash
-curl -sk -H "Authorization: Token $TOKEN" \
+curl -sk -H "Authorization: Bearer $TOKEN" \
   "https://netbox.nvcm.air/api/plugins/nv-config-manager/intended-configs/"
 ```
 
@@ -275,14 +258,3 @@ curl -sk -H "Authorization: Token $TOKEN" \
 
 In the DSX Air UI, stop or delete the simulation. Deleting it removes the whole
 cluster and everything on it, NetBox included.
-
-## Notes
-
-**A Nautobot error in post-deploy is expected.** NVCM's post-deploy tries to
-create a demo user in a Nautobot deployment that is not there. It logs a failure
-and continues; nothing depends on it.
-
-**The event bus is connected last.** Until NVCM's deploy has created the NATS
-password, NetBox publishes change envelopes to its log instead. If the final step
-reports it could not connect, the sim is otherwise fine, and re-running
-`nvcm-netbox air up` reconciles it.

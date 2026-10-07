@@ -2,29 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """NetBox support for NVCM's DSX Air simulations.
 
-NVCM's `SimOrchestrator` creates the simulation and deploys NVCM; this package
-deploys NetBox into the sim's kind cluster and loads the simulated fabric into
-it.
-
-Needs the `air` extra (see `make setup-air`).
+NVCM's `SimOrchestrator` creates the simulation and deploys NVCM; the hooks in
+`installer.air_hooks` ship NetBox into the sim's kind cluster, install it and
+load the simulated fabric. This package holds the pieces those hooks run:
+the on-box bring-up (`callback`), the image build (`images`) and the SOCKS
+tunnel (`tunnel`, also the `nvcm-netbox air tunnel` command).
 """
-
-from __future__ import annotations
-
-
-class AirSupportUnavailable(ImportError, RuntimeError):
-    """Raised when the `air` extra is not installed.
-
-    Also an ``ImportError``: this is an import failure, and it lets the air tests
-    skip themselves with ``pytest.importorskip`` on an install without the extra.
-    """
-
-    def __init__(self, cause: Exception | None = None) -> None:
-        super().__init__(
-            "DSX Air support needs nv-config-manager-installer, which is not "
-            "published. Install it from an NVCM checkout:\n"
-            "    make setup-air NVCM=../nv-config-manager\n"
-            "or:\n"
-            "    uv pip install -e ../nv-config-manager/installer"
-            + (f"\n\nImport failed with: {cause}" if cause else "")
-        )

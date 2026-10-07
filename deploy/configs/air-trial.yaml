@@ -2,15 +2,14 @@
 #
 #   cp deploy/configs/air-trial.yaml air-trial.yaml
 #   $EDITOR air-trial.yaml          # ngc_api_key, or export NGC_API_KEY
-#   nvcm-netbox air up -c air-trial.yaml
+#   nv-config-manager-installer air-sim deploy -c air-trial.yaml
 #
 # Copy it rather than editing in place: the working copy takes an NGC key and can
 # take a NetBox token, and the repo ignores /air-trial.yaml for that reason.
 #
-# This is NVCM's own air-sim format. Only the fields that must be chosen, or that
-# differ from a default, are here; everything else NetBox needs already defaults
-# correctly in NetBoxSimConfig. Do not copy NVCM's development/air_sim/configs/
-# air_trial.yaml over this.
+# This is NVCM's own air-sim format. `dcim_provider: netbox` selects this
+# package's AIR hooks; everything NetBox-specific lives under `dcim_settings`
+# and is validated by NetBoxAirSettings.
 
 # 7 devices. `air_superpod` is 24 and needs a much larger box.
 mock_blueprint: air_trial
@@ -20,30 +19,27 @@ simulation_name: nv-config-manager-netbox-air-trial
 
 size: small
 
+dcim_provider: netbox
+
 # Also read from $NGC_API_KEY, which is the better place for it.
 ngc_api_key: ''
 
 # --- optional, shown at their defaults ---------------------------------------
 #
-# Images built by `make images`. Neither exists in a registry, so both are
-# shipped into the sim's kind cluster over SSH.
-# netbox_image: nv-config-manager-netbox
-# netbox_image_tag: '0.1.0'
-# dcim_provider_package_image: nv-config-manager-dcim-netbox:0.1.0
-#
-# The in-cluster Service deploy/netbox publishes.
-# dcim_server: http://netbox
-#
-# Generated when empty, then installed into NetBox and handed to NVCM.
-# dcim_token: ''
-#
-# Load the sim's topology into NetBox with the plugin's nvcm_load_dcim. Off
-# leaves an empty NetBox, which renders nothing; only turn it off when pointing
-# at a NetBox that already holds the fabric.
-# load_blueprint: true
-#
-# Extra `--set` arguments for the NetBox chart.
-# netbox_helm_set: []
-#
-# run_mock_topology_job is deliberately absent. It populates the DCIM that is
-# not being deployed here, and `air up` forces it off whatever the file says.
+# dcim_settings:
+#   # Images built for linux/amd64 by the hooks before the sim is allocated.
+#   # Neither exists in a registry, so both are shipped into the sim's kind
+#   # cluster over SSH. Tags track the package version.
+#   image_repository: nv-config-manager-netbox
+#   image_tag: '0.1.0'
+#   provider_image: nv-config-manager-dcim-netbox:0.1.0
+#   # NetBox v2 token; generated when empty, then installed into NetBox.
+#   token: ''
+#   # The sim is a disposable demo, so the UI login is predictable.
+#   superuser_name: demo
+#   superuser_password: demo
+#   # Load the sim's topology into NetBox with the plugin's nvcm_load_dcim. Off
+#   # leaves an empty NetBox, which renders nothing.
+#   load_blueprint: true
+#   # Extra `--set` arguments for the NetBox chart.
+#   helm_set: []

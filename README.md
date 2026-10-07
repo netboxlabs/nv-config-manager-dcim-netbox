@@ -11,19 +11,25 @@ which adds the fabric/overlay models NVCM needs and publishes NetBox object
 changes onto NVCM's event bus.
 
 The sections below follow NVCM's own README, so the two read the same way.
-Where a command exists in both, it has the same name and the same flags.
 
 ## Overview
 
-NVCM's installer deploys NVCM. It does not deploy a DCIM, and its config wizard
-cannot express everything an external one needs. This repository fills that gap
-with `nvcm-netbox`, which:
+NVCM's installer is pluggable: a DCIM provider package registers an installer
+provider, and the stock `nv-config-manager-installer` composes its steps, Helm
+values and wizard screens into the common pipeline. This repository registers
+the `netbox` installer provider, which:
 
-- deploys NetBox, with the plugin and the fabric models, into the same cluster
-- creates the API token NetBox and NVCM must share
-- extends NVCM's installer lifecycle to deploy both NVCM and NetBox in one pipeline
-- connects NetBox's change events to NVCM's event bus
-- checks that a change in NetBox reaches the render service
+- deploys NetBox, with the plugin and the fabric models, into the same cluster,
+  before NVCM's own Helm release
+- generates the NetBox v2 API token both sides share and installs it with
+  `nvcm_init`
+- wires NetBox's change events to NVCM's event bus (stream, subject, consumer)
+- publishes NetBox through NVCM's Gateway
+- supplies the NetBox stages of NVCM's DSX Air simulation wizard
+
+`nvcm-netbox` adds the few NetBox-only commands around that: `verify` (does a
+change in NetBox reach the render service), `netbox load-topology`,
+`netbox up` (NetBox without NVCM) and `air tunnel`.
 
 ## Deploying
 
@@ -33,22 +39,25 @@ git clone https://github.com/netboxlabs/netbox-nv-config-manager
 git clone https://github.com/netboxlabs/nv-config-manager-dcim-netbox
 cd nv-config-manager-dcim-netbox
 
-# Where your NVCM checkout is. Both `make` and `nvcm-netbox` read it, so set it
-# once; without it they assume ../nv-config-manager.
+# Where your NVCM checkout is. `make` reads it; without it ../nv-config-manager.
 export NVCM_REPO=../nv-config-manager
 
-make setup         # venv, the SDK from your NVCM checkout, and the CLI
+make setup         # venv with NVCM's installer, the SDK and this package's installer extra
 make kind-up       # builds the images, then deploys NetBox and NVCM
 ```
 
 `make setup` rather than `pip install -e .` because the `nv-config-manager-dcim`
-SDK is not published; it is installed from `$NVCM_REPO/packages/dcim`.
+SDK and `nv-config-manager-installer` are not published; both come from
+`$NVCM_REPO`. The installer discovers the `netbox` provider through an entry
+point, so the `installer` extra and `nv-config-manager-installer` must be in the
+same environment. Check with `.venv/bin/nv-config-manager-installer providers
+list`, which must list `netbox`.
 
-It puts `nvcm-netbox` in the repo's virtualenv rather than on your PATH, which is
-why the commands below are written `.venv/bin/nvcm-netbox`. Run
-`source .venv/bin/activate` once and you can drop the prefix.
+The tools land in the repo's virtualenv rather than on your PATH, which is why
+the commands below are written `.venv/bin/...`. Run `source .venv/bin/activate`
+once and you can drop the prefix.
 
-Running `up` again is safe.
+Running `make kind-up` again is safe.
 
 > **NetBox version.** The plugin needs a GraphQL feature that ships in NetBox
 > 4.7, and requires a released 4.7 -- not one of the 4.7.0 pre-releases. The
@@ -57,45 +66,38 @@ Running `up` again is safe.
 
 ### Step by Step
 
-`up` is the whole sequence in one command. To drive it yourself, `nvcm-netbox`
-takes the same commands and flags as NVCM's installer, so anything in
-[NVIDIA's documentation](https://github.com/nvidia/nv-config-manager) works here
-with `nvcm-netbox` in place of `nv-config-manager-installer`:
+`make kind-up` is the whole sequence in one command. To drive it yourself, use
+NVCM's installer with `dcim.provider: netbox` in the config, so anything in
+[NVIDIA's documentation](https://github.com/nvidia/nv-config-manager) applies
+unchanged:
 
 ```bash
-.venv/bin/nvcm-netbox netbox up                  # cluster, NetBox, API token, config
-.venv/bin/nvcm-netbox init                       # optional: edit the config in NVCM's TUI
-.venv/bin/nvcm-netbox validate  generated/nv-config-manager-install.yaml
-.venv/bin/nvcm-netbox deploy    generated/nv-config-manager-install.yaml \
-  --image-source local --build-images --load-kind \
-  --kind-cluster nv-config-manager \
+make images                                                  # NetBox + provider wheelhouse
+kind load docker-image nv-config-manager-netbox:0.1.0 nv-config-manager-dcim-netbox:0.1.0 \
+  --name nv-config-manager
+.venv/bin/nv-config-manager-installer init -c my.yaml         # optional: edit a copy of the profile
+.venv/bin/nv-config-manager-installer validate my.yaml
+.venv/bin/nv-config-manager-installer deploy my.yaml --project-root $NVCM_REPO \
+  --image-source local --build-images --load-kind --kind-cluster nv-config-manager \
   --install-envoy-gateway --install-cnpg-operator --install-cert-manager
-.venv/bin/nvcm-netbox verify
+.venv/bin/nvcm-netbox verify -c my.yaml
 ```
+
+Start from [`deploy/configs/local-netbox.yaml`](deploy/configs/local-netbox.yaml),
+which is a complete install config selecting NetBox. In the wizard the External
+Services screen offers the `netbox` provider and its fields (image tag,
+hostname, superuser name).
 
 | Command | |
 | --- | --- |
-| `netbox up` | NetBox only. No counterpart in NVCM, because NVCM has no DCIM to deploy |
-| `init` | NVCM's TUI, opened on the config |
-| `validate` | NVCM's `validate` |
-| `generate-values` | NVCM's `generate-values` |
-| `deploy` | NVCM's `deploy`. Deploys NVCM only |
-| `verify` | Publishes a synthetic change event and checks it reaches the render service |
+| `nv-config-manager-installer deploy` | NVCM's deploy; with `dcim.local: true` the `netbox` provider installs and bootstraps NetBox first and publishes its route after |
+| `nvcm-netbox netbox up` | NetBox only, for a cluster NVCM is deployed to afterwards |
+| `nvcm-netbox netbox load-topology` | Load a mock topology blueprint into NetBox |
+| `nvcm-netbox verify` | Publishes a synthetic change event and checks it reaches the render service |
 
-`validate`, `generate-values` and `deploy` hand their arguments straight to
-NVCM's installer, so every flag it accepts works unchanged.
-
-Run `netbox up` first. NetBox issues the API token NVCM authenticates with, so
-`deploy` on its own leaves NVCM unable to reach its DCIM.
-
-`init` opens NVCM's TUI. The wizard has no field for the provider wheelhouse
-image or the API token, so `nvcm-netbox` writes those before it opens and puts
-them back afterwards. Everything else, `cluster.size`, SSO, vault, ZTP, is yours
-to change there.
-
-One caveat: these commands run inside your NVCM checkout, so a relative
-`--output-dir` or `--chart-dir` resolves against *that* directory. Pass absolute
-paths.
+`--project-root` is where NVCM's Helm chart and image build contexts live. The
+NetBox images come from this repository (`make images`) and are loaded into the
+cluster separately; the installer builds only NVCM's.
 
 ## Local Development Setup
 
@@ -143,9 +145,9 @@ Prerequisites:
 
 ### Resource Profiles
 
-The same `cluster.size` profiles NVCM defines, selected with `--size`. They size
-NVCM; NetBox, Postgres and Valkey add about 1.6 GiB of memory requests on top,
-and the profile does not change that.
+The same `cluster.size` profiles NVCM defines, set in the install config. They
+size NVCM; NetBox, Postgres and Valkey add about 1.6 GiB of memory requests on
+top, and the profile does not change that.
 
 | Size | Environment | Suggested Capacity |
 | ---- | ----------- | ------------------ |
@@ -159,19 +161,24 @@ and the profile does not change that.
 make kind-up
 ```
 
-The default `make kind-up` target creates the Kind cluster if needed, builds
-local images, loads them into Kind, installs required operators, deploys NetBox,
-and deploys using `deploy/configs/local-netbox.yaml`.
+The default `make kind-up` target builds the NetBox and provider images, creates
+the Kind cluster if needed, loads the images into it, and runs
+`nv-config-manager-installer deploy` with `deploy/configs/local-netbox.yaml`,
+which installs the operators, NetBox and NVCM.
 
 The cluster is created from NVCM's own `deploy/kind-config.yaml`, which maps the
 Gateway's NodePorts onto host 443/80. A default `kind create cluster` does not,
 and the Gateway is then unreachable from the host.
 
 ```bash
-.venv/bin/nvcm-netbox up --no-create-cluster  # require an existing cluster
-.venv/bin/nvcm-netbox up --no-kind-load       # a real cluster, images from a registry
-.venv/bin/nvcm-netbox up --size medium        # larger resource profile
+make kind-up INSTALL_CONFIG=my.yaml           # a tuned copy of the profile
+make kind-up KIND_CLUSTER=other               # another cluster name
+make netbox-up                                # NetBox only
 ```
+
+For a real cluster, run the installer directly without `--load-kind` and point
+`dcim.provider_packages[].image` and `dcim.settings.image_repository` at a
+registry.
 
 A fresh NetBox is empty, and an empty DCIM renders nothing. Populate or refresh
 the mock topology:
@@ -224,7 +231,8 @@ kubectl get secret netbox-superuser -n nv-config-manager -o jsonpath='{.data.api
 ```
 
 The API token is the one NVCM authenticates with, so both sides hold the same
-value. Pass `--token` to `up` to choose it yourself.
+value; NVCM reads it from the `dcim-token` Secret. Set
+`secrets.k8s.dcim.values.token` in the install config to choose it yourself.
 
 A login is required to reach anything: the chart sets `netbox.loginRequired: true`
 rather than taking the upstream default of unauthenticated read-only access, which
@@ -233,13 +241,14 @@ NetBox 5.0 removes anyway.
 ## Makefile Commands
 
 ```bash
-make setup             # venv + SDK, templates, provider, dev tools
-make setup-air         # compatibility alias for setup, used by the Air docs
+make setup             # venv + NVCM installer, SDK, templates, provider, dev tools
+make setup-air         # compatibility alias for setup
 make images            # build both local images
 make image             # the provider wheelhouse only
 make netbox-image      # NetBox with the plugin only
 make check-image       # assert the provider image's offline /plugin-wheels contract
-make kind-up           # create a Kind cluster and deploy NetBox + NVCM
+make kind-up           # create a Kind cluster and deploy NetBox + NVCM (INSTALL_CONFIG=)
+make netbox-up         # deploy NetBox only, from INSTALL_CONFIG
 make kind-down         # delete the Kind cluster
 make topology          # load mock topology data into NetBox (BLUEPRINT=air_trial)
 make tunnel            # SOCKS tunnel to a DSX Air sim (PRINT=1, BROWSER=1)
@@ -356,11 +365,11 @@ ZTP, backup, and diagnostics assertions exercise the same mock fabric.
 Nautobot-only event and RBAC modules are marked and skipped automatically during
 a NetBox run.
 
-The DSX Air tests are skipped unless the `air` extra is installed, since it
-pulls NVCM's installer from your checkout:
+The installer plugin and DSX Air tests need `nv-config-manager-installer` from
+your checkout, which `make setup` installs; without it they skip:
 
 ```bash
-make setup-air && .venv/bin/pytest tests/test_air.py
+.venv/bin/pytest tests/test_plugin.py tests/test_air.py
 ```
 
 ## Documentation

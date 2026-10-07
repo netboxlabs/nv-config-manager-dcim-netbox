@@ -15,17 +15,21 @@ dependencies = [
 # Deployment tooling only. Kept out of the base dependencies because this wheel
 # is installed into NVCM's application pods through the offline provider
 # wheelhouse, which should not carry click/PyYAML.
+#
+# `nv-config-manager-installer` is not published, and a checkout of
+# nv-config-manager is required anyway (its Helm chart and the topology
+# blueprints live there), so `make setup` installs it from that checkout rather
+# than pinning a git ref that a force-push can orphan. It must be installed into
+# the same environment as this extra: the installer discovers the `netbox`
+# provider through an entry point, which only resolves where both are present.
 [project.optional-dependencies]
 installer = [
     "click>=8.1.7",
     "nv-config-manager-installer",
     "pyyaml>=6.0.2",
 ]
-# DSX Air simulations. `nv-config-manager-installer` is not published, and a
-# checkout of nv-config-manager is required anyway (its Helm chart and the
-# topology blueprints live there), so `make setup` installs it from that checkout
-# rather than pinning a git ref that a force-push can orphan.
-# Listed here by bare name for the same reason nv-config-manager-dcim is.
+# DSX Air simulations run through the installer's `air-sim` command, so the
+# extra is the same set.
 air = [
     "click>=8.1.7",
     "nv-config-manager-installer",
@@ -42,6 +46,12 @@ Homepage = "https://github.com/netboxlabs/nv-config-manager-dcim-netbox"
 # The entry-point name and DCIMProviderMetadata.name must both be "netbox".
 [project.entry-points."nv_config_manager.dcim"]
 netbox = "nv_config_manager_dcim_netbox:NetBoxProvider"
+
+# Discovered by the NVCM installer. The entry-point name must equal
+# InstallerProviderMetadata.name and the `dcim.provider` value in the install
+# config. Loading it needs the `installer` extra.
+[project.entry-points."nv_config_manager.installer.dcim"]
+netbox = "nv_config_manager_dcim_netbox.installer.plugin:NetBoxInstallerProvider"
 
 [dependency-groups]
 dev = [

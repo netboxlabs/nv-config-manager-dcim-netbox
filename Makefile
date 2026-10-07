@@ -27,7 +27,7 @@ PLATFORM_ARG := $(if $(PLATFORM),--platform $(PLATFORM),)
 # every base tag against the registry even when the image is cached, so a 429
 # fails the build outright. Point the Hub bases at a mirror to get around it:
 #   make images NVCM_NETBOX_BASE_MIRROR=mirror.gcr.io/library
-# `nvcm-netbox air up` does this automatically on a 429.
+# The DSX Air image build (installer/air/images.py) does this automatically on a 429.
 NVCM_NETBOX_BASE_MIRROR ?=
 MIRROR_ARGS := $(foreach img,python:3.13-slim alpine:3.20,\
   $(if $(NVCM_NETBOX_BASE_MIRROR),--build-context $(img)=docker-image://$(NVCM_NETBOX_BASE_MIRROR)/$(img),))
@@ -42,7 +42,7 @@ TEMPLATE := $(VENV)/bin/template-cli
 
 .PHONY: help setup setup-air lint version-check test test-netbox test-integration discovery probe provider-config \
         cache-query render-cli test-sdk test-templates check clean image check-image \
-        netbox-image images kind-up kind-down topology tunnel airgapped airgapped-images \
+        netbox-image images kind-up netbox-up kind-down topology tunnel airgapped airgapped-images \
         inventory reference ipam hosts dhcp ztp firmware state secrets render \
         spectrumx ib infiniband spx lifecycle events
 
@@ -61,7 +61,8 @@ help:
 	@echo "image           build the provider-package OCI image (IMAGE=..., SDK from NVCM=...)"
 	@echo "netbox-image    build NetBox + our plugin (PLUGIN=..., pins in build/versions.env)"
 	@echo "images          build both images (PLATFORM=linux/amd64 for a DSX Air sim)"
-	@echo "kind-up         create the Kind cluster and deploy NetBox + NVCM"
+	@echo "kind-up         create the Kind cluster and deploy NetBox + NVCM (INSTALL_CONFIG=)"
+	@echo "netbox-up       deploy NetBox only, from INSTALL_CONFIG"
 	@echo "kind-down       delete the Kind cluster"
 	@echo "topology        load mock topology data into NetBox (BLUEPRINT=air_trial)"
 	@echo "tunnel          SOCKS tunnel to a DSX Air sim (CONFIG=, PRINT=1, BROWSER=1)"
@@ -81,9 +82,9 @@ setup:
 	  -e $(NVCM)/installer \
 	  -e ".[installer]" pytest pytest-asyncio ruff
 
-# Compatibility alias retained for the documented DSX Air setup command. The
-# common setup now installs NVCM's installer because both deployment paths derive
-# from it.
+# Compatibility alias. The common setup installs NVCM's installer into the same
+# venv as this package's `installer` extra, which is what lets the installer
+# discover the `netbox` provider entry point.
 setup-air: setup
 
 # --- Tier 0: lint + unit tests ---
@@ -92,7 +93,7 @@ lint:
 	$(RUFF) format --check src/ tests/
 
 # Two pairings that silently rot:
-#   chart netbox.image.tag == pyproject version (`nvcm-netbox up` leaves the tag
+#   chart netbox.image.tag == pyproject version (the installer settings default the tag
 #   alone), and NETBOX_VERSION within the plugin's min/max_version. The second is
 #   skipped when there is no plugin checkout at PLUGIN.
 version-check:
@@ -154,14 +155,32 @@ netbox-image:
 images: image netbox-image
 
 # --- deployment ---
-# Named after NVCM's own targets. Theirs creates the cluster then deploys NVCM;
-# ours deploys NetBox first, because NetBox owns the API token NVCM uses.
+# Named after NVCM's own targets. The `netbox` installer provider deploys NetBox
+# inside NVCM's pipeline, before the umbrella Helm release.
 KIND_CLUSTER ?= nv-config-manager
+INSTALL_CONFIG ?= deploy/configs/local-netbox.yaml
+INSTALLER := $(VENV)/bin/nv-config-manager-installer
 
 # Depends on `images` so this is one command like NVCM's. Our two images are not
-# built by the installer -- it builds NVCM's -- and a cached rebuild is seconds.
+# built by the installer -- it builds NVCM's against --project-root -- so they are
+# built here and loaded into the node before the deploy. A cached rebuild is
+# seconds.
 kind-up: images
-	NVCM_REPO=$(NVCM) $(VENV)/bin/nvcm-netbox up --kind-cluster $(KIND_CLUSTER)
+	@if kind get clusters 2>/dev/null | grep -qx '$(KIND_CLUSTER)'; then \
+	  echo "kind cluster $(KIND_CLUSTER) already running"; \
+	else \
+	  kind create cluster --name $(KIND_CLUSTER) --config $(NVCM)/deploy/kind-config.yaml --wait 5m; \
+	fi
+	kind load docker-image $(NETBOX_IMAGE) $(IMAGE) --name $(KIND_CLUSTER)
+	$(INSTALLER) deploy $(abspath $(INSTALL_CONFIG)) \
+	  --project-root $(abspath $(NVCM)) \
+	  --image-source local --build-images --load-kind --kind-cluster $(KIND_CLUSTER) \
+	  --install-envoy-gateway --install-cnpg-operator --install-cert-manager
+	$(VENV)/bin/nvcm-netbox verify -c $(abspath $(INSTALL_CONFIG))
+
+# NetBox only, for a cluster NVCM will be deployed to afterwards.
+netbox-up:
+	$(VENV)/bin/nvcm-netbox netbox up -c $(abspath $(INSTALL_CONFIG))
 
 kind-down:
 	kind delete cluster --name $(KIND_CLUSTER)
@@ -179,8 +198,8 @@ topology:
 # the sim's SSH endpoint is looked up from simulation_name in the sim config, and
 # the password comes from the same file. `make tunnel PRINT=1` shows the command
 # instead, `BROWSER=1` also opens one.
-# CONFIG= picks the sim, and must match the one `air up` used: the tunnel finds
-# the simulation by the `simulation_name` in that file. Without it the CLI reads
+# CONFIG= picks the sim, and must match the one `air-sim deploy` used: the tunnel
+# finds the simulation by the `simulation_name` in that file. Without it the CLI reads
 # $NVCM_AIR_CONFIG, then ~/.nvcm-air-sim.yaml, and looking up a name no running
 # sim has reports "No running simulation for ...".
 tunnel:

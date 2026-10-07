@@ -145,22 +145,30 @@ helm upgrade netbox netbox-chart -n nv-config-manager --reuse-values \
 
 ## install.yaml
 
-Whether you write it by hand or with `nvcm-netbox init`, three things must be
-true or NVCM will not use NetBox:
+Whether you write it by hand or with `nv-config-manager-installer init`, these
+must be true or NVCM will not use the NetBox `install-netbox.sh` installed:
 
 ```yaml
 dcim:
   provider: netbox
+  # install-netbox.sh already installed NetBox; the installer provider's own
+  # install steps are skipped when local is false.
+  local: false
   server: http://netbox
   provider_packages:
     - name: netbox
       image: registry.example.com/nv-config-manager/nv-config-manager-dcim-netbox:0.1.0
-services:
-  nautobot: false
+secrets:
+  k8s:
+    dcim:
+      values:
+        token: <the token install-netbox.sh printed>
 ```
 
 Without the `provider_packages` entry NVCM never installs the provider, and the
-DCIM consumer starts but handles nothing.
+DCIM consumer starts but handles nothing. The `netbox` installer provider must
+be present in the bundled installer's environment for `dcim.provider: netbox` to
+resolve; see NOTES.md.
 
 Everything else about the file is NVCM's, and their air-gapped requirements still
 apply on top of these three -- `cluster.airgapped: true`, `images.source:

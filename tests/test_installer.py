@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NetBox Labs. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Deployment orchestration: token generation, config rendering, CLI wiring.
+"""The `nvcm-netbox` CLI, the cluster helpers, the chart and the air-gapped bundle.
 
 No cluster required. The parts that need one (helm install, kubectl exec) are
-covered by the end-to-end steps in docs/deployment.md instead.
+covered by the end-to-end steps in docs/deployment.md instead. The installer
+provider plugin itself is covered by test_plugin.py.
 """
 
 from __future__ import annotations
@@ -11,18 +12,20 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
-import click
 import pytest
 import yaml
 from click.testing import CliRunner
 from nv_config_manager_dcim import DCIM_EVENT_CONTRACT_VERSION
+from nv_config_manager_installer.deployer import StepStatus
 
-from nv_config_manager_dcim_netbox.installer import cli, cluster
-from nv_config_manager_dcim_netbox.installer import config as cfg
-from nv_config_manager_dcim_netbox.installer.cli import _nvcm_installer_argv, main
+from nv_config_manager_dcim_netbox.installer import cli, cluster, standalone
+from nv_config_manager_dcim_netbox.installer.config import (
+    DEFAULT_PROFILE,
+    EVENT_STREAM,
+    EVENT_SUBJECT,
+)
 from nv_config_manager_dcim_netbox.installer.shell import require_tools
 from nv_config_manager_dcim_netbox.installer.tokens import (
     TOKEN_KEY_LENGTH,
@@ -30,7 +33,6 @@ from nv_config_manager_dcim_netbox.installer.tokens import (
     generate_api_token,
     generate_nats_password,
     is_valid_api_token,
-    is_valid_nats_password,
 )
 
 pytestmark = pytest.mark.installer
@@ -43,11 +45,172 @@ _CHART = _REPO / "deploy" / "netbox"
 def _no_deployed_nats(monkeypatch):
     """Answer "no NATS deployed" unless a test says otherwise.
 
-    `config`, `init` and `up` all prefer the password of a running NVCM over
-    minting one. Left alone, that reads through kubectl to whatever cluster the
-    developer's kubeconfig points at, which makes these tests depend on it.
+    `verify` reads the running NVCM's NATS password through kubectl. Left alone,
+    that depends on whatever cluster the developer's kubeconfig points at.
     """
     monkeypatch.setattr(cluster, "read_nats_password", lambda *a, **k: None)
+
+
+# -- CLI ----------------------------------------------------------------------
+
+
+def test_load_topology_names_the_blueprint_root_it_tried(tmp_path, monkeypatch):
+    # A relative default resolved against the wrong working directory is
+    # invisible unless the error prints the absolute path it tried.
+    monkeypatch.setenv("NVCM_REPO", str(tmp_path / "nope"))
+    monkeypatch.setattr(cli, "require_tools", lambda *names: None)
+
+    result = CliRunner().invoke(cli.main, ["netbox", "load-topology"])
+
+    assert result.exit_code != 0
+    assert str(tmp_path / "nope" / "development" / "mock_topology" / "context") in result.output
+    assert "$NVCM_REPO" in result.output
+
+
+def test_load_topology_merges_the_shared_defaults(tmp_path, monkeypatch):
+    root = tmp_path / "development" / "mock_topology" / "context"
+    (root / "common").mkdir(parents=True)
+    (root / "common" / "defaults.yaml").write_text("global_defaults: {}\n")
+    (root / "air_trial").mkdir()
+    (root / "air_trial" / "site.yaml").write_text("devices: []\n")
+    monkeypatch.setenv("NVCM_REPO", str(tmp_path))
+    monkeypatch.setattr(cli, "require_tools", lambda *names: None)
+    seen = {}
+
+    def fake_load(blueprint, namespace, *, deployment_name, runner=None):
+        seen["files"] = sorted(p.name for p in Path(blueprint).iterdir())
+        seen["deployment_name"] = deployment_name
+        return "loaded"
+
+    monkeypatch.setattr(cluster, "load_topology", fake_load)
+
+    result = CliRunner().invoke(cli.main, ["netbox", "load-topology"])
+
+    assert result.exit_code == 0, result.output
+    assert seen == {"files": ["defaults.yaml", "site.yaml"], "deployment_name": "air_trial"}
+
+
+def _netbox_up(monkeypatch, *args, **hook_results):
+    """Run `netbox up` with the cluster side faked; return the result and calls."""
+    calls: list = []
+    monkeypatch.setattr(cli, "require_tools", lambda *names: None)
+    monkeypatch.setattr(standalone, "K8sClient", lambda: _FakeK8s())
+    monkeypatch.setattr(cluster, "pending_release_status", lambda *a: hook_results.get("stuck"))
+    monkeypatch.setattr(cluster, "orphaned_data_volumes", lambda *a: hook_results.get("stale", []))
+    monkeypatch.setattr(cluster, "helm_dependency_build", lambda chart: None)
+    monkeypatch.setattr(
+        cluster, "install_netbox", lambda chart, **kwargs: calls.append(("install", kwargs))
+    )
+    monkeypatch.setattr(cluster, "wait_for_netbox", lambda ns, timeout: calls.append(("wait",)))
+    monkeypatch.setattr(
+        cluster, "run_nvcm_init", lambda ns, token: calls.append(("init", token)) or ""
+    )
+    result = CliRunner().invoke(cli.main, ["netbox", "up", *args])
+    return result, calls
+
+
+class _FakeK8s:
+    secrets: dict[str, dict[str, str]] = {}
+
+    def __init__(self) -> None:
+        self.secrets = dict(_FakeK8s.secrets)
+
+    def ensure_namespace(self, name):
+        return True
+
+    def secret_exists(self, name, namespace):
+        return name in self.secrets
+
+    def read_secret_data(self, name, namespace):
+        return dict(self.secrets.get(name, {}))
+
+    def apply_secret(self, name, namespace, data):
+        self.secrets[name] = dict(data)
+        _FakeK8s.secrets[name] = dict(data)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_fake_cluster():
+    _FakeK8s.secrets = {}
+    yield
+    _FakeK8s.secrets = {}
+
+
+@pytest.mark.skipif(
+    not any(
+        ep.name == "netbox"
+        for ep in __import__("importlib.metadata", fromlist=["entry_points"]).entry_points(
+            group="nv_config_manager.installer.dcim"
+        )
+    ),
+    reason="package not installed with [installer]",
+)
+def test_netbox_up_installs_netbox_with_the_token_nvcm_will_find(monkeypatch):
+    """`netbox up` runs the provider's pre-Helm steps on their own and leaves the
+    dcim-token Secret behind, so NVCM's deploy keeps it and both sides agree."""
+    result, calls = _netbox_up(monkeypatch)
+
+    assert result.exit_code == 0, result.output
+    assert [c[0] for c in calls] == ["install", "wait", "init"]
+    token = calls[0][1]["api_token"]
+    assert is_valid_api_token(token)
+    assert _FakeK8s.secrets["dcim-token"]["token"] == token
+    assert calls[0][1]["nats_password"] == _FakeK8s.secrets["nats-nv-config-manager"]["password"]
+    assert calls[2] == ("init", token)
+    assert "NetBox is up." in result.output
+    assert "get secret dcim-token" in result.output
+
+
+@pytest.mark.skipif(
+    not any(
+        ep.name == "netbox"
+        for ep in __import__("importlib.metadata", fromlist=["entry_points"]).entry_points(
+            group="nv_config_manager.installer.dcim"
+        )
+    ),
+    reason="package not installed with [installer]",
+)
+def test_netbox_up_reports_a_stuck_release_without_a_traceback(monkeypatch):
+    result, calls = _netbox_up(monkeypatch, stuck="pending-install")
+
+    assert result.exit_code != 0
+    assert "pending-install" in result.output
+    assert "helm uninstall netbox -n nv-config-manager" in result.output
+    assert "Traceback" not in result.output
+    assert calls == []
+
+
+def test_netbox_up_refuses_an_external_netbox_config(tmp_path, monkeypatch):
+    config = yaml.safe_load(DEFAULT_PROFILE.read_text())
+    config["dcim"]["local"] = False
+    config["dcim"]["server"] = "https://netbox.example.com"
+    path = tmp_path / "install.yaml"
+    path.write_text(yaml.safe_dump(config))
+    monkeypatch.setattr(cli, "require_tools", lambda *names: None)
+
+    result = CliRunner().invoke(cli.main, ["netbox", "up", "-c", str(path)])
+
+    assert result.exit_code != 0
+    assert "dcim.local: false" in result.output
+
+
+def test_step_printer_shows_why_a_step_was_skipped(capsys):
+    from nv_config_manager_installer.deployer import DeployStep
+
+    step = DeployStep("install-netbox", "Install NetBox")
+    step.status = StepStatus.SKIPPED
+    step.output.append("Dry run")
+    cli._StepPrinter().on_step_update(step)
+    out = capsys.readouterr().out
+    assert "Install NetBox" in out and "Dry run" in out
+
+
+def test_local_postgresql_has_render_batch_headroom():
+    chart_values = yaml.safe_load((_CHART / "values.yaml").read_text())
+
+    resources = chart_values["netbox"]["postgresql"]["primary"]["resources"]
+    assert resources["requests"]["memory"] == "256Mi"
+    assert resources["limits"]["memory"] == "1Gi"
 
 
 # -- tokens -------------------------------------------------------------------
@@ -89,413 +252,6 @@ def test_invalid_tokens_are_rejected(value):
 
 def test_valid_token_accepted():
     assert is_valid_api_token(generate_api_token())
-
-
-# -- config rendering ---------------------------------------------------------
-
-
-def test_profile_is_a_valid_external_netbox_config():
-    profile = cfg.load_profile()
-    assert profile["dcim"]["provider"] == "netbox"
-    # The whole point of the profile: NetBox as the provider, plus a
-    # provider_packages block (which the NVCM TUI has no widget for, so it cannot
-    # be authored there).
-    assert profile["cluster"]["mock_devices"] is True
-    assert profile["services"]["nautobot"] is False
-    assert profile["dcim"]["provider_packages"][0]["name"] == "netbox"
-    assert profile["dcim"]["public_url"] == "https://netbox.config-manager.local"
-    assert profile["secrets"]["k8s"]["dcim"]["values"]["token"] == cfg.TOKEN_PLACEHOLDER
-    assert profile["sites"] == [{"name": "TRIAL01 - air_trial"}]
-    assert profile["content"]["template_plugins"] == [
-        {"path": "development/air_sim/template_plugins/superpod-template-plugin"}
-    ]
-
-
-def test_apply_options_sets_every_computed_field():
-    token = generate_api_token()
-    result = cfg.apply_options(
-        cfg.load_profile(),
-        cfg.ConfigOptions(
-            api_token=token,
-            namespace="custom-ns",
-            size="large",
-            provider_image="reg.example/provider:9.9",
-            netbox_public_url="https://netbox.example",
-        ),
-    )
-    assert result["secrets"]["k8s"]["dcim"]["values"]["token"] == token
-    assert result["cluster"]["namespace"] == "custom-ns"
-    assert result["cluster"]["size"] == "large"
-    assert result["dcim"]["provider_packages"][0]["image"] == "reg.example/provider:9.9"
-    assert result["dcim"]["public_url"] == "https://netbox.example"
-
-
-def test_apply_options_does_not_mutate_the_shipped_profile():
-    profile = cfg.load_profile()
-    cfg.apply_options(profile, cfg.ConfigOptions(api_token=generate_api_token()))
-    assert profile["secrets"]["k8s"]["dcim"]["values"]["token"] == cfg.TOKEN_PLACEHOLDER
-
-
-def test_event_subject_must_match_the_plugins_publisher():
-    # deploy/netbox/values.yaml sets the plugin's nats_subject from nvcm.eventSubject;
-    # if these two drift, NetBox publishes and nothing consumes.
-    chart_values = yaml.safe_load((_CHART / "values.yaml").read_text())
-    assert cfg.event_subject(cfg.load_profile()) == chart_values["nvcm"]["eventSubject"]
-
-
-def test_local_postgresql_has_render_batch_headroom():
-    chart_values = yaml.safe_load((_CHART / "values.yaml").read_text())
-
-    resources = chart_values["netbox"]["postgresql"]["primary"]["resources"]
-    assert resources["requests"]["memory"] == "256Mi"
-    assert resources["limits"]["memory"] == "1Gi"
-
-
-def test_written_config_is_owner_only(tmp_path):
-    # It carries a live API token.
-    out = cfg.write_config(
-        cfg.apply_options(cfg.load_profile(), cfg.ConfigOptions(api_token=generate_api_token())),
-        tmp_path / "nested" / "install.yaml",
-    )
-    assert out.exists()
-    assert oct(out.stat().st_mode)[-3:] == "600"
-
-
-# -- CLI ----------------------------------------------------------------------
-
-
-def test_config_command_writes_a_loadable_config(tmp_path):
-    out = tmp_path / "install.yaml"
-    result = CliRunner().invoke(main, ["config", "-o", str(out), "--size", "medium"])
-    assert result.exit_code == 0, result.output
-    written = yaml.safe_load(out.read_text())
-    assert written["cluster"]["size"] == "medium"
-    assert is_valid_api_token(written["secrets"]["k8s"]["dcim"]["values"]["token"])
-
-
-def test_config_command_honours_a_supplied_token(tmp_path):
-    token = generate_api_token()
-    out = tmp_path / "install.yaml"
-    result = CliRunner().invoke(main, ["config", "-o", str(out), "--token", token])
-    assert result.exit_code == 0, result.output
-    assert yaml.safe_load(out.read_text())["secrets"]["k8s"]["dcim"]["values"]["token"] == token
-
-
-def test_config_command_rejects_a_malformed_token(tmp_path):
-    result = CliRunner().invoke(main, ["config", "-o", str(tmp_path / "x.yaml"), "--token", "nope"])
-    assert result.exit_code != 0
-    assert "v2 token" in result.output
-
-
-def test_up_reuses_the_generated_token_when_resuming(monkeypatch, tmp_path):
-    token = generate_api_token()
-    out = tmp_path / "install.yaml"
-    out.write_text(yaml.safe_dump({"secrets": {"k8s": {"dcim": {"values": {"token": token}}}}}))
-    monkeypatch.setattr(cluster, "kind_cluster_exists", lambda name: True)
-    monkeypatch.setattr(cluster, "helm_dependency_build", lambda chart: None)
-    monkeypatch.setattr(cluster, "pending_release_status", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cluster, "orphaned_data_volumes", lambda *args, **kwargs: [])
-    seen = {}
-    monkeypatch.setattr(
-        cluster,
-        "install_netbox",
-        lambda *args, **kwargs: seen.update(token=kwargs["api_token"]),
-    )
-    monkeypatch.setattr(cluster, "wait_for_netbox", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cluster, "run_nvcm_init", lambda *args, **kwargs: "")
-
-    result = CliRunner().invoke(
-        cli.main, ["netbox", "up", "--no-kind-load", "--config-out", str(out)]
-    )
-
-    assert result.exit_code == 0, result.output
-    assert seen["token"] == token
-    assert yaml.safe_load(out.read_text())["secrets"]["k8s"]["dcim"]["values"]["token"] == token
-
-
-def test_up_rejects_a_path_that_is_not_an_nvcm_checkout(tmp_path):
-    result = CliRunner().invoke(main, ["up", "--nvcm-repo", str(tmp_path)])
-    assert result.exit_code != 0
-    # NVCM's chart and images are unpublished, so a checkout is mandatory; the
-    # error has to say so rather than failing later at the helm step.
-    assert "nv-config-manager checkout" in result.output
-
-
-def test_nvcm_installer_argv_targets_their_cli_not_our_imports():
-    argv = _nvcm_installer_argv(Path("/tmp/nvcm"), "validate", "/abs/cfg.yaml")
-    assert argv[:2] == ["uv", "run"]
-    assert argv[2:4] == ["--directory", "/tmp/nvcm"]
-    assert argv[4] == "--project"
-    assert argv[5].endswith("/tmp/nvcm/installer")
-    assert argv[6:] == ["nv-config-manager-installer", "validate", "/abs/cfg.yaml"]
-
-
-def test_nvcm_installer_runs_from_their_checkout_not_ours():
-    # Their find_project_root() walks up from the working directory for
-    # `deploy/` / `Makefile` / `.git`, all of which this repo also has. Without
-    # --directory it picks us, and their image builds fail on contexts like
-    # `components/nats-ready` that exist only in their tree.
-    argv = _nvcm_installer_argv(Path("/tmp/nvcm"), "deploy", "/abs/cfg.yaml")
-    assert argv[argv.index("--directory") + 1] == "/tmp/nvcm"
-
-
-# -- parity with NVCM's own command surface -----------------------------------
-
-
-@pytest.fixture
-def their_cli(monkeypatch):
-    """Capture the argv sent to NVCM's installer instead of running it."""
-    seen: list[list[str]] = []
-    monkeypatch.setattr(cli, "stream", lambda argv, cwd=None: seen.append(list(argv)))
-    return seen
-
-
-@pytest.mark.parametrize(
-    ("command", "subcommand", "extra"),
-    [
-        (["validate"], "validate", []),
-        (["generate-values"], "generate-values", ["-o", "/tmp/out", "--local-images"]),
-        (
-            ["deploy"],
-            "deploy",
-            ["--image-source", "local", "--build-images", "--kind-cluster", "x"],
-        ),
-    ],
-)
-def test_their_commands_are_forwarded_verbatim(their_cli, tmp_path, command, subcommand, extra):
-    # Their flags are not re-declared here, so anything they add keeps working
-    # without a change on our side. Order has to survive too.
-    config = tmp_path / "install.yaml"
-    config.write_text("dcim:\n  server: https://netbox.example\n")
-    repo = _nvcm_stub()
-
-    result = CliRunner().invoke(cli.main, [*command, str(config), "--nvcm-repo", str(repo), *extra])
-    assert result.exit_code == 0, result.output
-    argv = their_cli[0]
-    assert argv[argv.index("nv-config-manager-installer") + 1] == subcommand
-    if extra:
-        assert argv[-len(extra) :] == extra
-    # Their find_project_root() reads the working directory, so it has to be theirs.
-    assert argv[argv.index("--directory") + 1] == str(repo.resolve())
-
-
-@pytest.mark.parametrize("command", ["validate", "generate-values", "deploy"])
-def test_their_commands_resolve_the_config_path(their_cli, tmp_path, monkeypatch, command):
-    config = tmp_path / "install.yaml"
-    config.write_text("dcim:\n  server: https://netbox.example\n")
-    monkeypatch.chdir(tmp_path)
-
-    result = CliRunner().invoke(
-        cli.main, [command, "install.yaml", "--nvcm-repo", str(_nvcm_stub())]
-    )
-    assert result.exit_code == 0, result.output
-    argv = their_cli[0]
-    assert Path(argv[argv.index(command) + 1]).is_absolute()
-
-
-def test_deploy_warns_when_the_in_cluster_netbox_is_missing(their_cli, tmp_path, monkeypatch):
-    # A warning, not an error: NVCM will come up and fail to reach its DCIM, but
-    # pointing at a NetBox outside the cluster is legitimate and unverifiable here.
-    monkeypatch.setattr(cluster, "netbox_service_exists", lambda ns, runner=None: False)
-    config = tmp_path / "install.yaml"
-    config.write_text("dcim:\n  server: http://netbox\ncluster:\n  namespace: nv-config-manager\n")
-
-    result = CliRunner().invoke(cli.main, ["deploy", str(config), "--nvcm-repo", str(_nvcm_stub())])
-    assert result.exit_code == 0, result.output
-    assert "No netbox service" in result.output
-    assert their_cli, "the warning must not stop the deploy"
-
-
-def test_deploy_is_quiet_about_a_netbox_it_cannot_check(their_cli, tmp_path, monkeypatch):
-    monkeypatch.setattr(cluster, "netbox_service_exists", lambda ns, runner=None: False)
-    config = tmp_path / "install.yaml"
-    config.write_text("dcim:\n  server: https://netbox.example.com\n")
-
-    result = CliRunner().invoke(cli.main, ["deploy", str(config), "--nvcm-repo", str(_nvcm_stub())])
-    assert result.exit_code == 0, result.output
-    assert "No netbox service" not in result.output
-
-
-def test_init_seeds_the_fields_their_wizard_cannot_express(monkeypatch, tmp_path):
-    # Their TUI has no widget for provider_packages or the token, so both are
-    # written before it opens.
-    seen: list[list[str]] = []
-    monkeypatch.setattr(cli, "stream", lambda argv, cwd=None: seen.append(list(argv)))
-    out = tmp_path / "install.yaml"
-
-    result = CliRunner().invoke(
-        cli.main, ["init", "-c", str(out), "--nvcm-repo", str(_nvcm_stub())]
-    )
-    assert result.exit_code == 0, result.output
-    written = yaml.safe_load(out.read_text())
-    assert written["dcim"]["provider"] == "netbox"
-    assert written["dcim"]["provider_packages"][0]["image"]
-    assert written["services"]["nautobot"] is False
-    assert is_valid_api_token(written["secrets"]["k8s"]["dcim"]["values"]["token"])
-    assert seen[0][seen[0].index("init") + 1 :] == ["--config", str(out.resolve())]
-
-
-def test_init_restores_what_their_wizard_drops(monkeypatch, tmp_path):
-    out = tmp_path / "install.yaml"
-
-    def wizard_drops_our_fields(argv, cwd=None):
-        config = yaml.safe_load(out.read_text())
-        del config["dcim"]["provider_packages"]
-        config["services"]["nautobot"] = True
-        config["dcim"]["provider"] = "nautobot"
-        out.write_text(yaml.safe_dump(config))
-
-    monkeypatch.setattr(cli, "stream", wizard_drops_our_fields)
-    result = CliRunner().invoke(
-        cli.main, ["init", "-c", str(out), "--nvcm-repo", str(_nvcm_stub())]
-    )
-    assert result.exit_code == 0, result.output
-    written = yaml.safe_load(out.read_text())
-    assert written["dcim"]["provider"] == "netbox"
-    assert written["dcim"]["provider_packages"][0]["image"]
-    assert written["services"]["nautobot"] is False
-
-
-def test_init_keeps_the_token_already_in_the_file(monkeypatch, tmp_path):
-    # Regenerating it would break the NetBox side, which already holds this one.
-    token = generate_api_token()
-    out = tmp_path / "install.yaml"
-    out.write_text(yaml.safe_dump({"secrets": {"k8s": {"dcim": {"values": {"token": token}}}}}))
-    monkeypatch.setattr(cli, "stream", lambda argv, cwd=None: None)
-
-    result = CliRunner().invoke(
-        cli.main, ["init", "-c", str(out), "--nvcm-repo", str(_nvcm_stub())]
-    )
-    assert result.exit_code == 0, result.output
-    assert yaml.safe_load(out.read_text())["secrets"]["k8s"]["dcim"]["values"]["token"] == token
-
-
-def test_netbox_up_stops_before_nvcm(monkeypatch, tmp_path):
-    # It is `up` without the NVCM half, so NVCM's installer must never be called
-    # and the run must not need a checkout to be present.
-    seen: list[list[str]] = []
-    monkeypatch.setattr(cluster, "kind_cluster_exists", lambda name: True)
-    monkeypatch.setattr(cluster, "helm_dependency_build", lambda chart: None)
-    monkeypatch.setattr(cluster, "pending_release_status", lambda r, ns, runner=None: None)
-    monkeypatch.setattr(cluster, "orphaned_data_volumes", lambda r, ns, runner=None: [])
-    monkeypatch.setattr(cluster, "install_netbox", lambda *a, **k: None)
-    monkeypatch.setattr(cluster, "wait_for_netbox", lambda *a, **k: None)
-    monkeypatch.setattr(cluster, "run_nvcm_init", lambda *a, **k: "")
-    monkeypatch.setattr(cli, "stream", lambda argv, cwd=None: seen.append(list(argv)))
-
-    out = tmp_path / "install.yaml"
-    result = CliRunner().invoke(
-        cli.main, ["netbox", "up", "--no-kind-load", "--config-out", str(out)]
-    )
-    assert result.exit_code == 0, result.output
-    assert not seen, "NVCM's installer was invoked by `netbox up`"
-    assert "[7/7]" in result.output
-    # It still leaves behind the token and config the NVCM half needs.
-    assert is_valid_api_token(
-        yaml.safe_load(out.read_text())["secrets"]["k8s"]["dcim"]["values"]["token"]
-    )
-
-
-def _up_with_cluster_mocked(monkeypatch, *, kind_exists=True):
-    """Stub the cluster calls made before the combined deployer takes over."""
-    monkeypatch.setattr(cluster, "kind_cluster_exists", lambda name: kind_exists)
-    monkeypatch.setattr(cluster, "helm_dependency_build", lambda chart: None)
-    monkeypatch.setattr(cluster, "pending_release_status", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cluster, "orphaned_data_volumes", lambda *args, **kwargs: [])
-    monkeypatch.setattr(cluster, "install_netbox", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cluster, "wait_for_netbox", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cluster, "run_nvcm_init", lambda *args, **kwargs: "")
-    monkeypatch.setattr(cli.NetBoxDeployer, "run", lambda self: True)
-
-
-def test_up_uses_the_inherited_deployer_with_provider_settings(monkeypatch, tmp_path):
-    captured = {}
-    _up_with_cluster_mocked(monkeypatch)
-    repo = _nvcm_stub()
-
-    class RecordingDeployer:
-        def __init__(self, config, options, netbox, callback):
-            captured.update(config=config, options=options, netbox=netbox, callback=callback)
-
-        def run(self):
-            return True
-
-    monkeypatch.setattr(cli, "NetBoxDeployer", RecordingDeployer)
-
-    result = CliRunner().invoke(
-        cli.main,
-        [
-            "up",
-            "--no-kind-load",
-            "--skip-verify",
-            "--config-out",
-            str(tmp_path / "install.yaml"),
-            "--nvcm-repo",
-            str(repo),
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    assert captured["config"].dcim.provider == "netbox"
-    assert captured["config"].images.source.value == "local"
-    # .resolve(), as _resolve_nvcm_repo does: on macOS tmp_path is under
-    # /var/folders, a symlink to /private/var/folders, so the bare paths differ.
-    assert captured["options"].project_root == repo.resolve()
-    assert captured["options"].load_kind is False
-    assert captured["netbox"].chart == _CHART.resolve()
-    assert captured["netbox"].image_repository == "nv-config-manager-netbox"
-    assert "[4/4]" in result.output
-
-
-def test_up_reports_an_inherited_deployer_failure(monkeypatch, tmp_path):
-    _up_with_cluster_mocked(monkeypatch)
-    monkeypatch.setattr(cli.NetBoxDeployer, "run", lambda self: False)
-
-    result = CliRunner().invoke(
-        cli.main,
-        [
-            "up",
-            "--no-kind-load",
-            "--skip-verify",
-            "--config-out",
-            str(tmp_path / "install.yaml"),
-            "--nvcm-repo",
-            str(_nvcm_stub()),
-        ],
-    )
-    assert result.exit_code != 0
-    assert "deployment failed" in result.output.lower()
-
-
-def test_up_deploys_to_a_cluster_kind_did_not_create(monkeypatch, tmp_path):
-    """`--no-create-cluster` means "use the cluster I already have", including a
-    real one.
-
-    `kind_cluster_exists` is false for any cluster kind did not create -- and for
-    every cluster when kind is not installed, since the CommandError is swallowed.
-    Treating that as fatal made the flag refuse to deploy anywhere but kind, which
-    is exactly what `--no-kind-load` exists to support.
-    """
-    _up_with_cluster_mocked(monkeypatch, kind_exists=False)
-
-    result = CliRunner().invoke(
-        cli.main,
-        [
-            "netbox",
-            "up",
-            "--no-create-cluster",
-            "--no-kind-load",
-            "--config-out",
-            str(tmp_path / "install.yaml"),
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    assert "current kubectl context" in result.output
-
-
-def test_netbox_up_and_up_share_their_options():
-    # `netbox up` is a thin wrapper; a flag added to one must appear on the other.
-    shared = {p.name for p in cli.up.params} - {"skip_nvcm", "skip_verify"}
-    assert shared == {p.name for p in cli.netbox_up.params}
 
 
 def test_require_tools_names_everything_missing():
@@ -723,31 +479,6 @@ def test_install_netbox_appends_extra_set_overrides_last():
     assert argv.index("netbox.replicaCount=3") > argv.index("netbox.image.tag=1.2.3")
 
 
-def test_config_options_shared_by_config_and_up_honour_the_profile_public_url():
-    # `up` had its own copy and omitted the public_url fallback.
-    base = {
-        "dcim": {"public_url": "https://netbox.corp", "provider_packages": [{"image": "img:1"}]}
-    }
-    options = cli._config_options(base, api_token="nbt_x.y", namespace="ns", size="small")
-    assert options.netbox_public_url == "https://netbox.corp"
-    assert options.provider_image == "img:1"
-    # An explicit flag still wins over the profile.
-    explicit = cli._config_options(
-        base, api_token="nbt_x.y", namespace="ns", size="small", public_url="http://other"
-    )
-    assert explicit.netbox_public_url == "http://other"
-
-
-def test_provider_image_tag_tracks_the_package_version():
-    # Hardcoded, a version bump left the installer asking for an unbuilt tag.
-    assert cfg.PROVIDER_IMAGE.endswith(f":{cfg.IMAGE_TAG}")
-    assert cfg.ConfigOptions(api_token="nbt_x.y").provider_image == cfg.PROVIDER_IMAGE
-    assert (
-        cfg.ConfigOptions(api_token="nbt_x.y").netbox_public_url
-        == "https://netbox.config-manager.local"
-    )
-
-
 # -- locating the NVCM checkout ------------------------------------------------
 
 
@@ -762,47 +493,6 @@ def test_nvcm_repo_precedence_flag_then_env_then_default(tmp_path, monkeypatch):
     monkeypatch.delenv("NVCM_REPO")
     path, source = _nvcm_repo_candidate(None)
     assert path.name == "nv-config-manager" and source == "the default"
-
-
-def _fake_checkout(root):
-    """A directory shaped enough like an NVCM checkout to satisfy validation."""
-    (root / "installer").mkdir(parents=True)
-    (root / "installer" / "pyproject.toml").write_text("")
-    (root / "deploy" / "helm").mkdir(parents=True)
-    (root / "deploy" / "helm" / "Chart.yaml").write_text("")
-    return root
-
-
-def test_nvcm_repo_resolves_from_the_environment(tmp_path, monkeypatch):
-    from nv_config_manager_dcim_netbox.installer.cli import _resolve_nvcm_repo
-
-    repo = _fake_checkout(tmp_path / "nvcm")
-    monkeypatch.setenv("NVCM_REPO", str(repo))
-    assert _resolve_nvcm_repo(None) == repo.resolve()
-
-
-def test_missing_checkout_names_the_path_and_its_source(tmp_path, monkeypatch):
-    # The whole point: a relative default resolved against the wrong working
-    # directory is invisible unless the error prints the absolute path it tried.
-    from nv_config_manager_dcim_netbox.installer.cli import _resolve_nvcm_repo
-
-    monkeypatch.setenv("NVCM_REPO", str(tmp_path / "nope"))
-    with pytest.raises(click.ClickException) as excinfo:
-        _resolve_nvcm_repo(None)
-    message = str(excinfo.value)
-    assert str(tmp_path / "nope") in message
-    assert "$NVCM_REPO" in message
-
-
-def test_wrong_directory_is_reported_as_not_a_checkout(tmp_path, monkeypatch):
-    from nv_config_manager_dcim_netbox.installer.cli import _resolve_nvcm_repo
-
-    monkeypatch.delenv("NVCM_REPO", raising=False)
-    with pytest.raises(click.ClickException) as excinfo:
-        _resolve_nvcm_repo(tmp_path)
-    message = str(excinfo.value)
-    assert "not an nv-config-manager checkout" in message
-    assert "--nvcm-repo" in message
 
 
 # -- failure reporting ---------------------------------------------------------
@@ -821,25 +511,6 @@ def test_a_failed_tool_call_is_an_error_not_a_traceback(monkeypatch):
     assert result.exit_code != 0
     assert "Error: `helm upgrade` exited 1" in result.output
     assert "Traceback" not in result.output
-
-
-def test_pending_release_is_reported_with_the_command_that_clears_it(monkeypatch):
-    # An interrupted `helm upgrade --install` leaves the release pending, and
-    # every later run then fails with helm's opaque "another operation in
-    # progress". Name the fix instead.
-    monkeypatch.setattr(cluster, "kind_cluster_exists", lambda name: True)
-    monkeypatch.setattr(cluster, "helm_dependency_build", lambda chart: None)
-    monkeypatch.setattr(
-        cluster, "pending_release_status", lambda r, ns, runner=None: "pending-install"
-    )
-
-    result = CliRunner().invoke(
-        cli.main,
-        ["up", "--nvcm-repo", str(_nvcm_stub()), "--no-kind-load", "--skip-nvcm"],
-    )
-    assert result.exit_code != 0
-    assert "pending-install" in result.output
-    assert "helm uninstall netbox -n nv-config-manager" in result.output
 
 
 def test_data_volumes_are_orphaned_only_once_their_secret_is_gone(monkeypatch):
@@ -864,35 +535,6 @@ def test_data_volumes_are_orphaned_only_once_their_secret_is_gone(monkeypatch):
         cluster, "kubectl", lambda *a, namespace=None, stdin=None, runner=None: pvcs
     )
     assert cluster.orphaned_data_volumes("netbox", "nv-config-manager") == []
-
-
-def test_orphaned_volumes_are_reported_with_the_command_that_clears_them(monkeypatch):
-    monkeypatch.setattr(cluster, "kind_cluster_exists", lambda name: True)
-    monkeypatch.setattr(cluster, "helm_dependency_build", lambda chart: None)
-    monkeypatch.setattr(cluster, "pending_release_status", lambda r, ns, runner=None: None)
-    monkeypatch.setattr(
-        cluster,
-        "orphaned_data_volumes",
-        lambda r, ns, runner=None: ["data-netbox-postgresql-0"],
-    )
-
-    result = CliRunner().invoke(
-        cli.main,
-        ["up", "--nvcm-repo", str(_nvcm_stub()), "--no-kind-load", "--skip-nvcm"],
-    )
-    assert result.exit_code != 0
-    assert "kubectl delete pvc -n nv-config-manager data-netbox-postgresql-0" in result.output
-
-
-def _nvcm_stub():
-    """A directory shaped like an NVCM checkout, for tests that must get past
-    repo validation."""
-    root = Path(tempfile.mkdtemp())
-    (root / "installer").mkdir()
-    (root / "installer" / "pyproject.toml").write_text("")
-    (root / "deploy" / "helm").mkdir(parents=True)
-    (root / "deploy" / "helm" / "Chart.yaml").write_text("")
-    return root
 
 
 # -- air-gapped bundle --------------------------------------------------------
@@ -1412,7 +1054,7 @@ def test_verify_fails_when_netbox_publishes_to_a_different_subject(monkeypatch):
 
     assert result.exit_code != 0
     assert "nautobot.change" in result.output
-    assert cfg.EVENT_SUBJECT in result.output
+    assert EVENT_SUBJECT in result.output
 
 
 def test_the_publisher_probe_is_valid_python():
@@ -1437,9 +1079,7 @@ def test_verify_fails_when_the_plugin_stamps_a_different_contract_version(monkey
     monkeypatch.setattr(
         cluster,
         "netbox_publisher_status",
-        lambda ns: cluster.PublisherStatus(
-            "nats", True, cfg.EVENT_SUBJECT, cfg.EVENT_STREAM, "0.9"
-        ),
+        lambda ns: cluster.PublisherStatus("nats", True, EVENT_SUBJECT, EVENT_STREAM, "0.9"),
     )
 
     result = CliRunner().invoke(cli.main, ["verify"])
@@ -1456,14 +1096,14 @@ def test_verify_fails_when_netbox_publishes_to_a_different_stream(monkeypatch):
     monkeypatch.setattr(
         cluster,
         "netbox_publisher_status",
-        lambda ns: cluster.PublisherStatus("nats", True, cfg.EVENT_SUBJECT, "nautobot"),
+        lambda ns: cluster.PublisherStatus("nats", True, EVENT_SUBJECT, "nautobot"),
     )
 
     result = CliRunner().invoke(cli.main, ["verify"])
 
     assert result.exit_code != 0
     assert "nautobot" in result.output
-    assert cfg.EVENT_STREAM in result.output
+    assert EVENT_STREAM in result.output
 
 
 def test_verify_accepts_a_matching_subject(monkeypatch):
@@ -1473,7 +1113,7 @@ def test_verify_accepts_a_matching_subject(monkeypatch):
         cluster,
         "netbox_publisher_status",
         lambda ns: cluster.PublisherStatus(
-            "nats", True, cfg.EVENT_SUBJECT, cfg.EVENT_STREAM, DCIM_EVENT_CONTRACT_VERSION
+            "nats", True, EVENT_SUBJECT, EVENT_STREAM, DCIM_EVENT_CONTRACT_VERSION
         ),
     )
     monkeypatch.setattr(cluster, "publish_test_event", lambda *a, **k: "")
@@ -1553,118 +1193,11 @@ def test_the_route_waits_for_the_gateway_api_to_exist():
     assert "netbox.config-manager.local" in with_api
 
 
-def test_apply_dcim_sets_the_event_stream_and_subject():
-    """NVCM builds the JetStream stream, its subject filter and the consumer's
-    filter from these, and the chart renders the plugin's nats_subject from the
-    same value.
-
-    Left unset, NVCM uses its own defaults and creates a stream filtering on
-    `nautobot` while NetBox publishes to `netbox.change`. Nothing matches, so
-    every change event is dropped by the broker with no error anywhere: the
-    publisher succeeds, the stream stays empty, and the consumer sits idle.
-    """
-    # The Air path patches the config NVCM's generator wrote, which has no events.
-    patched = cfg.apply_dcim({"dcim": {}}, cfg.ConfigOptions(api_token=generate_api_token()))
-    assert patched["dcim"]["event_stream"] == cfg.EVENT_STREAM
-    assert patched["dcim"]["event_subject"] == cfg.EVENT_SUBJECT
-
-    # And both must equal what the chart tells the plugin to publish on.
-    chart_values = yaml.safe_load((_CHART / "values.yaml").read_text())
-    assert patched["dcim"]["event_subject"] == chart_values["nvcm"]["eventSubject"]
-    assert patched["dcim"]["event_stream"] == chart_values["nvcm"]["eventStream"]
-
-
-def test_the_shipped_profile_agrees_with_apply_dcim():
-    profile = cfg.load_profile()
-    assert profile["dcim"]["event_stream"] == cfg.EVENT_STREAM
-    assert profile["dcim"]["event_subject"] == cfg.EVENT_SUBJECT
-
-
-def test_nats_password_is_seeded_where_nvcm_reads_it():
-    """NVCM generates a NATS password unless the config supplies one.
-
-    Supplying it is what lets NetBox be installed once, with the password
-    already set, instead of upgraded to switch its publisher on. NATS has its
-    own secret group independently of the selected DCIM provider.
-    """
-    password = generate_nats_password()
-    assert is_valid_nats_password(password)
-
-    patched = cfg.apply_dcim(
-        {}, cfg.ConfigOptions(api_token=generate_api_token(), nats_password=password)
-    )
-    group = patched["secrets"]["k8s"]["nats"]
-    assert group["enabled"] is True
-    assert group["values"]["password"] == password
-
-
 def test_nats_password_matches_the_alphabet_nvcm_enforces():
     # It is interpolated unquoted into NVCM's NATS config, so their validator
     # requires [A-Za-z][A-Za-z0-9]* and at least 16 characters.
     for _ in range(20):
         assert re.fullmatch(r"[A-Za-z][A-Za-z0-9]{15,}", generate_nats_password())
-
-
-def _written_nats_password(path: Path) -> str:
-    return yaml.safe_load(path.read_text())["secrets"]["k8s"]["nats"]["values"]["password"]
-
-
-def test_config_command_keeps_a_nats_password_already_present(tmp_path):
-    """Regenerating it would leave NVCM's NATS users and a deployed NetBox
-    disagreeing until both are rolled.
-
-    Re-run exactly as a user would, with no --profile: the password lives in the
-    file this command *writes*, and reading the profile for it (which never has
-    one) minted a fresh password every invocation. The mismatch surfaces only
-    later, as `Authorization Violation` in the NetBox log with renders silently
-    not happening.
-    """
-    out = tmp_path / "install.yaml"
-    result = CliRunner().invoke(main, ["config", "-o", str(out)])
-    assert result.exit_code == 0, result.output
-    first = _written_nats_password(out)
-
-    again = CliRunner().invoke(main, ["config", "-o", str(out)])
-    assert again.exit_code == 0, again.output
-    assert _written_nats_password(out) == first
-
-    # And the same when the profile is passed explicitly, which is what a caller
-    # driving NVCM's installer by hand does.
-    third = CliRunner().invoke(main, ["config", "-o", str(out), "--profile", str(out)])
-    assert third.exit_code == 0, third.output
-    assert _written_nats_password(out) == first
-
-
-def test_a_deployed_nats_password_beats_the_one_in_the_config(tmp_path, monkeypatch):
-    """NVCM's deployer skips any secret that already exists (`deployer.py`,
-    `_apply_secret`: `if exists and not self.options.recreate_secrets`).
-
-    So on a redeploy the natsPassword we put in the install config is read,
-    validated, and then not applied -- nats-nv-config-manager keeps whatever it
-    was first created with. Writing anything else into the NetBox release leaves
-    the publisher authenticating with a password NATS rejects, and the only
-    trace is `Authorization Violation` in the NetBox log while renders silently
-    stop happening.
-    """
-    monkeypatch.setattr(cluster, "read_nats_password", lambda *a, **k: "DeployedPassword123456")
-
-    out = tmp_path / "install.yaml"
-    result = CliRunner().invoke(main, ["config", "-o", str(out)])
-    assert result.exit_code == 0, result.output
-
-    values = yaml.safe_load(out.read_text())["secrets"]["k8s"]["nats"]["values"]
-    assert values["password"] == "DeployedPassword123456"
-
-
-def test_a_deployed_nats_password_nvcm_would_reject_fails_loudly(tmp_path, monkeypatch):
-    # Writing it back would abort the deploy inside their validator, far from
-    # the cause. Say which secret is wrong and how to clear it instead.
-    monkeypatch.setattr(cluster, "read_nats_password", lambda *a, **k: "9-bad-password-value")
-
-    result = CliRunner().invoke(main, ["config", "-o", str(tmp_path / "install.yaml")])
-    assert result.exit_code != 0
-    assert cluster.NVCM_NATS_SECRET in result.output
-    assert "--recreate-secrets" in result.output
 
 
 def test_kind_refuses_images_the_node_cannot_run(monkeypatch):
@@ -1694,37 +1227,3 @@ def test_no_kind_node_is_not_an_arch_failure(monkeypatch):
     # Nothing to ask; the load step reports its own failure.
     monkeypatch.setattr(cluster, "kind_node_arch", lambda c: "")
     cluster.check_image_arch(["netbox:0.1.0"], "nv-config-manager")
-
-
-def test_up_reuses_the_nats_password_from_the_config_it_wrote(monkeypatch, tmp_path):
-    """Reading the base profile for it always came up empty, so every run minted a
-    fresh password and rewrote the NetBox release with it.
-
-    `config` already resolves this from `--output`; `up` has to read the same file
-    or the two disagree about what NetBox publishes with.
-    """
-    password = "ReusedNatsPassword1"
-    out = tmp_path / "install.yaml"
-    out.write_text(
-        yaml.safe_dump({"secrets": {"k8s": {"nats": {"values": {"password": password}}}}})
-    )
-    monkeypatch.setattr(cluster, "kind_cluster_exists", lambda name: True)
-    monkeypatch.setattr(cluster, "helm_dependency_build", lambda chart: None)
-    monkeypatch.setattr(cluster, "pending_release_status", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cluster, "orphaned_data_volumes", lambda *args, **kwargs: [])
-    seen = {}
-    monkeypatch.setattr(
-        cluster,
-        "install_netbox",
-        lambda *args, **kwargs: seen.update(nats=kwargs.get("nats_password")),
-    )
-    monkeypatch.setattr(cluster, "wait_for_netbox", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cluster, "run_nvcm_init", lambda *args, **kwargs: "")
-
-    result = CliRunner().invoke(
-        cli.main, ["netbox", "up", "--no-kind-load", "--config-out", str(out)]
-    )
-
-    assert result.exit_code == 0, result.output
-    assert seen["nats"] == password
-    assert _written_nats_password(out) == password

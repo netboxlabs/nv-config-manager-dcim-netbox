@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NetBox Labs. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Deploy NetBox into a DSX Air sim, driven by NVCM's orchestrator callbacks.
+"""Deploy NetBox into a DSX Air sim, in the window before NVCM deploys.
 
-`on_deploy_started` fires after the install config is uploaded and before the
-deploy runs; `on_complete` after everything.
+Driven by `installer.air_hooks.NetBoxAirHooks`: `pre_deploy` ships the images
+and chart and runs the bring-up, `wait_for_configs` and `post_deploy` reuse
+the same SSH plumbing afterwards.
 """
 
 from __future__ import annotations
@@ -11,31 +12,27 @@ from __future__ import annotations
 import shlex
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 
-import yaml
+from nv_config_manager_installer.air_sim.constants import (
+    CONFIG_MANAGER_HOSTNAME,
+    CONFIG_MANAGER_REMOTE_DIR,
+    NVCM_BOX_USER,
+)
+from nv_config_manager_installer.air_sim.sim_config import SimConfig
+from nv_config_manager_installer.air_sim.sim_manager import AirSimulationManager
 
 from nv_config_manager_dcim_netbox.installer import cluster
-from nv_config_manager_dcim_netbox.installer import config as base_config
-from nv_config_manager_dcim_netbox.installer.air import AirSupportUnavailable
-from nv_config_manager_dcim_netbox.installer.air.config import NetBoxSimConfig
 from nv_config_manager_dcim_netbox.installer.air.images import TARGET_PLATFORM
+from nv_config_manager_dcim_netbox.installer.config import DEFAULT_CHART
 from nv_config_manager_dcim_netbox.installer.remote import ScriptRunner, SshRunner
+from nv_config_manager_dcim_netbox.installer.settings import NetBoxAirSettings
 from nv_config_manager_dcim_netbox.installer.shell import CommandError, run
 from nv_config_manager_dcim_netbox.installer.tokens import (
     generate_api_token,
     generate_nats_password,
 )
-
-try:
-    from nv_config_manager_installer.air_sim.constants import (
-        CONFIG_MANAGER_INSTALL_CONFIG,
-        CONFIG_MANAGER_REMOTE_DIR,
-        NVCM_BOX_USER,
-    )
-    from nv_config_manager_installer.air_sim.sim_manager import AirSimulationManager
-except ImportError as exc:  # pragma: no cover - depends on the `air` extra
-    raise AirSupportUnavailable(exc) from exc
 
 # cloud-init creates the cluster with this name.
 KIND_CLUSTER = "nvcm"
@@ -62,29 +59,34 @@ NETBOX_INSTALL_TIMEOUT = "20m"
 # watching for is emitted.
 SCRIPT_DONE_MARKER = "NVCM_NETBOX_SCRIPT_DONE"
 NAMESPACE = "nv-config-manager"
+REMOTE_CHART_DIR = f"/home/{NVCM_BOX_USER}/charts"
 
-_REPO_ROOT = Path(__file__).resolve().parents[4]
-DEFAULT_CHART = _REPO_ROOT / "deploy" / "netbox"
+
+def blueprint_dir(cfg: SimConfig, remote_repo: str = CONFIG_MANAGER_REMOTE_DIR) -> str:
+    """Return the sim's topology blueprint inside the NVCM clone on the box."""
+    return f"{remote_repo}/development/mock_topology/context/{cfg.mock_blueprint}"
 
 
 class NetBoxAirCallback:
-    """Wraps the CLI's callback and adds the NetBox bring-up.
+    """The NetBox bring-up on a sim box, as one uploaded script.
 
-    Every method delegates to the wrapped callback, so the caller's logging and
-    step reporting still work.
+    Named for the orchestrator callback it used to wrap; it now runs from the
+    provider's AIR hooks.
     """
 
     def __init__(
         self,
-        inner,
-        cfg: NetBoxSimConfig,
+        log: Callable[[str], None],
+        cfg: SimConfig,
+        settings: NetBoxAirSettings | None = None,
         chart: Path | None = None,
-        manager=None,
+        manager: AirSimulationManager | None = None,
     ) -> None:
-        self._inner = inner
+        self._log = log
         self.cfg = cfg
-        self.chart = chart or cfg.netbox_chart or DEFAULT_CHART
-        self.api_token = cfg.dcim_token or generate_api_token()
+        self.settings = settings or NetBoxAirSettings.model_validate(cfg.dcim_settings)
+        self.chart = chart or self.settings.chart or DEFAULT_CHART
+        self.api_token = self.settings.token or generate_api_token()
         # Supplied to NVCM in the install config, so NetBox is installed with it
         # rather than upgraded again once NVCM's deployer has minted one.
         self.nats_password = generate_nats_password()
@@ -98,73 +100,19 @@ class NetBoxAirCallback:
             ssh_password=cfg.oob_ssh_password,
         )
 
-    # -- OrchestratorCallback ------------------------------------------------
-
-    def on_step(self, step_id, status, message: str = "") -> None:
-        self._inner.on_step(step_id, status, message)
+    def set_manager(self, manager: AirSimulationManager) -> None:
+        """Use the orchestrator's own AIR client for the remaining SSH work."""
+        self._manager = manager
 
     def on_log(self, line: str) -> None:
-        self._inner.on_log(line)
-
-    def on_ssh_ready(self, host: str, port: int) -> None:
-        self.host, self.port = host, port
-        self._inner.on_ssh_ready(host, port)
-
-    def on_deploy_started(self, host: str, port: int) -> None:
-        """Everything NetBox, in the window before NVCM deploys."""
-        self.host, self.port = host, port
-        try:
-            self.bring_up_netbox(host, port)
-        finally:
-            self._inner.on_deploy_started(host, port)
-
-    def on_complete(self, success: bool, host: str = "", port: int = 0) -> None:
-        # NetBox already holds the NATS password (see __init__), so the publisher
-        # needs nothing here. Its HTTPRoute does: that could not render during
-        # bring-up because NVCM's deploy had not yet registered the Gateway API
-        # CRDs, and this is the first point at which it has.
-        box, box_port = host or self.host, port or self.port
-        if success and self._netbox_is_deployed(box, box_port):
-            for label, action in (
-                ("publish the NetBox route", self.publish_route),
-                (f"add {self.cfg.netbox_hostname()} to /etc/hosts", self.publish_hostname),
-            ):
-                try:
-                    action(box, box_port)
-                except Exception as exc:  # noqa: BLE001 - cosmetic, never fail the deploy
-                    self.on_log(f"Could not {label}: {exc}")
-        elif success:
-            self.on_log(
-                "NetBox is not on the sim's cluster, so its route and /etc/hosts entry "
-                "were skipped. Nothing was deployed -- see the failed step above."
-            )
-        self._inner.on_complete(success, host, port)
-
-    def _netbox_is_deployed(self, host: str, port: int) -> bool:
-        """Whether NetBox actually reached the sim's cluster.
-
-        ``success`` does not answer this: NVCM's orchestrator reports the run as
-        successful even when `wait-setup` failed and it therefore skipped
-        `upload-files` and `run-deploy` (``orchestrator.run`` sets ``success =
-        True`` whenever ``_run_impl`` returns).
-        """
-        try:
-            return cluster.netbox_service_exists(NAMESPACE, runner=self.runner(host, port))
-        except Exception:  # noqa: BLE001 - an unreachable box is "not deployed" too
-            return False
+        self._log(line)
 
     # -- the work ------------------------------------------------------------
 
     def runner(self, host: str, port: int) -> SshRunner:
         return SshRunner(self._manager, host, port)
 
-    def bring_up_netbox(
-        self,
-        host: str,
-        port: int,
-        *,
-        patch_install_config: bool = True,
-    ) -> None:
+    def bring_up_netbox(self, host: str, port: int) -> None:
         """Ship the images and chart, then run the whole bring-up in one session.
 
         Modelled on NVCM's own deploy, which uploads what it needs and then runs a
@@ -172,6 +120,7 @@ class NetBoxAirCallback:
         command at a time costs an authenticated SSH connection each, and any one
         of them can catch a freshly booted sshd mid-blip and lose the run.
         """
+        self.host, self.port = host, port
         self.check_image_arch(host, port)
 
         self.on_log("Shipping NetBox and provider images into the sim...")
@@ -182,10 +131,6 @@ class NetBoxAirCallback:
 
         self.on_log("Deploying NetBox...")
         self.run_script(host, port, self.bring_up_script(images_tar, chart_tar))
-
-        if patch_install_config:
-            self.on_log("Pointing NVCM's install config at NetBox...")
-            self.patch_install_config(host, port)
 
     def wait_for_intended_configs(
         self,
@@ -242,15 +187,32 @@ class NetBoxAirCallback:
         self.on_log(f"Timed out waiting for NetBox intended configs; last count: {last_counts}")
         return False
 
+    def gateway_overrides(self) -> list[str]:
+        """Chart `--set` arguments that publish NetBox on the sim's Gateway.
+
+        A sim serves NVCM at `nvcm.air`, not the `config-manager.local` a kind
+        cluster uses. Skipped when `helm_set` already names either key, which is
+        appended after these and would otherwise silently conflict.
+        """
+        if any(
+            "gateway.baseHostname" in s or "gateway.hostname" in s for s in self.settings.helm_set
+        ):
+            return []
+        overrides = [f"nvcm.gateway.baseHostname={CONFIG_MANAGER_HOSTNAME}"]
+        if self.settings.hostname:
+            overrides.append(f"nvcm.gateway.hostname={self.settings.hostname}")
+        return overrides
+
     def bring_up_script(self, images_tar: str, chart_tar: str) -> str:
         """Render every on-box step as one script.
 
         Built by running the same `cluster` functions the kind path uses against a
         recording runner, so the two cannot drift.
         """
-        chart_dir = f"/home/{NVCM_BOX_USER}/charts"
-        remote_chart = f"{chart_dir}/{self.chart.name}"
+        settings = self.settings
+        remote_chart = f"{REMOTE_CHART_DIR}/{self.chart.name}"
 
+        chart_dir = shlex.quote(REMOTE_CHART_DIR)
         script = ScriptRunner()
         script.run(["kind", "load", "image-archive", images_tar, "--name", KIND_CLUSTER])
         script.run(["rm", "-f", images_tar])
@@ -258,35 +220,37 @@ class NetBoxAirCallback:
             [
                 "sh",
                 "-c",
-                f"rm -rf {shlex.quote(chart_dir)} && mkdir -p {shlex.quote(chart_dir)} "
-                f"&& tar -xzf {shlex.quote(chart_tar)} -C {shlex.quote(chart_dir)} "
+                f"rm -rf {chart_dir} && mkdir -p {chart_dir} "
+                f"&& tar -xzf {shlex.quote(chart_tar)} -C {chart_dir} "
                 f"&& rm -f {shlex.quote(chart_tar)}",
             ]
         )
+        esc = cluster.helm_set_value
         cluster.install_netbox(
             remote_chart,
-            release=self.cfg.netbox_release,
+            release=settings.release,
             namespace=NAMESPACE,
             api_token=self.api_token,
-            image_repository=self.cfg.netbox_image,
-            image_tag=self.cfg.netbox_image_tag,
+            image_repository=settings.image_repository,
+            image_tag=settings.image_tag,
             nats_password=self.nats_password,
-            workflow_url=self.cfg.workflow_url(),
+            workflow_url=f"https://{CONFIG_MANAGER_HOSTNAME}",
             extra_set=[
-                *self.cfg.gateway_overrides(),
-                f"netbox.superuser.name={cluster.helm_set_value(self.cfg.netbox_superuser_name)}",
-                "netbox.superuser.password="
-                f"{cluster.helm_set_value(self.cfg.netbox_superuser_password)}",
-                *self.cfg.netbox_helm_set,
+                *self.gateway_overrides(),
+                f"nvcm.eventStream={esc(settings.event_stream)}",
+                f"nvcm.eventSubject={esc(settings.event_subject)}",
+                f"netbox.superuser.name={esc(settings.superuser_name)}",
+                f"netbox.superuser.password={esc(settings.superuser_password)}",
+                *settings.helm_set,
             ],
             timeout=NETBOX_INSTALL_TIMEOUT,
             runner=script,
         )
         cluster.wait_for_netbox(NAMESPACE, runner=script)
         cluster.run_nvcm_init(NAMESPACE, self.api_token, runner=script)
-        if self.cfg.load_blueprint:
+        if settings.load_blueprint:
             cluster.load_topology(
-                self.cfg.blueprint_dir(CONFIG_MANAGER_REMOTE_DIR),
+                blueprint_dir(self.cfg),
                 NAMESPACE,
                 deployment_name=self.cfg.deployment_name or self.cfg.mock_blueprint,
                 runner=script,
@@ -319,10 +283,6 @@ class NetBoxAirCallback:
         # with exit 255. `SshRunner` retries precisely that; NVCM's
         # `_ssh_run_and_tail` does not, and it cannot tell a refused connection
         # from a script that failed -- both surface as "did not finish".
-        #
-        # So the session is established through the retrying runner first. The
-        # script itself is expensive and not worth re-running blindly, so it is
-        # still handed to the tail exactly once.
         try:
             self.runner(host, port).run(["true"])
         except Exception as exc:  # noqa: BLE001 - re-raised with what it means
@@ -362,18 +322,9 @@ class NetBoxAirCallback:
     def _bring_up_command(quoted_script: str, script_timeout: int) -> str:
         """Wrap the uploaded script for the tail.
 
-        Two things beyond running it, both working around how NVCM's
-        `_ssh_run_and_tail` behaves (sim_manager.py):
-
-        * `timeout` bounds the script on the box. The tail returns cleanly when
-          the remote stdout closes, so guaranteeing the script exits is what
-          turns a hung step into a reported failure.
-        * A heartbeat keeps output flowing. The tail evaluates its deadline only
-          inside `for line in proc.stdout`, so a silent run never reaches the
-          check and waits forever; a periodic line makes that timeout real.
-
-        Neither helps if the connection itself dies -- that needs a keepalive on
-        their side, and the failure message says so.
+        `timeout` bounds the script on the box, so a hung step becomes a reported
+        failure, and a heartbeat keeps output flowing so the tail's deadline is
+        evaluated: it only checks inside `for line in proc.stdout`.
         """
         # Pod READY/STATUS on every beat, so a first boot grinding through
         # migrations is distinguishable from a stall without opening a session.
@@ -403,69 +354,38 @@ class NetBoxAirCallback:
         """Create NetBox's HTTPRoute, now that the Gateway API CRDs are registered.
 
         The bring-up installs the chart before NVCM deploys, so the Gateway API does
-        not exist on the box yet and templates/httproute.yaml is skipped --
-        rendering an HTTPRoute without its CRDs fails the whole release. Nothing
-        else upgrades the release afterwards, so without this pass the sim's
-        `https://netbox.<hostname>` never routes.
-
-        The chart is still unpacked where the bring-up put it, and --reuse-values
-        replays the install's own values.
+        not exist on the box yet and templates/httproute.yaml is skipped. The chart
+        is still unpacked where the bring-up put it, and --reuse-values replays the
+        install's own values.
         """
         runner = self.runner(host, port)
-        remote_chart = f"/home/{NVCM_BOX_USER}/charts/{self.chart.name}"
+        remote_chart = f"{REMOTE_CHART_DIR}/{self.chart.name}"
         cluster.publish_netbox_route(
             remote_chart,
-            release=self.cfg.netbox_release,
+            release=self.settings.release,
             namespace=NAMESPACE,
             runner=runner,
         )
+        hostname = self.settings.netbox_hostname(CONFIG_MANAGER_HOSTNAME)
         if cluster.netbox_route_exists(NAMESPACE, runner=runner):
-            self.on_log(f"NetBox route published for https://{self.cfg.netbox_hostname()}")
+            self.on_log(f"NetBox route published for https://{hostname}")
         else:
             self.on_log(
                 "NetBox still has no HTTPRoute after the upgrade, so its hostname will not "
                 "resolve. Reach it with kubectl port-forward on the sim box instead."
             )
 
-    def publish_hostname(self, host: str, port: int) -> None:
-        """Resolve NetBox's hostname on the sim box, next to NVCM's own.
-
-        NVCM's post-deploy writes one /etc/hosts line pointing its hostnames at
-        the Gateway's address, but that list is fixed and has no NetBox entry, so
-        `https://netbox.<hostname>` would not resolve through the SOCKS proxy the
-        documented browser flow uses.
-
-        The address is read back from the line NVCM just wrote rather than
-        rediscovered, so the two can never disagree. Appended as its own line,
-        which their `grep -q` guard leaves alone.
-        """
-        hostname = self.cfg.netbox_hostname()
-        base = hostname.split(".", 1)[1]
-        script = (
-            f"ip=$(awk '/[[:space:]]{base.replace('.', chr(92) + '.')}([[:space:]]|$)/"
-            " {print $1; exit}' /etc/hosts); "
-            'if [ -z "$ip" ]; then echo "no NVCM hosts entry yet" >&2; exit 1; fi; '
-            f"grep -q {shlex.quote(hostname)} /etc/hosts "
-            f'|| echo "$ip {hostname}" | sudo tee -a /etc/hosts > /dev/null'
-        )
-        self.runner(host, port).run(["sh", "-c", script])
-        self.on_log(f"NetBox is at https://{hostname} on the sim.")
-
     def check_image_arch(self, host: str, port: int) -> None:
         """Refuse to ship images the sim box cannot execute.
 
-        The orchestrator builds for the sim architecture before allocating one.
-        Keep this check at the upload boundary so an image that did not come from
-        that build -- overridden in the sim config, or replaced locally -- cannot
-        reach the cluster with an incompatible architecture.
+        The hooks build for the sim architecture before allocating one. This check
+        sits at the upload boundary so an image that did not come from that build
+        cannot reach the cluster with an incompatible architecture.
         """
         want = self.runner(host, port).run(["uname", "-m"]).strip()
         want = {"x86_64": "amd64", "aarch64": "arm64"}.get(want, want)
 
-        images = [
-            self.cfg.dcim_provider_package_image,
-            f"{self.cfg.netbox_image}:{self.cfg.netbox_image_tag}",
-        ]
+        images = [self.settings.provider_image, self.settings.netbox_image]
         wrong = []
         for image in images:
             try:
@@ -479,7 +399,7 @@ class NetBoxAirCallback:
             raise RuntimeError(
                 f"The sim box is {want}, but these images are not:\n"
                 + "\n".join(wrong)
-                + f"\n\nThe orchestrator builds these for {TARGET_PLATFORM} before allocating "
+                + f"\n\nThe hooks build these for {TARGET_PLATFORM} before allocating "
                 + "the sim, so each one above was either overridden in the sim config, "
                 + "replaced locally, or never built. Check the build output above."
             )
@@ -490,10 +410,7 @@ class NetBoxAirCallback:
         Neither image is in a registry and both are pulled IfNotPresent, so they
         must already be on the node. `kind load` runs later, in the script.
         """
-        images = [
-            self.cfg.dcim_provider_package_image,
-            f"{self.cfg.netbox_image}:{self.cfg.netbox_image_tag}",
-        ]
+        images = [self.settings.provider_image, self.settings.netbox_image]
         remote = f"/home/{NVCM_BOX_USER}/nvcm-netbox-images.tar"
         with tempfile.NamedTemporaryFile(suffix=".tar", prefix="nvcm-netbox-") as tmp:
             archive = Path(tmp.name)
@@ -514,32 +431,3 @@ class NetBoxAirCallback:
             run(["tar", "-czf", str(archive), "-C", str(self.chart.parent), self.chart.name])
             self.runner(host, port).upload(archive, remote_tar)
         return remote_tar
-
-    def patch_install_config(self, host: str, port: int) -> None:
-        """Rewrite the uploaded install config to select NetBox.
-
-        Only the DCIM fields change; the rest of the file stays as NVCM's
-        generator wrote it.
-        """
-        runner = self.runner(host, port)
-        remote = f"/home/{NVCM_BOX_USER}/{CONFIG_MANAGER_INSTALL_CONFIG}"
-        current = yaml.safe_load(runner.run(["cat", remote])) or {}
-        patched = base_config.apply_dcim(
-            current,
-            base_config.ConfigOptions(
-                api_token=self.api_token,
-                provider_image=self.cfg.dcim_provider_package_image,
-                netbox_server=self.cfg.dcim_server,
-                netbox_public_url=self.cfg.dcim_ui_url(),
-                # The same password bring_up_script installed NetBox with; without
-                # it NVCM mints its own and NetBox's publisher is rejected by NATS.
-                nats_password=self.nats_password,
-            ),
-        )
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as tmp:
-            yaml.safe_dump(patched, tmp, sort_keys=False)
-            local = Path(tmp.name)
-        try:
-            runner.upload(local, remote)
-        finally:
-            local.unlink(missing_ok=True)
