@@ -36,8 +36,18 @@ NetBox, and points NVCM at it.
   make setup-air
   ```
 
-The sim clones the same ref onto its box, from `config_manager_ref`, which
-`NetBoxSimConfig` defaults to NVCM's default branch.
+For a remote `config_manager_repo`, the sim clones `config_manager_ref`, which
+`NetBoxSimConfig` defaults to NVCM's default branch. To test an unpublished NVCM
+change, set `config_manager_repo` to an absolute or relative path to a local
+checkout (a `file://` URL also works). The orchestrator uploads that working tree
+to the sim after bootstrap, excluding `.git`, virtual environments, caches, and
+`node_modules`; no remote branch is required.
+
+Topology files, mock-topology trees, content jobs, and template plugins are also
+resolved locally and uploaded under `/home/nvcm/air-content`. The generated
+installer config and NetBox topology loader use those staged paths, so custom
+demo content does not need to exist in the cloned branch either. Relative paths
+are checked from the invoking working directory and then from the NVCM checkout.
 
 ## Running it
 

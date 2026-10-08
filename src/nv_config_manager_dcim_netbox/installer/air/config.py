@@ -24,9 +24,9 @@ class NetBoxSimConfig(SimConfig):
     keys load from the same YAML file.
     """
 
-    # The sim clones this ref onto the box (cloud_init.py:
-    # `git clone -b <config_manager_ref>`). Bound to NVCM_BRANCH rather than left
-    # to SimConfig so both resolve from one place if it ever moves off main again.
+    # Remote repositories clone this ref onto the box. Local repository paths
+    # are uploaded instead. Bound to NVCM_BRANCH rather than left to SimConfig so
+    # both resolve from one place if it ever moves off main again.
     config_manager_ref: str = base_config.NVCM_BRANCH
 
     # Build the simulated fabric from the shared blueprint, but do not register
@@ -111,6 +111,10 @@ class NetBoxSimConfig(SimConfig):
     def blueprint_dir(self, remote_repo: str) -> str:
         """Path on the sim box to this sim's topology blueprint.
 
-        cloud-init clones the NVCM repo onto the box, so it is already there.
+        The shared orchestrator stages the local mock-topology tree. The fallback
+        keeps compatibility with older orchestrators that use the cloned repo.
         """
-        return f"{remote_repo}/development/mock_topology/context/{self.mock_blueprint}"
+        mock_root = getattr(self, "_air_remote_mock_topology_path", "")
+        if not mock_root:
+            mock_root = f"{remote_repo}/development/mock_topology"
+        return f"{mock_root}/context/{self.mock_blueprint}"

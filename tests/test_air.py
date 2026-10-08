@@ -114,8 +114,8 @@ def test_an_explicit_topology_is_not_overwritten():
 
 
 def test_sim_clones_the_branch_this_provider_is_built_against():
-    # cloud-init clones this ref onto the sim box. It tracks NVCM_BRANCH so a
-    # move off the default branch reaches the sim as well as local checkouts.
+    # Remote repositories clone this ref onto the sim box. It tracks NVCM_BRANCH
+    # so a move off the default branch reaches the sim as well as local checkouts.
     assert NetBoxSimConfig().config_manager_ref == base_config.NVCM_BRANCH
 
 
@@ -140,10 +140,19 @@ def test_extra_keys_survive_from_yaml(tmp_path):
     assert cfg.load_blueprint is False
 
 
-def test_blueprint_dir_points_into_the_clone_on_the_box():
+def test_blueprint_dir_falls_back_to_the_clone_on_older_orchestrators():
     cfg = NetBoxSimConfig(mock_blueprint="air_trial")
     assert cfg.blueprint_dir("/home/nvcm/nv-config-manager").endswith(
         "/development/mock_topology/context/air_trial"
+    )
+
+
+def test_blueprint_dir_uses_staged_local_content():
+    cfg = NetBoxSimConfig(mock_blueprint="air_trial")
+    cfg._air_remote_mock_topology_path = "/home/nvcm/air-content/mock-topology/mock_topology"
+
+    assert cfg.blueprint_dir("/home/nvcm/nv-config-manager") == (
+        "/home/nvcm/air-content/mock-topology/mock_topology/context/air_trial"
     )
 
 
