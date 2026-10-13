@@ -155,7 +155,7 @@ class _FakeDeployment:
     def wait_for_intended_configs(self, host, port, expected_total):
         self.calls.append(("wait", host, port, expected_total))
 
-    def publish_route(self, host, port):
+    def verify_route(self, host, port):
         self.calls.append(("post", host, port))
 
 
@@ -196,7 +196,7 @@ def test_hooks_need_the_sim_config_before_the_per_host_stages(fake_deployment):
         air_hooks.NetBoxAirHooks().pre_deploy(object(), "box", 22)
 
 
-def test_a_failed_route_publish_does_not_fail_the_deploy(fake_deployment):
+def test_a_failed_route_check_does_not_fail_the_deploy(fake_deployment):
     hooks = air_hooks.NetBoxAirHooks()
     logs = []
     hooks._log = logs.append
@@ -205,9 +205,9 @@ def test_a_failed_route_publish_does_not_fail_the_deploy(fake_deployment):
     def boom(host, port):
         raise RuntimeError("no gateway")
 
-    fake_deployment.publish_route = boom
+    fake_deployment.verify_route = boom
     hooks.post_deploy(object(), "box", 22)
-    assert any("Could not publish the NetBox route" in line for line in logs)
+    assert any("Could not verify the NetBox route" in line for line in logs)
 
 
 def test_netbox_provisioning_status_uses_netbox_shell():
@@ -518,11 +518,19 @@ def test_the_blueprint_load_is_skipped_when_asked():
     assert "nvcm_load_dcim" not in script
 
 
-def test_the_sim_publishes_netbox_on_the_air_hostname():
-    # A sim serves NVCM at nvcm.air, not the config-manager.local a kind cluster
-    # uses, so the chart's default would put NetBox on a name nothing resolves.
+def test_the_sim_installs_netbox_on_the_bundled_postgres():
+    # The bring-up runs before NVCM's deploy installs the CNPG operator on the
+    # box, so the chart's CNPG default would leave NetBox without a database.
     script = _callback_for_script().bring_up_script("/i.tar", "/c.tgz")
-    assert "nvcm.gateway.baseHostname=nvcm.air" in script
+    assert "nvcm.database.cnpg.enabled=false" in script
+    assert "netbox.postgresql.enabled=true" in script
+    # Routes come from NVCM's release; the chart takes no gateway values.
+    assert "nvcm.gateway" not in script
+
+
+def test_install_settings_keep_the_box_on_the_bundled_postgres():
+    settings = air_hooks.NetBoxAirHooks().install_settings(_sim())
+    assert settings["database"] == "bundled"
 
 
 def test_script_runner_renders_stdin_as_a_heredoc():

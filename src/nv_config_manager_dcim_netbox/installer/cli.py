@@ -229,9 +229,10 @@ def netbox_up(config_path: Path, helm_timeout: str, recreate_secrets: bool, dry_
     """Deploy NetBox from an install config, without deploying NVCM.
 
     Runs the provider's pre-Helm steps (install, bootstrap) on their own. The
-    DCIM token and NATS Secrets are created with the names NVCM's deploy uses,
-    so a later `nv-config-manager-installer deploy` keeps them and NetBox and
-    NVCM share one token.
+    DCIM token, NATS and database Secrets are created with the names NVCM's
+    deploy uses, so a later `nv-config-manager-installer deploy` keeps them and
+    NetBox and NVCM share one token and one database password. The CNPG
+    operator must already be installed unless dcim.settings.database is bundled.
     """
     require_tools("kubectl", "helm")
     config = _load_config(config_path)

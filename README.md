@@ -90,7 +90,7 @@ hostname, superuser name).
 
 | Command | |
 | --- | --- |
-| `nv-config-manager-installer deploy` | NVCM's deploy; with `dcim.local: true` the `netbox` provider installs and bootstraps NetBox first and publishes its route after |
+| `nv-config-manager-installer deploy` | NVCM's deploy; with `dcim.local: true` the `netbox` provider installs and bootstraps NetBox first (on a CNPG database, with NVCM's SSO, SPIFFE and monitoring settings applied) and verifies its route after |
 | `nvcm-netbox netbox up` | NetBox only, for a cluster NVCM is deployed to afterwards |
 | `nvcm-netbox netbox load-topology` | Load a mock topology blueprint into NetBox |
 | `nvcm-netbox verify` | Publishes a synthetic change event and checks it reaches the render service |
@@ -146,8 +146,13 @@ Prerequisites:
 ### Resource Profiles
 
 The same `cluster.size` profiles NVCM defines, set in the install config. They
-size NVCM; NetBox, Postgres and Valkey add about 1.6 GiB of memory requests on
-top, and the profile does not change that.
+size NVCM; NetBox, its CNPG PostgreSQL and Valkey add about 1.6 GiB of memory
+requests on top, and the profile does not change that. NetBox's database is a
+CloudNativePG `Cluster` (`cluster-dcim`) managed by the same operator as NVCM's
+own databases, sized under `nvcm.database.cnpg` in `deploy/netbox/values.yaml`
+and backed up on NVCM's shared schedule when `infrastructure.cnpg_s3_backup` is
+on. See [docs/deployment.md](docs/deployment.md#parity-with-the-bundled-nautobot)
+for SSO, monitoring, SPIFFE and external PostgreSQL.
 
 | Size | Environment | Suggested Capacity |
 | ---- | ----------- | ------------------ |

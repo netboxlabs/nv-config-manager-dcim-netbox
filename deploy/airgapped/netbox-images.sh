@@ -124,8 +124,11 @@ if [[ -z "$provider_image" ]]; then
     exit 1
 fi
 
+# Rendered with the bundled PostgreSQL, which is what install-netbox.sh installs:
+# the CNPG operator only arrives with NVCM's deploy, after NetBox.
 # BSD grep has no \s, so use POSIX classes.
 images="$(helm template netbox "$CHART" \
+    --set nvcm.database.cnpg.enabled=false --set netbox.postgresql.enabled=true \
     | grep -oE '^[[:space:]]*image:[[:space:]]*[^[:space:]]+' \
     | sed -E 's/^[[:space:]]*image:[[:space:]]*//; s/^"//; s/"$//' \
     | sort -u)"

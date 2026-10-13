@@ -170,8 +170,13 @@ echo "==> Installing NetBox into $NAMESPACE from $CHART"
 # allowInsecureImages is Bitnami's guard against non-Bitnami registries. Pushing
 # their images into a private registry is exactly what an air-gapped install
 # does, so the chart refuses to render without it.
+#
+# The bundled PostgreSQL rather than the chart's CNPG default: the operator only
+# arrives with NVCM's deploy, which runs after this script.
 helm upgrade --install "$RELEASE" "$CHART" \
     --namespace "$NAMESPACE" --create-namespace \
+    --set "nvcm.database.cnpg.enabled=false" \
+    --set "netbox.postgresql.enabled=true" \
     --set "netbox.global.security.allowInsecureImages=true" \
     --set "netbox.superuser.apiToken=$TOKEN" \
     --set "netbox.image.registry=$REGISTRY" \
@@ -204,7 +209,8 @@ Put it in install.yaml before deploying NVCM:
         values:
           token: $TOKEN
 
-Once NVCM is deployed, connect NetBox to its event bus:
+Once NVCM is deployed, connect NetBox to its event bus (NVCM's own release
+publishes the NetBox route; nothing here needs re-running for that):
 
   PW=\$(kubectl -n $NAMESPACE get secret nats-nv-config-manager \\
          -o jsonpath='{.data.password}' | base64 -d)

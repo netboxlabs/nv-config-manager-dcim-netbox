@@ -1165,13 +1165,9 @@ def test_verify_publishes_through_the_in_cluster_nats_box(monkeypatch):
 @pytest.mark.skipif(
     not (_CHART / "charts").is_dir(), reason="chart deps not fetched (helm dependency build)"
 )
-def test_the_route_waits_for_the_gateway_api_to_exist():
-    """NetBox installs before NVCM, which is what installs the Gateway API CRDs.
-
-    Rendering an HTTPRoute against a cluster that has no such kind fails the
-    whole release with "ensure CRDs are installed first", so a first install on a
-    fresh cluster must simply omit it.
-    """
+def test_the_chart_publishes_no_route_of_its_own():
+    """NVCM's chart renders the NetBox HTTPRoutes from the provider's dcim.local
+    values, so this chart must not render one even when the API is registered."""
 
     def render(*extra):
         result = subprocess.run(
@@ -1183,14 +1179,9 @@ def test_the_route_waits_for_the_gateway_api_to_exist():
         assert result.returncode == 0, result.stderr
         return result.stdout
 
-    fresh = render()
-    assert "kind: HTTPRoute" not in fresh
-    # The rest of the release must still be there, not just the route dropped.
-    assert "kind: Deployment" in fresh
-
     with_api = render("--api-versions", "gateway.networking.k8s.io/v1")
-    assert "kind: HTTPRoute" in with_api
-    assert "netbox.config-manager.local" in with_api
+    assert "kind: HTTPRoute" not in with_api
+    assert "kind: Deployment" in with_api
 
 
 def test_nats_password_matches_the_alphabet_nvcm_enforces():

@@ -1,0 +1,105 @@
+{{- /*
+NetBox's PostgreSQL as a CloudNativePG Cluster, plus its ScheduledBackup.
+
+Same manifest shape as NVCM's templates/cnpg-clusters.yaml so the DCIM database
+is operated, labelled and backed up like NVCM's own clusters. The credentials
+Secret (`<clusterName>-app`, keys username/password) is created before this
+chart installs: by NVCM's installer from the provider's `databases=("dcim",)`
+contribution, or by `nvcm-netbox netbox up`. CNPG bootstraps the owner role from
+it and NetBox reads the same keys through netbox.externalDatabase.
+
+The CNPG operator must be registered first. NVCM's deploy installs it in
+`install-crds`, which runs before the provider's install-netbox step; a
+standalone install needs it in place already (the provider checks).
+*/ -}}
+{{- $db := .Values.nvcm.database -}}
+{{- $cfg := $db.cnpg -}}
+{{- if $cfg.enabled }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ $cfg.clusterName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $cfg.clusterName }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: database
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  instances: {{ $cfg.instances | default 1 }}
+  {{- if $cfg.imageName }}
+  imageName: {{ $cfg.imageName | quote }}
+  {{- end }}
+
+  {{- with $cfg.inheritedLabels }}
+  inheritedMetadata:
+    labels:
+      {{- toYaml . | nindent 6 }}
+  {{- end }}
+
+  postgresql:
+    parameters:
+      max_connections: {{ $cfg.postgresql.maxConnections | quote }}
+      shared_buffers: {{ $cfg.postgresql.sharedBuffers | quote }}
+
+  bootstrap:
+    initdb:
+      database: {{ $db.name }}
+      owner: {{ $db.user }}
+      secret:
+        name: {{ $db.credentialsSecret }}
+
+  storage:
+    size: {{ $cfg.storage.size | default "10Gi" }}
+    {{- if $cfg.storage.storageClass }}
+    storageClass: {{ $cfg.storage.storageClass }}
+    {{- end }}
+
+  resources:
+    {{- toYaml $cfg.resources | nindent 4 }}
+
+  {{- if not $cfg.enablePDB }}
+  enablePDB: false
+  {{- end }}
+
+  {{- if $cfg.backup.enabled }}
+  backup:
+    barmanObjectStore:
+      {{- if eq $cfg.backup.destinationType "s3" }}
+      destinationPath: "s3://{{ $cfg.backup.s3.bucket }}/{{ $cfg.backup.s3.path }}/{{ $cfg.clusterName }}"
+      endpointURL: {{ $cfg.backup.s3.endpoint | quote }}
+      s3Credentials:
+        accessKeyId:
+          name: {{ $cfg.backup.credentialsSecret }}
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: {{ $cfg.backup.credentialsSecret }}
+          key: ACCESS_SECRET_KEY
+      {{- end }}
+      wal:
+        compression: {{ $cfg.backup.walCompression | default "gzip" }}
+      data:
+        compression: {{ $cfg.backup.dataCompression | default "gzip" }}
+    retentionPolicy: {{ $cfg.backup.retentionPolicy | default "7d" | quote }}
+  {{- end }}
+{{- end }}
+
+{{- if and $cfg.enabled $cfg.backup.enabled }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: {{ $cfg.clusterName }}-backup
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $cfg.clusterName }}-backup
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: database-backup
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  schedule: {{ $cfg.backup.schedule | quote }}
+  backupOwnerReference: self
+  cluster:
+    name: {{ $cfg.clusterName }}
+{{- end }}

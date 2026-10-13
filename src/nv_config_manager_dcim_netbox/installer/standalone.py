@@ -18,6 +18,8 @@ from nv_config_manager_installer.providers.api import DCIMInstallerProvider
 from nv_config_manager_installer.schema import NVConfigManagerInstallConfig
 from nv_config_manager_installer.secrets import generate_secrets
 
+from nv_config_manager_dcim_netbox.installer import cluster
+
 # Core NATS Secrets NVCM's deploy creates from the shared password.
 _NATS_SECRETS = ("nats-sys", "nats-nv-config-manager")
 
@@ -120,23 +122,30 @@ class StandaloneDeployContext:
     def seed_secrets(self) -> None:
         """Generate the installer secret state and adopt or create the shared Secrets.
 
-        The DCIM token and NATS password already in the cluster win, as they do
-        in NVCM's deploy. Missing ones are created from the generated state.
+        The DCIM token, NATS password and database credentials already in the
+        cluster win, as they do in NVCM's deploy. Missing ones are created from
+        the generated state. `cluster-dcim-app` carries both keys NVCM writes
+        (username, password), so CNPG and NetBox read it unchanged either way.
         """
         state = generate_secrets(self.config, self.provider)
         ns = self.config.cluster.namespace
         dcim = self.config.dcim
         token_secret = dcim.token_secret_name or self.provider.metadata.token_secret_name
-        wanted = [
-            (token_secret, dcim.token_secret_key, "dcim_token"),
-            *((name, "password", "nats_password") for name in _NATS_SECRETS),
+        db = cluster.DB_NAME
+        wanted: list[tuple[str, dict[str, str]]] = [
+            (token_secret, {dcim.token_secret_key: "dcim_token"}),
+            *((name, {"password": "nats_password"}) for name in _NATS_SECRETS),
+            (cluster.DB_SECRET, {"username": f"{db}_db_user", "password": f"{db}_db_password"}),
         ]
         self.k8s.ensure_namespace(ns)
-        for name, key, state_key in wanted:
-            if value := self.k8s.read_secret_data(name, ns).get(key):
-                state[state_key] = value
-        for name, key, state_key in wanted:
-            if not self.k8s.read_secret_data(name, ns).get(key):
-                self.k8s.apply_secret(name, ns, {key: state[state_key]})
+        for name, keys in wanted:
+            existing = self.k8s.read_secret_data(name, ns)
+            for key, state_key in keys.items():
+                if value := existing.get(key):
+                    state[state_key] = value
+        for name, keys in wanted:
+            existing = self.k8s.read_secret_data(name, ns)
+            if not all(existing.get(key) for key in keys):
+                self.k8s.apply_secret(name, ns, {key: state[sk] for key, sk in keys.items()})
                 self.callback.on_log(f"Created: {name}")
         self._secrets_state = state

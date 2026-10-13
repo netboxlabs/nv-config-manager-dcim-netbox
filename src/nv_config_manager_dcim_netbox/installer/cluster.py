@@ -31,6 +31,14 @@ NATS_BOX_DEPLOYMENT = "nv-config-manager-nats-box"
 # uninstall so they stay in step with the data on the PVCs.
 # See deploy/netbox/templates/datastore-credentials.yaml.
 DATASTORE_SECRET = "netbox-datastores"
+
+# NetBox's CNPG cluster and its credentials Secret (keys username/password),
+# created by NVCM's deployer from the provider's `databases` contribution.
+# Fixed by deploy/netbox/values.yaml (nvcm.database.*).
+CNPG_CLUSTER = "cluster-dcim"
+DB_SECRET = f"{CNPG_CLUSTER}-app"
+DB_NAME = "dcim"
+CNPG_CRD = "clusters.postgresql.cnpg.io"
 NETBOX_CHART_REPOSITORY = "netbox"
 NETBOX_CHART_REPOSITORY_URL = "https://charts.netbox.oss.netboxlabs.com/"
 
@@ -160,6 +168,14 @@ def pending_release_status(
     return status if status.startswith("pending-") else None
 
 
+def _secret_missing(name: str, namespace: str, runner: Runner | None) -> bool:
+    try:
+        kubectl("get", "secret", name, namespace=namespace, runner=runner)
+    except CommandError:
+        return True
+    return False
+
+
 def orphaned_data_volumes(release: str, namespace: str, runner: Runner | None = None) -> list[str]:
     """Return datastore PVCs whose credentials Secret is gone.
 
@@ -168,6 +184,9 @@ def orphaned_data_volumes(release: str, namespace: str, runner: Runner | None = 
     but that Secret is not, the databases on them were initialised with
     passwords nobody holds any more, and NetBox would crashloop on "password
     authentication failed" until the volumes are deleted.
+
+    The CNPG cluster's volumes (`cluster-dcim-<n>`) are checked the same way
+    against `cluster-dcim-app`.
     """
     try:
         names = kubectl(
@@ -180,14 +199,23 @@ def orphaned_data_volumes(release: str, namespace: str, runner: Runner | None = 
         ).split()
     except CommandError:
         return []
-    volumes = [n for n in names if n.startswith((f"data-{release}-", f"valkey-data-{release}-"))]
-    if not volumes:
-        return []
+    bundled = [n for n in names if n.startswith((f"data-{release}-", f"valkey-data-{release}-"))]
+    cnpg = [n for n in names if n.startswith(f"{CNPG_CLUSTER}-")]
+    orphaned: list[str] = []
+    if bundled and _secret_missing(DATASTORE_SECRET, namespace, runner):
+        orphaned += bundled
+    if cnpg and _secret_missing(DB_SECRET, namespace, runner):
+        orphaned += cnpg
+    return sorted(orphaned)
+
+
+def cnpg_operator_installed(runner: Runner | None = None) -> bool:
+    """Return whether the CloudNativePG Cluster CRD is registered."""
     try:
-        kubectl("get", "secret", DATASTORE_SECRET, namespace=namespace, runner=runner)
+        kubectl("get", "crd", CNPG_CRD, runner=runner)
     except CommandError:
-        return sorted(volumes)
-    return []
+        return False
+    return True
 
 
 def helm_set_value(value: str) -> str:
@@ -211,6 +239,7 @@ def install_netbox(
     nats_password: str | None = None,
     workflow_url: str | None = None,
     extra_set: list[str] | None = None,
+    extra_set_json: list[str] | None = None,
     timeout: str = "10m",
     runner: Runner | None = None,
 ) -> None:
@@ -227,6 +256,8 @@ def install_netbox(
     ``extra_set`` holds ``key=value`` overrides, appended last so they win.
     Values that may contain `,` or `\\` must be passed through
     ``helm_set_value`` by the caller, which knows where the key ends.
+    ``extra_set_json`` holds ``key=<json>`` pairs for list and mapping values
+    (``--set-json``), which `--set` cannot express cleanly.
     """
     argv = [
         "helm",
@@ -253,6 +284,8 @@ def install_netbox(
         argv += ["--set", f"nvcm.workflowUrl={workflow_url}"]
     for override in extra_set or ():
         argv += ["--set", override]
+    for override in extra_set_json or ():
+        argv += ["--set-json", override]
     (runner or LocalRunner()).stream(argv)
 
 
@@ -268,52 +301,12 @@ def wait_for_netbox(namespace: str, timeout: str = "10m", runner: Runner | None 
     )
 
 
+# Rendered by NVCM's chart from the provider's `dcim.local.*` values.
 NETBOX_ROUTE = "netbox"
 
 
-def publish_netbox_route(
-    chart_ref: str,
-    *,
-    release: str,
-    namespace: str,
-    timeout: str = "5m",
-    runner: Runner | None = None,
-) -> None:
-    """Upgrade the NetBox release again, for the sole purpose of creating its HTTPRoute.
-
-    ``templates/httproute.yaml`` is gated on the Gateway API being registered,
-    because rendering an HTTPRoute before the CRDs exist fails the whole release.
-    Those CRDs arrive with NVCM's deploy (``--install-envoy-gateway``), which runs
-    after NetBox -- NetBox has to exist first to own the API token NVCM
-    authenticates with. Nothing else upgrades the release afterwards, so without
-    this pass the route is never created.
-
-    ``--reuse-values`` replays the values the install used (token, image, NATS
-    password), so the caller does not have to know them to re-render.
-    """
-    (runner or LocalRunner()).stream(
-        [
-            "helm",
-            "upgrade",
-            release,
-            chart_ref,
-            "--namespace",
-            namespace,
-            "--reuse-values",
-            "--wait",
-            "--timeout",
-            timeout,
-        ]
-    )
-
-
 def netbox_route_exists(namespace: str, runner: Runner | None = None) -> bool:
-    """Return whether the NetBox HTTPRoute is present.
-
-    Checked after :func:`publish_netbox_route` rather than assumed: a successful
-    upgrade still renders nothing if the Gateway API is missing or
-    ``nvcm.gateway.enabled`` is false.
-    """
+    """Return whether NVCM's chart created the NetBox HTTPRoute."""
     try:
         kubectl(
             "get",

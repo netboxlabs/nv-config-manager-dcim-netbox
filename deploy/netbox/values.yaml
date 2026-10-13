@@ -52,20 +52,77 @@ nvcm:
   # Set it yourself if you are driving helm directly.
   workflowUrl: ""
 
-  # Browser access through NVCM's Gateway, so NetBox is reachable the same way
-  # NVCM's own services are rather than only through `kubectl port-forward`.
-  # See templates/httproute.yaml.
-  gateway:
-    enabled: true
-    # NVCM's Gateway. `<release>-gateway`, and the NVCM release is normally
-    # `nv-config-manager`. Deployed into the same namespace unless overridden.
-    name: nv-config-manager-gateway
-    namespace: ""
-    # NVCM's `cluster.hostname`. Its TLS certificate is issued for this name and
-    # `*.<name>`, so any prefix below is already covered.
-    baseHostname: config-manager.local
-    # Defaults to netbox.<baseHostname>.
-    hostname: ""
+  # Browser and API routes are rendered by NVCM's own chart from the
+  # `dcim.local.*` values the installer provider emits (templates/httproutes.yaml
+  # there), so this chart publishes no HTTPRoute of its own.
+
+  # PostgreSQL for NetBox. One of three sources, in this order:
+  #   cnpg.enabled: true   -> templates/cnpg-cluster.yaml renders a CNPG Cluster
+  #                           (operator required; NVCM's deploy installs it in
+  #                           its install-crds step, before NetBox).
+  #   external.host set    -> a user-managed PostgreSQL; set cnpg.enabled false.
+  #   neither              -> set netbox.postgresql.enabled true for the upstream
+  #                           chart's bundled PostgreSQL (standalone use).
+  # In every case NetBox reads its credentials from the `cluster-dcim-app`
+  # Secret (keys `username`, `password`), which NVCM's installer creates from the
+  # provider's `databases=("dcim",)` contribution and `nvcm-netbox netbox up`
+  # seeds the same way. CNPG also bootstraps the database owner from it.
+  database:
+    name: dcim
+    user: dcim
+    credentialsSecret: cluster-dcim-app
+    cnpg:
+      enabled: true
+      clusterName: cluster-dcim
+      instances: 1
+      enablePDB: false
+      # Empty uses the operator's default PostgreSQL image.
+      imageName: ""
+      postgresql:
+        maxConnections: "200"
+        sharedBuffers: "256MB"
+      storage:
+        size: 10Gi
+        storageClass: ""
+      resources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+        limits:
+          cpu: "1"
+          memory: 2Gi
+      # Propagated onto the instance pods (NVCM's global.customLabels).
+      inheritedLabels: {}
+      # Mirrors NVCM's cnpg.backup.* / cnpg.<cluster>.backup.*; the installer
+      # provider fills it from infrastructure.cnpg_s3_backup so NetBox's
+      # database is backed up on the same schedule to the same bucket.
+      backup:
+        enabled: false
+        schedule: "0 0 0 * * *"
+        retentionPolicy: "30d"
+        destinationType: s3
+        s3:
+          endpoint: ""
+          bucket: ""
+          path: ""
+        credentialsSecret: cnpg-backup-credentials
+        walCompression: gzip
+        dataCompression: gzip
+    external:
+      host: ""
+      port: 5432
+
+  # Prometheus scraping. templates/servicemonitor.yaml renders a ServiceMonitor
+  # for NetBox's /metrics when this is on and the monitoring.coreos.com API is
+  # registered; it also needs netbox.metrics.enabled (set below by the provider).
+  # NVCM's Alloy/Prometheus watch ServiceMonitors in the release namespace, so
+  # no selector label is required; `labels` is for a site-level Prometheus that
+  # filters on one.
+  monitoring:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
 
 # --- upstream netbox chart ---------------------------------------------------
 netbox:
@@ -148,14 +205,40 @@ netbox:
   # invalidates the token NVCM holds.
   apiTokenPeppers: {}
 
-  # Bundled datastores. Keeps NetBox independent of NVCM's CNPG/Redis so it can
-  # be deployed first, and keeps this chart free of assumptions about NVCM's
-  # secret and service naming.
+  # SSO through NVCM's gateway. The installer provider turns this on when
+  # `sso.enabled` and fills the group lists from `dcim.settings.sso`; see
+  # docs/deployment.md. NetBox trusts the X-Auth-Request-* headers because
+  # NVCM's gateway strips client-supplied copies on every route and the OIDC
+  # proxy / JWT policy set them from the verified identity.
+  remoteAuth:
+    enabled: false
+
+  # Prometheus /metrics. Turned on by the installer provider with monitoring;
+  # the ServiceMonitor is this chart's (templates/servicemonitor.yaml), not the
+  # upstream one, so it can be gated on the CRD being present.
+  metrics:
+    enabled: false
+    serviceMonitor:
+      enabled: false
+
+  # Database connection. The host is the CNPG read-write Service by default;
+  # the provider replaces it with nvcm.database.external.host when an external
+  # PostgreSQL is configured. Unused when netbox.postgresql.enabled is true.
+  externalDatabase:
+    host: cluster-dcim-rw
+    port: 5432
+    database: dcim
+    username: dcim
+    existingSecretName: cluster-dcim-app
+    existingSecretKey: password
+
+  # The upstream chart's bundled PostgreSQL, for standalone installs with no
+  # CNPG operator: set this true and nvcm.database.cnpg.enabled false.
   # Credentials come from the netbox-datastores Secret rather than being
-  # generated by the subcharts, so they outlive `helm uninstall` and keep
+  # generated by the subchart, so they outlive `helm uninstall` and keep
   # matching the data on the PVCs. See templates/datastore-credentials.yaml.
   postgresql:
-    enabled: true
+    enabled: false
     auth:
       existingSecret: netbox-datastores
     # The upstream nano preset (192Mi limit) is OOM-killed when concurrent

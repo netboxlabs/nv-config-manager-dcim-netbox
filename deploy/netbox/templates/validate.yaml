@@ -1,0 +1,16 @@
+{{- /*
+Reject value combinations that would install NetBox against the wrong database.
+
+The upstream chart silently prefers its bundled PostgreSQL over externalDatabase
+when both are on, and installs nothing usable when neither is.
+*/ -}}
+{{- $db := .Values.nvcm.database -}}
+{{- if and $db.cnpg.enabled .Values.netbox.postgresql.enabled }}
+{{- fail "nvcm.database.cnpg.enabled and netbox.postgresql.enabled are both true; choose one PostgreSQL source" }}
+{{- end }}
+{{- if and $db.cnpg.enabled $db.external.host }}
+{{- fail "nvcm.database.cnpg.enabled is true but nvcm.database.external.host is set; set cnpg.enabled false to use the external PostgreSQL" }}
+{{- end }}
+{{- if and (not $db.cnpg.enabled) (not $db.external.host) (not .Values.netbox.postgresql.enabled) }}
+{{- fail "No PostgreSQL source: enable nvcm.database.cnpg, set nvcm.database.external.host, or enable netbox.postgresql" }}
+{{- end }}

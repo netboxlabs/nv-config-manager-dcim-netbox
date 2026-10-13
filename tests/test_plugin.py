@@ -33,14 +33,20 @@ from nv_config_manager_dcim_netbox.installer.plugin import (
     LOCAL_SERVER,
     NetBoxInstallerProvider,
     NetBoxInstallerSettings,
+    database_values,
+    monitoring_values,
+    spiffe_values,
+    split_overrides,
+    sso_values,
 )
-from nv_config_manager_dcim_netbox.installer.shell import CommandError
+from nv_config_manager_dcim_netbox.installer.settings import NetBoxSSOSettings
 from nv_config_manager_dcim_netbox.installer.standalone import StandaloneDeployContext
 from nv_config_manager_dcim_netbox.installer.tokens import generate_api_token, is_valid_api_token
 
 pytestmark = pytest.mark.installer
 
 _CHART = Path(__file__).resolve().parents[1] / "deploy" / "netbox"
+_DB_SECRET = {"username": "dcim", "password": "DbPassword1"}
 
 
 def _entry_point_installed() -> bool:
@@ -51,6 +57,16 @@ def _config(**dcim: object) -> NVConfigManagerInstallConfig:
     config = NVConfigManagerInstallConfig.from_yaml(DEFAULT_PROFILE)
     for key, value in dcim.items():
         setattr(config.dcim, key, value)
+    return config
+
+
+def _sso_config(**settings: object) -> NVConfigManagerInstallConfig:
+    config = _config()
+    config.sso.enabled = True
+    config.sso.issuer_url = "https://sso.example.com/realms/nvcm"
+    config.sso.client_id = "nvcm"
+    config.rbac.admin_roles = ["all", "nvcm-admins", "netops"]
+    config.dcim.settings = {"sso": settings} if settings else {}
     return config
 
 
@@ -103,12 +119,13 @@ def _ctx(
         config.dcim.settings = settings
     provider = NetBoxInstallerProvider()
     callback = RecordingCallback()
+    # NVCM's deploy creates the database Secret before the provider hooks run.
     ctx = StandaloneDeployContext(
         config,
         DeployOptions(dry_run=dry_run, helm_timeout="7m", recreate_secrets=recreate_secrets),
         callback,
         provider,
-        k8s=FakeK8s(secrets),
+        k8s=FakeK8s({cluster.DB_SECRET: dict(_DB_SECRET), **(secrets or {})}),
     )
     token = generate_api_token()
     ctx._secrets_state = {"dcim_token": token, "nats_password": "NatsSecretPassword1"}
@@ -264,7 +281,18 @@ def test_provider_steps_surround_the_umbrella_helm_step():
     ids = [step.id for step in Deployer.create_steps(NetBoxInstallerProvider())]
     helm = ids.index("helm-install")
     assert ids[helm - 2 : helm] == ["install-netbox", "bootstrap-netbox"]
-    assert ids[helm + 1] == "publish-netbox"
+    assert ids[helm + 1] == "verify-netbox-route"
+    # The CNPG operator lands in install-crds, before the provider installs NetBox.
+    assert ids.index("install-crds") < ids.index("install-netbox")
+
+
+def test_the_provider_declares_the_dcim_database():
+    """NVCM creates `cluster-dcim-app` (username/password) from this before the
+    provider's steps run; CNPG and NetBox both read it."""
+    assert NetBoxInstallerProvider.secrets.databases == ("dcim",)
+    state = generate_secrets(_config(), NetBoxInstallerProvider())
+    assert state["dcim_db_user"] == "dcim"
+    assert state["dcim_db_password"]
 
 
 def test_endpoints_name_the_netbox_route():
@@ -284,6 +312,7 @@ def test_endpoints_name_the_netbox_route():
 def _stub_install(monkeypatch, calls: list) -> None:
     monkeypatch.setattr(cluster, "pending_release_status", lambda *args: None)
     monkeypatch.setattr(cluster, "orphaned_data_volumes", lambda *args: [])
+    monkeypatch.setattr(cluster, "cnpg_operator_installed", lambda: True)
     monkeypatch.setattr(
         cluster, "helm_dependency_build", lambda chart: calls.append(("deps", chart))
     )
@@ -347,10 +376,82 @@ def test_pre_helm_hook_binds_the_chart_to_the_installer_settings(monkeypatch):
     assert "nvcm.natsUser=nv-config-manager" in overrides
     assert f"nvcm.eventStream={EVENT_STREAM}" in overrides
     assert f"nvcm.eventSubject={EVENT_SUBJECT}" in overrides
-    assert "nvcm.gateway.baseHostname=config-manager.local" in overrides
     assert "netbox.superuser.name=admin" in overrides
     # helm --set reads `,` as the next assignment.
     assert r"netbox.superuser.password=lab\,pass" in overrides
+    # The database user comes from the Secret NVCM created; CNPG stays the default.
+    assert "nvcm.database.user=dcim" in overrides
+    assert "netbox.externalDatabase.username=dcim" in overrides
+    assert not any(o.startswith("nvcm.database.cnpg.enabled") for o in overrides)
+    # Nothing structured on a plain deployment: no SSO, SPIFFE or monitoring.
+    assert calls[1][2]["extra_set_json"] == []
+
+
+def test_pre_helm_hook_adopts_the_database_user_from_the_cluster(monkeypatch):
+    provider, ctx, _, _ = _ctx(
+        secrets={cluster.DB_SECRET: {"username": "netbox_app", "password": "x"}}
+    )
+    calls: list = []
+    _stub_install(monkeypatch, calls)
+
+    provider.pre_helm_install(ctx)
+
+    assert "netbox.externalDatabase.username=netbox_app" in calls[1][2]["extra_set"]
+
+
+def test_pre_helm_hook_refuses_cnpg_without_the_operator(monkeypatch):
+    provider, ctx, _, _ = _ctx()
+    calls: list = []
+    _stub_install(monkeypatch, calls)
+    monkeypatch.setattr(cluster, "cnpg_operator_installed", lambda: False)
+
+    with pytest.raises(RuntimeError, match="--install-cnpg-operator"):
+        provider.pre_helm_install(ctx)
+    assert calls == []
+
+
+def test_pre_helm_hook_refuses_to_run_without_the_database_secret(monkeypatch):
+    provider, ctx, _, _ = _ctx()
+    del ctx.k8s.secrets[cluster.DB_SECRET]
+    _stub_install(monkeypatch, [])
+
+    with pytest.raises(RuntimeError, match="cluster-dcim-app"):
+        provider.pre_helm_install(ctx)
+
+
+def test_bundled_database_needs_neither_operator_nor_secret(monkeypatch):
+    provider, ctx, _, _ = _ctx(settings={"database": "bundled"})
+    del ctx.k8s.secrets[cluster.DB_SECRET]
+    calls: list = []
+    _stub_install(monkeypatch, calls)
+    monkeypatch.setattr(cluster, "cnpg_operator_installed", lambda: False)
+
+    provider.pre_helm_install(ctx)
+
+    overrides = calls[1][2]["extra_set_json"]
+    assert "nvcm.database.cnpg.enabled=false" in overrides
+    assert "netbox.postgresql.enabled=true" in overrides
+
+
+def test_sso_spiffe_and_monitoring_reach_the_chart_as_json_overrides(monkeypatch):
+    provider, ctx, _, _ = _ctx()
+    ctx.config.sso.enabled = True
+    ctx.config.sso.issuer_url = "https://sso.example.com"
+    ctx.config.sso.client_id = "nvcm"
+    ctx.config.rbac.admin_roles = ["nvcm-admins"]
+    ctx.config.spiffe.enabled = True
+    ctx.config.infrastructure.monitoring.enabled = True
+    calls: list = []
+    _stub_install(monkeypatch, calls)
+
+    provider.pre_helm_install(ctx)
+
+    kwargs = calls[1][2]
+    assert "netbox.remoteAuth.header=HTTP_X_AUTH_REQUEST_EMAIL" in kwargs["extra_set"]
+    assert "nvcm.monitoring.enabled=true" in kwargs["extra_set_json"]
+    assert "netbox.metrics.enabled=true" in kwargs["extra_set_json"]
+    assert 'netbox.remoteAuth.superuserGroups=["nvcm-admins"]' in kwargs["extra_set_json"]
+    assert any(o.startswith("netbox.extraVolumes=[") for o in kwargs["extra_set_json"])
 
 
 def test_pre_helm_hook_adopts_the_secrets_already_in_the_cluster(monkeypatch):
@@ -421,7 +522,7 @@ def test_external_netbox_skips_every_provider_step():
     assert dict(callback.updates) == {
         "install-netbox": StepStatus.SKIPPED,
         "bootstrap-netbox": StepStatus.SKIPPED,
-        "publish-netbox": StepStatus.SKIPPED,
+        "verify-netbox-route": StepStatus.SKIPPED,
     }
 
 
@@ -433,7 +534,7 @@ def test_dry_run_skips_all_provider_cluster_calls(monkeypatch):
 
     monkeypatch.setattr(cluster, "pending_release_status", unexpected)
     monkeypatch.setattr(cluster, "wait_for_netbox", unexpected)
-    monkeypatch.setattr(cluster, "publish_netbox_route", unexpected)
+    monkeypatch.setattr(cluster, "netbox_route_exists", unexpected)
 
     provider.pre_helm_install(ctx)
     provider.post_helm_install(ctx)
@@ -441,51 +542,29 @@ def test_dry_run_skips_all_provider_cluster_calls(monkeypatch):
     statuses = dict(callback.updates)
     assert statuses["install-netbox"] == StepStatus.SKIPPED
     assert statuses["bootstrap-netbox"] == StepStatus.SKIPPED
-    assert statuses["publish-netbox"] == StepStatus.SKIPPED
+    assert statuses["verify-netbox-route"] == StepStatus.SKIPPED
 
 
-def test_post_helm_hook_publishes_route(monkeypatch):
+def test_post_helm_hook_only_checks_the_route(monkeypatch):
+    """NVCM's chart renders the route; the provider runs no second Helm pass."""
     provider, ctx, callback, _ = _ctx()
-    calls = []
-    monkeypatch.setattr(
-        cluster,
-        "publish_netbox_route",
-        lambda chart, **kwargs: calls.append(("route", chart, kwargs)),
-    )
     monkeypatch.setattr(cluster, "netbox_route_exists", lambda namespace: True)
+    monkeypatch.setattr(cluster, "install_netbox", lambda *a, **k: pytest.fail("helm ran"))
 
     provider.post_helm_install(ctx)
 
-    assert [call[0] for call in calls] == ["route"]
-    assert calls[0][1] == str(DEFAULT_CHART)
-    assert calls[0][2]["timeout"] == "7m"
-    assert callback.updates[-1] == ("publish-netbox", StepStatus.SUCCESS)
+    assert callback.updates[-1] == ("verify-netbox-route", StepStatus.SUCCESS)
+    assert callback.logs == []
 
 
 def test_missing_route_is_a_visible_nonfatal_warning(monkeypatch):
     provider, ctx, callback, _ = _ctx()
-    monkeypatch.setattr(cluster, "publish_netbox_route", lambda *args, **kwargs: None)
     monkeypatch.setattr(cluster, "netbox_route_exists", lambda namespace: False)
 
     provider.post_helm_install(ctx)
 
     assert any("Warning: NetBox HTTPRoute was not created" in line for line in callback.logs)
-    assert ctx.steps["publish-netbox"].status == StepStatus.SUCCESS
-
-
-def test_route_upgrade_failure_is_a_visible_nonfatal_warning(monkeypatch):
-    provider, ctx, callback, _ = _ctx()
-    monkeypatch.setattr(
-        cluster,
-        "publish_netbox_route",
-        lambda *args, **kwargs: (_ for _ in ()).throw(CommandError(["helm"], 1, "boom")),
-    )
-    monkeypatch.setattr(cluster, "netbox_route_exists", lambda namespace: False)
-
-    provider.post_helm_install(ctx)
-
-    assert any("Could not publish the NetBox route" in line for line in callback.logs)
-    assert ctx.steps["publish-netbox"].status == StepStatus.SUCCESS
+    assert ctx.steps["verify-netbox-route"].status == StepStatus.SUCCESS
 
 
 # -- standalone context ------------------------------------------------------------
@@ -507,6 +586,17 @@ def test_standalone_seeding_creates_the_secrets_nvcm_will_keep():
     assert len(callback.logs) == 3
 
 
+def test_standalone_seeding_creates_the_database_secret_cnpg_bootstraps_from():
+    provider, ctx, callback, _ = _ctx()
+    del ctx.k8s.secrets[cluster.DB_SECRET]
+    ctx.seed_secrets()
+
+    db = ctx.k8s.secrets[cluster.DB_SECRET]
+    assert db["username"] == "dcim" == ctx.secrets_state["dcim_db_user"]
+    assert db["password"] == ctx.secrets_state["dcim_db_password"]
+    assert "Created: cluster-dcim-app" in callback.logs
+
+
 def test_standalone_seeding_adopts_existing_secrets():
     token = generate_api_token()
     provider, ctx, callback, _ = _ctx(
@@ -519,6 +609,180 @@ def test_standalone_seeding_adopts_existing_secrets():
 
     assert ctx.secrets_state["dcim_token"] == token
     assert ctx.secrets_state["nats_password"] == "DeployedNatsPassword1"
+    assert ctx.secrets_state["dcim_db_password"] == _DB_SECRET["password"]
     # Only the missing one is created, with the adopted password.
     assert ctx.k8s.secrets["nats-sys"] == {"password": "DeployedNatsPassword1"}
+    assert ctx.k8s.secrets[cluster.DB_SECRET] == _DB_SECRET
     assert callback.logs == ["Created: nats-sys"]
+
+
+# -- value derivation --------------------------------------------------------------
+
+
+def test_helm_values_emit_the_core_chart_local_dcim_contract():
+    """NVCM's chart renders the NetBox routes, OIDC upstream, Probe, the
+    cluster-dcim-app ExternalSecret and the CNPG PodMonitor from these."""
+    config = _config()
+    config.dcim.settings = {"hostname": "nb.example.com", "readiness_path": "/api/status/"}
+    values = NetBoxInstallerProvider().helm_values(config, {}, is_local=True, local_tags=None)
+
+    assert values["dcim"]["local"] == {
+        "enabled": True,
+        "backendName": "netbox",
+        "backendPort": 80,
+        "gateway": {
+            "hostname": "nb.example.com",
+            "svcHostname": "",
+            "proxyPort": 9110,
+            "authBypass": {"enabled": True, "paths": ["/api/", "/graphql/"]},
+        },
+        "probe": {"path": "/api/status/"},
+    }
+    assert values["cnpg"]["dcim"] == {
+        "enabled": True,
+        "enablePDB": False,
+        "clusterName": "cluster-dcim",
+    }
+
+
+def test_helm_values_carry_the_shared_backup_schedule():
+    config = _config()
+    config.infrastructure.cnpg_s3_backup.enabled = True
+    config.infrastructure.cnpg_s3_backup.bucket = "nvcm"
+    config.infrastructure.cnpg_s3_backup.endpoint = "https://s3.example.com"
+    values = NetBoxInstallerProvider().helm_values(config, {}, is_local=True, local_tags=None)
+    assert values["cnpg"]["dcim"]["backup"] == {
+        "enabled": True,
+        "schedule": "0 0 0 * * *",
+        "retentionPolicy": "30d",
+    }
+
+
+def test_helm_values_disable_the_dcim_cluster_when_netbox_is_external_or_off_cnpg():
+    external = _config(local=False, server="https://netbox.example.com")
+    values = NetBoxInstallerProvider().helm_values(external, {}, is_local=False, local_tags=None)
+    assert values["dcim"]["local"]["enabled"] is False
+    assert values["cnpg"]["dcim"]["enabled"] is False
+
+    external_pg = _config()
+    external_pg.external_services.postgres.enabled = True
+    external_pg.external_services.postgres.dcim_host = "pg.example.com"
+    values = NetBoxInstallerProvider().helm_values(external_pg, {}, is_local=True, local_tags=None)
+    assert values["cnpg"]["dcim"]["enabled"] is False
+
+
+def test_database_values_select_cnpg_with_the_shared_backup_settings():
+    config = _config()
+    settings = NetBoxInstallerSettings()
+    assert database_values(config, settings, "dcim") == {
+        "nvcm.database.user": "dcim",
+        "netbox.externalDatabase.username": "dcim",
+    }
+
+    backup = config.infrastructure.cnpg_s3_backup
+    backup.enabled, backup.bucket, backup.path = True, "nvcm", "backups"
+    backup.endpoint = "https://s3.example.com"
+    values = database_values(config, settings, "dcim")
+    assert values["nvcm.database.cnpg.backup.enabled"] is True
+    assert values["nvcm.database.cnpg.backup.schedule"] == "0 0 0 * * *"
+    assert values["nvcm.database.cnpg.backup.retentionPolicy"] == "30d"
+    assert values["nvcm.database.cnpg.backup.s3.bucket"] == "nvcm"
+    assert values["nvcm.database.cnpg.backup.s3.path"] == "backups"
+    assert values["nvcm.database.cnpg.backup.s3.endpoint"] == "https://s3.example.com"
+    assert values["nvcm.database.cnpg.backup.credentialsSecret"] == "cnpg-backup-credentials"
+
+
+def test_database_values_point_at_an_external_postgres():
+    config = _config()
+    pg = config.external_services.postgres
+    pg.enabled, pg.dcim_host, pg.port = True, "pg.example.com", 5433
+    values = database_values(config, NetBoxInstallerSettings(), "dcim")
+    assert values["nvcm.database.cnpg.enabled"] is False
+    assert values["nvcm.database.external.host"] == "pg.example.com"
+    assert values["nvcm.database.external.port"] == 5433
+    assert values["netbox.externalDatabase.host"] == "pg.example.com"
+    assert values["netbox.externalDatabase.port"] == 5433
+    # Credentials still come from cluster-dcim-app; no bundled PostgreSQL.
+    assert "netbox.postgresql.enabled" not in values
+    assert "nvcm.database.cnpg.backup.enabled" not in values
+
+
+def test_sso_values_map_the_gateway_identity_headers():
+    config = _sso_config()
+    values = sso_values(config, NetBoxSSOSettings())
+    assert values["netbox.remoteAuth.enabled"] is True
+    assert values["netbox.remoteAuth.backends"] == ["netbox.authentication.RemoteUserBackend"]
+    assert values["netbox.remoteAuth.header"] == "HTTP_X_AUTH_REQUEST_EMAIL"
+    assert values["netbox.remoteAuth.userEmail"] == "HTTP_X_AUTH_REQUEST_EMAIL"
+    assert values["netbox.remoteAuth.groupHeader"] == "HTTP_X_AUTH_REQUEST_GROUPS"
+    assert values["netbox.remoteAuth.groupSeparator"] == ","
+    assert values["netbox.remoteAuth.autoCreateUser"] is True
+    assert values["netbox.remoteAuth.groupSyncEnabled"] is True
+    # Defaults: rbac.admin_roles without the `all` sentinel.
+    assert values["netbox.remoteAuth.superuserGroups"] == ["nvcm-admins", "netops"]
+    assert values["netbox.remoteAuth.staffGroups"] == ["nvcm-admins", "netops"]
+    assert values["netbox.remoteAuth.defaultGroups"] == []
+    assert values["netbox.remoteAuth.defaultPermissions"] == {}
+    assert values["netbox.logoutRedirectUrl"] == "/oauth2/sign_out"
+
+
+def test_sso_values_follow_the_settings_block():
+    config = _sso_config(
+        username_header="HTTP_X_AUTH_REQUEST_PREFERRED_USERNAME",
+        superuser_groups=["platform-admins"],
+        staff_groups=[],
+        default_groups=["viewers"],
+        default_permissions={"dcim.view_device": None},
+    )
+    sso = NetBoxInstallerProvider().settings(config).sso
+    values = sso_values(config, sso)
+    assert values["netbox.remoteAuth.header"] == "HTTP_X_AUTH_REQUEST_PREFERRED_USERNAME"
+    assert values["netbox.remoteAuth.superuserGroups"] == ["platform-admins"]
+    assert values["netbox.remoteAuth.staffGroups"] == []
+    assert values["netbox.remoteAuth.defaultGroups"] == ["viewers"]
+    assert values["netbox.remoteAuth.defaultPermissions"] == {"dcim.view_device": None}
+
+
+def test_sso_values_are_empty_without_sso():
+    assert sso_values(_config(), NetBoxSSOSettings()) == {}
+
+
+def test_spiffe_values_mount_the_workload_api_like_nautobot():
+    config = _config()
+    assert spiffe_values(config) == {}
+
+    config.spiffe.enabled = True
+    values = spiffe_values(config)
+    volume = {"name": "spiffe-workload-api", "csi": {"driver": "csi.spiffe.io", "readOnly": True}}
+    mount = {"name": "spiffe-workload-api", "mountPath": "/spiffe-workload-api", "readOnly": True}
+    assert values["netbox.extraVolumes"] == [volume]
+    assert values["netbox.extraVolumeMounts"] == [mount]
+    assert values["netbox.worker.extraVolumes"] == [volume]
+    assert values["netbox.worker.extraVolumeMounts"] == [mount]
+
+    config.spiffe.provider = "teleport"
+    config.spiffe.socket_mount_path = "/run/spiffe"
+    values = spiffe_values(config)
+    assert values["netbox.extraVolumes"][0]["hostPath"] == {
+        "path": "/var/run/teleport",
+        "type": "Directory",
+    }
+    assert values["netbox.extraVolumeMounts"][0]["mountPath"] == "/run/spiffe"
+
+
+def test_monitoring_values_follow_monitoring_or_observability():
+    config = _config()
+    assert monitoring_values(config) == {}
+    config.infrastructure.monitoring.observability_enabled = True
+    assert monitoring_values(config) == {
+        "nvcm.monitoring.enabled": True,
+        "netbox.metrics.enabled": True,
+    }
+
+
+def test_split_overrides_keeps_strings_on_set_and_the_rest_on_set_json():
+    plain, as_json = split_overrides(
+        {"a.b": "x,y", "a.c": True, "a.d": ["g1", "g2"], "a.e": {}, "a.f": 5433}
+    )
+    assert plain == [r"a.b=x\,y"]
+    assert as_json == ["a.c=true", 'a.d=["g1", "g2"]', "a.e={}", "a.f=5433"]

@@ -129,10 +129,15 @@ That prints an API token. Put it in `install.yaml` under
 ```
 
 Finally connect NetBox to NVCM's event bus, which cannot happen earlier because
-the NATS password does not exist until NVCM is deployed. The same upgrade also
-creates NetBox's HTTPRoute: it is skipped at install time because the Gateway API
-CRDs arrive with NVCM, so do not omit this step even if you set
-`nvcm.natsPassword` by hand earlier.
+the NATS password does not exist until NVCM is deployed. NetBox's HTTPRoute
+needs nothing here: NVCM's own release renders it from the provider's
+`dcim.local` values.
+
+`install-netbox.sh` installs NetBox on the chart's bundled PostgreSQL
+(`nvcm.database.cnpg.enabled=false`, `netbox.postgresql.enabled=true`) because
+the CNPG operator only arrives with NVCM's deploy, after NetBox. To run NetBox
+on CNPG instead, install the operator from the bundle first, create the
+`cluster-dcim-app` Secret (`username`, `password`), and drop those two flags.
 
 ```bash
 PW=$(kubectl -n nv-config-manager get secret nats-nv-config-manager \

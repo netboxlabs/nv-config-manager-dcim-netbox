@@ -174,9 +174,9 @@ class NetBoxAirHooks(AirProviderHooks):
 
     def post_deploy(self, manager: AirSimulationManager, host: str, port: int) -> None:
         try:
-            self._deployment(manager).publish_route(host, port)
+            self._deployment(manager).verify_route(host, port)
         except Exception as exc:  # noqa: BLE001 - a UI route is not deployment-critical
-            self._log(f"Could not publish the NetBox route: {exc}")
+            self._log(f"Could not verify the NetBox route: {exc}")
 
     def provisioning_status(
         self,

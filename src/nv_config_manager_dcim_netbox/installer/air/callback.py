@@ -187,22 +187,6 @@ class NetBoxAirCallback:
         self.on_log(f"Timed out waiting for NetBox intended configs; last count: {last_counts}")
         return False
 
-    def gateway_overrides(self) -> list[str]:
-        """Chart `--set` arguments that publish NetBox on the sim's Gateway.
-
-        A sim serves NVCM at `nvcm.air`, not the `config-manager.local` a kind
-        cluster uses. Skipped when `helm_set` already names either key, which is
-        appended after these and would otherwise silently conflict.
-        """
-        if any(
-            "gateway.baseHostname" in s or "gateway.hostname" in s for s in self.settings.helm_set
-        ):
-            return []
-        overrides = [f"nvcm.gateway.baseHostname={CONFIG_MANAGER_HOSTNAME}"]
-        if self.settings.hostname:
-            overrides.append(f"nvcm.gateway.hostname={self.settings.hostname}")
-        return overrides
-
     def bring_up_script(self, images_tar: str, chart_tar: str) -> str:
         """Render every on-box step as one script.
 
@@ -236,7 +220,8 @@ class NetBoxAirCallback:
             nats_password=self.nats_password,
             workflow_url=f"https://{CONFIG_MANAGER_HOSTNAME}",
             extra_set=[
-                *self.gateway_overrides(),
+                # The CNPG operator reaches the box with NVCM's deploy, after this.
+                *settings.database_overrides(),
                 f"nvcm.eventStream={esc(settings.event_stream)}",
                 f"nvcm.eventSubject={esc(settings.event_subject)}",
                 f"netbox.superuser.name={esc(settings.superuser_name)}",
@@ -350,29 +335,17 @@ class NetBoxAirCallback:
             f'if [ "$rc" -eq 0 ]; then echo {BRING_UP_MARKER}; fi; exit "$rc"'
         )
 
-    def publish_route(self, host: str, port: int) -> None:
-        """Create NetBox's HTTPRoute, now that the Gateway API CRDs are registered.
-
-        The bring-up installs the chart before NVCM deploys, so the Gateway API does
-        not exist on the box yet and templates/httproute.yaml is skipped. The chart
-        is still unpacked where the bring-up put it, and --reuse-values replays the
-        install's own values.
-        """
+    def verify_route(self, host: str, port: int) -> None:
+        """Report whether NVCM's chart published NetBox's HTTPRoute on the sim's Gateway."""
         runner = self.runner(host, port)
-        remote_chart = f"{REMOTE_CHART_DIR}/{self.chart.name}"
-        cluster.publish_netbox_route(
-            remote_chart,
-            release=self.settings.release,
-            namespace=NAMESPACE,
-            runner=runner,
-        )
         hostname = self.settings.netbox_hostname(CONFIG_MANAGER_HOSTNAME)
         if cluster.netbox_route_exists(NAMESPACE, runner=runner):
             self.on_log(f"NetBox route published for https://{hostname}")
         else:
             self.on_log(
-                "NetBox still has no HTTPRoute after the upgrade, so its hostname will not "
-                "resolve. Reach it with kubectl port-forward on the sim box instead."
+                "NetBox has no HTTPRoute, so its hostname will not resolve; NVCM's release "
+                "renders it from dcim.local. Reach it with kubectl port-forward on the sim "
+                "box instead."
             )
 
     def check_image_arch(self, host: str, port: int) -> None:

@@ -1,0 +1,50 @@
+{{- /*
+ServiceMonitor for NetBox's Prometheus endpoint.
+
+Rendered here rather than through the upstream chart's metrics.serviceMonitor
+so it can be skipped while the monitoring.coreos.com CRDs are absent: a Helm
+release fails outright on an unregistered kind. `helm template` has no cluster
+to ask, so pass `--api-versions monitoring.coreos.com/v1` to render it offline.
+
+Targets the `netbox` Service's http port at /metrics, which NetBox exposes when
+METRICS_ENABLED (netbox.metrics.enabled) and exempts from LOGIN_REQUIRED. The
+granian-metrics port is scraped too when the upstream chart adds it.
+*/ -}}
+{{- $mon := .Values.nvcm.monitoring -}}
+{{- $haveMonitoringAPI := .Capabilities.APIVersions.Has "monitoring.coreos.com/v1" -}}
+{{- if and $mon.enabled .Values.netbox.metrics.enabled $haveMonitoringAPI }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Values.netbox.fullnameOverride }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: nvcm-netbox
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: netbox-metrics
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    {{- with $mon.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  jobLabel: app.kubernetes.io/name
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: netbox
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ $mon.interval | default "30s" }}
+      scrapeTimeout: {{ $mon.scrapeTimeout | default "10s" }}
+    {{- if (.Values.netbox.metrics.granian).enabled }}
+    - port: granian-metrics
+      path: /metrics
+      interval: {{ $mon.interval | default "30s" }}
+      scrapeTimeout: {{ $mon.scrapeTimeout | default "10s" }}
+    {{- end }}
+{{- end }}

@@ -25,12 +25,15 @@ dcim_provider: netbox
    `kind load` them, install NetBox with `deploy/netbox` already holding a NATS
    password, run `nvcm_init`, and load the sim's topology into NetBox with
    `nvcm_load_dcim` (`pre_deploy`). This runs as one uploaded script in a single
-   SSH session.
+   SSH session. NetBox is installed on the chart's bundled PostgreSQL
+   (`dcim_settings.database: bundled`, the AIR default) because the CNPG
+   operator only reaches the box with NVCM's deploy, after this step.
 4. **After NVCM deploys**, add `netbox.nvcm.air` to the box's `/etc/hosts`
    alongside NVCM's own names (`gateway_hostnames`), wait for NetBox to hold
    intended configs for the render-enabled devices (`wait_for_configs`), and
-   publish NetBox on the sim's Gateway with a values-preserving Helm pass now that
-   the Gateway API CRDs exist (`post_deploy`).
+   check that NVCM's release published NetBox on the sim's Gateway
+   (`post_deploy`); the HTTPRoute is NVCM's, rendered from the `dcim.local`
+   values the provider emits.
 5. **While the dashboard runs**, report switch provisioning from NetBox's
    `DeviceConfigStatus` records (`provisioning_status`).
 
