@@ -2,10 +2,33 @@
 name = "nv-config-manager-dcim-netbox"
 version = "0.1.0"
 description = "NetBox implementation of the NVIDIA Config Manager DCIM provider API"
-authors = [{ name = "NetBox Labs" }]
-readme = "README.md"
-license = { text = "Apache-2.0" }
+readme = { file = "README.md", content-type = "text/markdown" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+# The floor is set by NVCM's SDK (nv-config-manager-dcim), which requires 3.13:
+# this package runs inside NVCM's application pods, not NetBox's. The NetBox
+# plugin (netbox-nv-config-manager) follows NetBox's own floor instead, so the
+# two differ on purpose.
 requires-python = ">=3.13"
+authors = [
+    { name = "NetBox Labs", email = "support@netboxlabs.com" },
+]
+maintainers = [
+    { name = "NetBox Labs", email = "support@netboxlabs.com" },
+]
+keywords = ["netbox", "nvidia", "nv-config-manager", "dcim"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Telecommunications Industry",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Networking",
+    "Typing :: Typed",
+]
 dependencies = [
     "aiohttp[speedups]>=3.14.1",
     "netaddr",
@@ -37,6 +60,9 @@ nvcm-netbox = "nv_config_manager_dcim_netbox.installer.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/netboxlabs/nv-config-manager-dcim-netbox"
+Source = "https://github.com/netboxlabs/nv-config-manager-dcim-netbox"
+Issues = "https://github.com/netboxlabs/nv-config-manager-dcim-netbox/issues"
+Changelog = "https://github.com/netboxlabs/nv-config-manager-dcim-netbox/blob/main/CHANGELOG.md"
 
 # Discovered by the SDK through the `nv_config_manager.dcim` entry-point group.
 # The entry-point name and DCIMProviderMetadata.name must both be "netbox".
@@ -63,7 +89,8 @@ dev = [
 # nv-config-manager-dcim = { path = "../nv-config-manager/packages/dcim", editable = true }
 
 [build-system]
-requires = ["hatchling"]
+# 1.27 is the first release that accepts a PEP 639 SPDX `license` string.
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
