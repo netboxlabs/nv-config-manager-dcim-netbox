@@ -642,6 +642,42 @@ def test_chart_renders_and_wires_the_publisher():
     # linking into a workflow UI this release knows nothing about.
     assert "workflow_url" not in rendered
 
+    # NetBox's own census report is the one outbound call that is not to NVCM;
+    # off by this chart, and wired in through extraConfig so NetBox actually
+    # loads it. ISOLATED_DEPLOYMENT stays off unless the air-gapped installer
+    # asks for it.
+    assert "nvcm-netbox-settings" in rendered
+    assert "CENSUS_REPORTING_ENABLED: false" in rendered
+    assert "ISOLATED_DEPLOYMENT: false" in rendered
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
+@pytest.mark.skipif(
+    not (_CHART / "charts").is_dir(), reason="chart deps not fetched (helm dependency build)"
+)
+def test_chart_isolated_deployment_is_a_real_boolean():
+    """The air-gapped installer sets nvcm.isolatedDeployment=true. It has to land
+    as a YAML boolean: the chart's inline `values:` extraConfig runs through
+    `tpl` and would stringify it, and NetBox reads the string "false" as true."""
+    rendered = subprocess.run(
+        [
+            "helm",
+            "template",
+            "nb",
+            str(_CHART),
+            "--set",
+            f"netbox.superuser.apiToken={generate_api_token()}",
+            "--set",
+            "nvcm.isolatedDeployment=true",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "ISOLATED_DEPLOYMENT: true" in rendered
+    assert "ISOLATED_DEPLOYMENT: 'true'" not in rendered
+    assert 'ISOLATED_DEPLOYMENT: "true"' not in rendered
+
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
 @pytest.mark.skipif(

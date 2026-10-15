@@ -719,7 +719,7 @@ def test_air_image_preparation_builds_without_make(monkeypatch, tmp_path):
         "_load_versions",
         lambda: {
             "NETBOX_BASE_IMAGE": "netbox-base:4.7",
-            "NETBOX_BGP_REF": "abc123",
+            "NETBOX_BGP_VERSION": "0.20.2",
             "NETBOX_PLUGIN_REF": "main",
         },
     )
@@ -759,7 +759,7 @@ def test_a_rate_limited_build_retries_through_a_mirror(monkeypatch, tmp_path):
     monkeypatch.setattr(
         air_images,
         "_load_versions",
-        lambda: {"NETBOX_BASE_IMAGE": "netbox-base:4.7", "NETBOX_BGP_REF": "abc"},
+        lambda: {"NETBOX_BASE_IMAGE": "netbox-base:4.7", "NETBOX_BGP_VERSION": "0.20.2"},
     )
     monkeypatch.setattr(air_images, "_stream", fake_stream)
 

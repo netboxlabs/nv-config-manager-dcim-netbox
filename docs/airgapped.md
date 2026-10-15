@@ -176,6 +176,12 @@ for the full set.
 The init and `waitForBackend` containers default to `docker.io` and would
 otherwise be the only thing reaching for the internet.
 
+It also sets `nvcm.isolatedDeployment=true`, NetBox's `ISOLATED_DEPLOYMENT`,
+so the daily housekeeping job skips its release check and census report instead
+of timing out against hosts the cluster cannot reach. The census report is off
+in every deployment of this chart; see
+[Outbound connections](deployment.md#outbound-connections).
+
 It also sets `global.security.allowInsecureImages`. That is Bitnami's guard
 against running their charts with non-Bitnami registries; pushing their images
 into a private registry is exactly what an air-gapped install does, and the

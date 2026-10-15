@@ -170,9 +170,14 @@ echo "==> Installing NetBox into $NAMESPACE from $CHART"
 # allowInsecureImages is Bitnami's guard against non-Bitnami registries. Pushing
 # their images into a private registry is exactly what an air-gapped install
 # does, so the chart refuses to render without it.
+#
+# isolatedDeployment turns on NetBox's ISOLATED_DEPLOYMENT, so the daily
+# housekeeping job skips its release check and census call instead of timing out
+# against hosts this cluster cannot reach.
 helm upgrade --install "$RELEASE" "$CHART" \
     --namespace "$NAMESPACE" --create-namespace \
     --set "netbox.global.security.allowInsecureImages=true" \
+    --set "nvcm.isolatedDeployment=true" \
     --set "netbox.superuser.apiToken=$TOKEN" \
     --set "netbox.image.registry=$REGISTRY" \
     --set "netbox.postgresql.image.registry=$REGISTRY" \

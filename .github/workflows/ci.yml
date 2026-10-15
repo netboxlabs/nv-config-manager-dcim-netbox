@@ -125,7 +125,7 @@ jobs:
   #
   # Needs the plugin, which lives in a private sibling repo, so this job is
   # skipped unless PLUGIN_REPO_TOKEN is set (a token with read access to
-  # netboxlabs/netbox_nv_config_manager). GITHUB_TOKEN is scoped to this repo and
+  # netboxlabs/netbox-nv-config-manager). GITHUB_TOKEN is scoped to this repo and
   # cannot check it out.
   # Gate as its own job so that without the token live-netbox is *skipped*, which
   # is visibly different from a green run. Gating inside the job left every step
@@ -178,7 +178,7 @@ jobs:
       - name: Checkout plugin
         uses: actions/checkout@v4
         with:
-          repository: netboxlabs/netbox_nv_config_manager
+          repository: netboxlabs/netbox-nv-config-manager
           token: ${{ secrets.PLUGIN_REPO_TOKEN }}
           # actions/checkout refuses a path outside the workspace.
           path: _plugin
@@ -199,8 +199,7 @@ jobs:
       - name: Install NetBox, plugin and provider
         run: |
           pip install 'netbox==4.7.0'
-          pip install "https://github.com/netbox-community/netbox-bgp/archive/refs/heads/0.20.0.tar.gz"
-          pip install -e _plugin
+          pip install -e _plugin  # pulls netbox-bgp>=0.20.0 from PyPI
           pip install ../nv-config-manager/packages/dcim
           pip install -e '.[installer]'
           pip install pytest pytest-asyncio
