@@ -53,3 +53,6 @@ generated/
 # the NetBox side is regenerated on every run, as are the pulled artifacts.
 parity/corpus/*/netbox/
 parity/artifacts/
+
+# Ship Kit production-readiness review (netboxlabs/ship-kit) -- working copy, not shipped
+ship-kit/

@@ -20,7 +20,7 @@ DEFAULT_MIRROR = "mirror.gcr.io/library"
 # Docker Hub bases the build pulls. Only needed on a 429 retry, where each is
 # re-pointed at a mirror through BuildKit's FROM override.
 _HUB_BASE_IMAGES = ("python:3.13-slim", "alpine:3.20")
-PLUGIN_REPO_URL = "https://github.com/netboxlabs/netbox_nv_config_manager.git"
+PLUGIN_REPO_URL = "https://github.com/netboxlabs/netbox-nv-config-manager.git"
 TARGET_PLATFORM = "linux/amd64"
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -228,7 +228,7 @@ def ensure_air_images(
             "--build-arg",
             f"NETBOX_BASE_IMAGE={versions['NETBOX_BASE_IMAGE']}",
             "--build-arg",
-            f"NETBOX_BGP_REF={versions['NETBOX_BGP_REF']}",
+            f"NETBOX_BGP_VERSION={versions['NETBOX_BGP_VERSION']}",
             "--build-context",
             f"plugin={plugin_repo}",
             "-t",

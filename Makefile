@@ -147,7 +147,7 @@ check-image:
 netbox-image:
 	docker build $(PLATFORM_ARG) $(MIRROR_ARGS) -f build/netbox.Dockerfile \
 	  --build-arg NETBOX_BASE_IMAGE=$(NETBOX_BASE_IMAGE) \
-	  --build-arg NETBOX_BGP_REF=$(NETBOX_BGP_REF) \
+	  --build-arg NETBOX_BGP_VERSION=$(NETBOX_BGP_VERSION) \
 	  --build-context plugin=$(PLUGIN) \
 	  -t $(NETBOX_IMAGE) .
 

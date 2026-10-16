@@ -51,6 +51,12 @@ nvcm:
   # yourself if you are driving helm directly.
   workflowUrl: ""
 
+  # NetBox's ISOLATED_DEPLOYMENT: disables everything that assumes internet
+  # access (release check, census). The air-gapped installer sets it; leave it
+  # off elsewhere so an operator-enabled release check still works. NetBox's
+  # census report is off in every case -- see templates/netbox-settings-configmap.yaml.
+  isolatedDeployment: false
+
   # Browser access through NVCM's Gateway, so NetBox is reachable the same way
   # NVCM's own services are rather than only through `kubectl port-forward`.
   # See templates/httproute.yaml.
@@ -111,6 +117,10 @@ netbox:
     - secret:
         # templates/publisher-config-secret.yaml
         secretName: nvcm-netbox-publisher
+        optional: false
+    - configMap:
+        # templates/netbox-settings-configmap.yaml: census off, ISOLATED_DEPLOYMENT.
+        name: nvcm-netbox-settings
         optional: false
 
   # Require a login for the UI and API. The upstream chart defaults this to false

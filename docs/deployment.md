@@ -178,6 +178,24 @@ Grant the token's user:
   (validation-status custom-field updates).
 - **OPTIONS**, used to read field choices such as statuses.
 
+## Outbound connections
+
+NetBox makes exactly one outbound connection in this deployment: the plugin's
+change-event publisher, to NVCM's NATS (`nvcm.natsService`). Its contents are
+the change envelope described in [event-delivery.md](event-delivery.md).
+
+NetBox itself ships with an anonymous census report, on by default: once a day
+the housekeeping job sends the NetBox version, Python version and a hash of the
+secret key to `census.netbox.oss.netboxlabs.com`. The chart turns it off
+(`CENSUS_REPORTING_ENABLED: false` in
+`deploy/netbox/templates/netbox-settings-configmap.yaml`). NetBox's optional
+release check (`RELEASE_CHECK_URL`) is not configured and stays off.
+
+The same ConfigMap carries `ISOLATED_DEPLOYMENT`, NetBox's switch for
+deployments without internet access. It is off by default and
+`deploy/airgapped/install-netbox.sh` sets it; to set it on a connected
+cluster, pass `--set nvcm.isolatedDeployment=true`.
+
 ## Troubleshooting
 
 **Provider not discovered, or NVCM cannot reach NetBox.** Check the generated
