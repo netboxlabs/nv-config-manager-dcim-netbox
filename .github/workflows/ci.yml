@@ -5,12 +5,17 @@ on:
   push:
     branches: [ main ]
 
+# Nothing here writes through GITHUB_TOKEN. The one cross-repo checkout
+# (live-netbox) uses PLUGIN_REPO_TOKEN, so read on contents covers every job.
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           python-version: "3.13"
       # Both halves of `make lint`, so formatting drift cannot land on main and
@@ -87,7 +92,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           python-version: "3.13"
       # The SDK is not yet published. Until then, install it from the NVCM
@@ -98,8 +103,9 @@ jobs:
             https://github.com/dsx-ai-factory/nv-config-manager.git ../nv-config-manager
       # Into a venv, not `--system`: the interpreter setup-uv provisions is
       # uv-managed and externally managed, so `uv pip install --system` errors.
-      # `--clear` because setup-uv already creates (and exports) a .venv itself;
-      # without it `uv venv` aborts on the existing directory.
+      # setup-uv >= 6 no longer creates a .venv on its own (that is behind
+      # `activate-environment`, off by default), so it is created here. `--clear`
+      # keeps this step idempotent should a venv ever exist already.
       - name: Install
         run: |
           uv venv --clear --python 3.13
