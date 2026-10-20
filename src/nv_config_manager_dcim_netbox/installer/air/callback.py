@@ -8,6 +8,7 @@ deploy runs; `on_complete` after everything.
 
 from __future__ import annotations
 
+import os
 import shlex
 import tempfile
 import time
@@ -291,7 +292,19 @@ class NetBoxAirCallback:
                 deployment_name=self.cfg.deployment_name or self.cfg.mock_blueprint,
                 runner=script,
             )
-        return script.script(marker=SCRIPT_DONE_MARKER, redact=[self.api_token])
+        # Every secret the script carries, not just the token: the NATS and
+        # superuser passwords currently share the helm line with it, but the
+        # redaction must not depend on that staying true. Both the raw superuser
+        # password and its helm-escaped form, since the script holds the latter.
+        return script.script(
+            marker=SCRIPT_DONE_MARKER,
+            redact=[
+                self.api_token,
+                self.nats_password,
+                self.cfg.netbox_superuser_password,
+                cluster.helm_set_value(self.cfg.netbox_superuser_password),
+            ],
+        )
 
     def run_script(self, host: str, port: int, body: str) -> None:
         """Upload the script and run it in a single SSH session.
@@ -308,8 +321,11 @@ class NetBoxAirCallback:
         remote = f"/home/{NVCM_BOX_USER}/nvcm-netbox-bring-up.sh"
         with tempfile.TemporaryDirectory() as tmpdir:
             local = Path(tmpdir) / "nvcm-netbox-bring-up.sh"
-            local.write_text(body)
-            local.chmod(0o600)
+            # Created 0600 rather than written and then chmod'ed, so the file
+            # never exists at the umask default while it holds the secrets.
+            fd = os.open(local, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as handle:
+                handle.write(body)
             self.runner(host, port).upload(local, remote)
 
         quoted = shlex.quote(remote)
