@@ -670,17 +670,79 @@ class _Uploads:
         return ""
 
 
+def _assert_untraced(script: str, secret: str, label: str) -> None:
+    lines = script.splitlines()
+    seen = False
+    for i, line in enumerate(lines):
+        if secret in line:
+            seen = True
+            preceding = "\n".join(lines[max(0, i - 4) : i])
+            assert "set +x" in preceding, f"{label} traced at line {i}: {line[:60]}"
+    assert seen, f"{label} not in script; the assertion checked nothing"
+
+
 def test_the_api_token_is_never_traced():
     # The script runs under `set -x` and its output is streamed back to the
     # operator, so any line carrying the token must disable tracing first.
     cb = _callback_for_script()
-    script = cb.bring_up_script("/i.tar", "/c.tgz")
+    _assert_untraced(cb.bring_up_script("/i.tar", "/c.tgz"), cb.api_token, "token")
 
-    lines = script.splitlines()
-    for i, line in enumerate(lines):
-        if cb.api_token in line:
-            preceding = "\n".join(lines[max(0, i - 4) : i])
-            assert "set +x" in preceding, f"token traced at line {i}: {line[:60]}"
+
+def test_no_password_in_the_script_is_traced():
+    """The NATS and superuser passwords are redacted in their own right.
+
+    They happen to share the helm line with the API token today, so a redact
+    list of just the token covers them by accident. Each must be named so a
+    refactor that moves one onto its own line does not start echoing it.
+    """
+    cb = _callback_for_script(netbox_superuser_password=r"lab,pass\word")
+    script = cb.bring_up_script("/i.tar", "/c.tgz")
+    _assert_untraced(script, cb.nats_password, "NATS password")
+    # The script holds the helm-escaped form, not the raw value.
+    _assert_untraced(script, r"lab\,pass\\word", "superuser password")
+
+    from nv_config_manager_dcim_netbox.installer.remote import ScriptRunner
+
+    captured = {}
+    original = ScriptRunner.script
+
+    def spy(self, *, marker, redact=None):
+        captured["redact"] = list(redact or [])
+        return original(self, marker=marker, redact=redact)
+
+    ScriptRunner.script = spy
+    try:
+        cb.bring_up_script("/i.tar", "/c.tgz")
+    finally:
+        ScriptRunner.script = original
+    assert cb.nats_password in captured["redact"]
+    assert r"lab,pass\word" in captured["redact"]
+    assert r"lab\,pass\\word" in captured["redact"]
+
+
+def test_the_local_script_is_created_private(tmp_path):
+    """The script holds the token and passwords, so it must never exist at the
+    umask default, not even between a write and a chmod."""
+    cb = _callback_for_script()
+    seen = {}
+
+    class _Manager:
+        def _ssh_run_and_tail(self, host, port, command, *, marker, label, timeout):
+            return True
+
+    class _ModeCapture:
+        def upload(self, local, remote):
+            seen["mode"] = local.stat().st_mode & 0o777
+
+        def run(self, argv, *, stdin=None):
+            return ""
+
+    cb._manager = _Manager()
+    cb.runner = lambda host, port: _ModeCapture()
+
+    cb.run_script("box", 22, "#!/usr/bin/env bash\necho hi\n")
+
+    assert seen["mode"] == 0o600
 
 
 def test_the_blueprint_load_is_skipped_when_asked():
