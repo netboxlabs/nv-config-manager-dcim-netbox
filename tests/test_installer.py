@@ -19,6 +19,7 @@ import pytest
 import yaml
 from click.testing import CliRunner
 from nv_config_manager_dcim import DCIM_EVENT_CONTRACT_VERSION
+from nv_config_manager_installer.deployer import Deployer
 
 from nv_config_manager_dcim_netbox.installer import cli, cluster
 from nv_config_manager_dcim_netbox.installer import config as cfg
@@ -408,10 +409,19 @@ def _up_with_cluster_mocked(monkeypatch, *, kind_exists=True):
     monkeypatch.setattr(cli.NetBoxDeployer, "run", lambda self: True)
 
 
-def test_up_uses_the_inherited_deployer_with_provider_settings(monkeypatch, tmp_path):
+@pytest.mark.parametrize("kind_load", [False, True])
+def test_up_uses_the_inherited_deployer_with_provider_settings(monkeypatch, tmp_path, kind_load):
     captured = {}
     _up_with_cluster_mocked(monkeypatch)
     repo = _nvcm_stub()
+    original_load_profile = cfg.load_profile
+
+    def registry_profile():
+        profile = original_load_profile()
+        profile["images"] = {"registry": "registry.example/nvcm", "tag": "v1.2.3"}
+        return profile
+
+    monkeypatch.setattr(cfg, "load_profile", registry_profile)
 
     class RecordingDeployer:
         def __init__(self, config, options, netbox, callback):
@@ -421,12 +431,15 @@ def test_up_uses_the_inherited_deployer_with_provider_settings(monkeypatch, tmp_
             return True
 
     monkeypatch.setattr(cli, "NetBoxDeployer", RecordingDeployer)
+    monkeypatch.setattr(cli, "require_tools", lambda *args: None)
+    monkeypatch.setattr(cluster, "check_image_arch", lambda *args: None)
+    monkeypatch.setattr(cluster, "load_images_into_kind", lambda *args: None)
 
     result = CliRunner().invoke(
         cli.main,
         [
             "up",
-            "--no-kind-load",
+            "--kind-load" if kind_load else "--no-kind-load",
             "--skip-verify",
             "--config-out",
             str(tmp_path / "install.yaml"),
@@ -436,14 +449,22 @@ def test_up_uses_the_inherited_deployer_with_provider_settings(monkeypatch, tmp_
     )
     assert result.exit_code == 0, result.output
     assert captured["config"].dcim.provider == "netbox"
-    assert captured["config"].images.source.value == "local"
+    expected_source = "local" if kind_load else "registry"
+    assert captured["config"].images.source.value == expected_source
+    assert captured["config"].images.registry == "registry.example/nvcm"
+    assert captured["config"].images.tag == "v1.2.3"
+    saved = yaml.safe_load((tmp_path / "install.yaml").read_text())
+    assert saved["images"]["source"] == expected_source
+    assert captured["options"].build_images is kind_load
+    if not kind_load:
+        deployer = Deployer(captured["config"], captured["options"])
+        deployer._validate_local_cluster_target("production", "https://api.example.com:6443")
     # .resolve(), as _resolve_nvcm_repo does: on macOS tmp_path is under
     # /var/folders, a symlink to /private/var/folders, so the bare paths differ.
     assert captured["options"].project_root == repo.resolve()
-    assert captured["options"].load_kind is False
+    assert captured["options"].load_kind is kind_load
     assert captured["netbox"].chart == _CHART.resolve()
     assert captured["netbox"].image_repository == "nv-config-manager-netbox"
-    assert "[4/4]" in result.output
 
 
 def test_up_reports_an_inherited_deployer_failure(monkeypatch, tmp_path):

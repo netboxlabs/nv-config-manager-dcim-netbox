@@ -181,6 +181,11 @@ make topology                      # air_trial, 7 devices
 make topology BLUEPRINT=air_superpod   # 24 devices
 ```
 
+`--no-kind-load` uses registry images for NVCM and skips local NVCM builds.
+It preserves the profile's image registry, tag, pull credentials and overrides.
+NetBox and provider wheelhouse images must also be available to the target cluster;
+select their registry references with `--netbox-image` and `--provider-image`.
+
 The blueprints come from `development/mock_topology/context/` in your NVCM
 checkout.
 

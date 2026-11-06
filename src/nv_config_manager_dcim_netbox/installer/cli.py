@@ -16,7 +16,7 @@ import click
 import yaml
 from nv_config_manager_dcim import DCIM_EVENT_CONTRACT_VERSION
 from nv_config_manager_installer.deployer import DeployOptions, DeployStep, StepStatus
-from nv_config_manager_installer.schema import ImageSource, NVConfigManagerInstallConfig
+from nv_config_manager_installer.schema import NVConfigManagerInstallConfig
 
 from nv_config_manager_dcim_netbox.installer import cluster
 from nv_config_manager_dcim_netbox.installer import config as cfg
@@ -778,6 +778,8 @@ def up(
         nats_password=nats_password,
     )
     config = cfg.apply_options(profile, options)
+    # Registry deployments must not request local builds or trip NVCM's local-cluster guard.
+    config.setdefault("images", {})["source"] = "local" if kind_load else "registry"
     # Keep the generated file usable by later standalone installer commands.
     written = cfg.write_config(config, config_out).resolve()
     _ok(f"{written}")
@@ -797,13 +799,12 @@ def up(
 
     assert repo is not None
     install_config = NVConfigManagerInstallConfig.model_validate(config)
-    install_config.images.source = ImageSource.LOCAL
     deployer = NetBoxDeployer(
         install_config,
         DeployOptions(
             project_root=repo,
             chart_dir=str(repo / "deploy" / "helm"),
-            build_images=True,
+            build_images=kind_load,
             load_kind=kind_load,
             kind_cluster=kind_cluster,
             install_envoy_gateway=True,
