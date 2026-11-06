@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from nv_config_manager_dcim_netbox import integration_adapter
 
 
@@ -144,3 +146,12 @@ def test_status_and_backup_inspection_use_provider_api(monkeypatch):
 
     assert adapter.get_device_status("2") == "Provisioning"
     assert adapter.backup_config_count() == 1
+
+
+def test_adapter_reads_the_token_secret_the_installer_creates():
+    plugin = pytest.importorskip(
+        "nv_config_manager_dcim_netbox.installer.plugin",
+        reason="the `installer` extra is not installed",
+    )
+    adapter = integration_adapter.NetBoxIntegrationAdapter
+    assert adapter.secret_name == plugin.TOKEN_SECRET_NAME

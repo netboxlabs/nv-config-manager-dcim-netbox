@@ -173,11 +173,16 @@ echo "==> Installing NetBox into $NAMESPACE from $CHART"
 #
 # The bundled PostgreSQL rather than the chart's CNPG default: the operator only
 # arrives with NVCM's deploy, which runs after this script.
+#
+# isolatedDeployment turns on NetBox's ISOLATED_DEPLOYMENT, so the daily
+# housekeeping job skips its release check and census call instead of timing out
+# against hosts this cluster cannot reach.
 helm upgrade --install "$RELEASE" "$CHART" \
     --namespace "$NAMESPACE" --create-namespace \
     --set "nvcm.database.cnpg.enabled=false" \
     --set "netbox.postgresql.enabled=true" \
     --set "netbox.global.security.allowInsecureImages=true" \
+    --set "nvcm.isolatedDeployment=true" \
     --set "netbox.superuser.apiToken=$TOKEN" \
     --set "netbox.image.registry=$REGISTRY" \
     --set "netbox.postgresql.image.registry=$REGISTRY" \

@@ -301,23 +301,24 @@ def wait_for_netbox(namespace: str, timeout: str = "10m", runner: Runner | None 
     )
 
 
-# Rendered by NVCM's chart from the provider's `dcim.local.*` values.
-NETBOX_ROUTE = "netbox"
-
-
 def netbox_route_exists(namespace: str, runner: Runner | None = None) -> bool:
-    """Return whether NVCM's chart created the NetBox HTTPRoute."""
+    """Return whether an HTTPRoute in *namespace* routes to the NetBox Service.
+
+    NVCM's chart renders it from the provider's `dcim.local.*` values and names it
+    after its own release, so it is found by backend rather than by name.
+    """
     try:
-        kubectl(
+        backends = kubectl(
             "get",
             "httproute.gateway.networking.k8s.io",
-            NETBOX_ROUTE,
+            "-o",
+            "jsonpath={.items[*].spec.rules[*].backendRefs[*].name}",
             namespace=namespace,
             runner=runner,
         )
     except CommandError:
         return False
-    return True
+    return NETBOX_SERVICE in backends.split()
 
 
 def load_topology(

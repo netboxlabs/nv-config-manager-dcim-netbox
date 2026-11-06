@@ -8,6 +8,7 @@ end-to-end steps in docs/air-sim.md.
 
 from __future__ import annotations
 
+from importlib import metadata
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -25,6 +26,7 @@ pytestmark = pytest.mark.air
 pytest.importorskip("nv_config_manager_installer", reason="the `installer` extra is not installed")
 
 from nv_config_manager_installer.air_sim.installer_config import (  # noqa: E402
+    build_deploy_command,
     build_template_plugins,
     generate_air_sim_install_config,
 )
@@ -133,6 +135,25 @@ def test_blueprint_dir_points_into_the_clone_on_the_box():
     )
 
 
+def test_blueprint_dir_uses_staged_local_content():
+    cfg = _sim(mock_blueprint="air_trial")
+    cfg.mock_topology_path = "/home/nvcm/air-content/mock-topology/mock_topology"
+    cfg._air_content_staged = True
+
+    assert air_callback.blueprint_dir(cfg) == (
+        "/home/nvcm/air-content/mock-topology/mock_topology/context/air_trial"
+    )
+
+
+def test_blueprint_dir_ignores_a_local_mock_topology_that_was_not_staged():
+    cfg = _sim(mock_blueprint="air_trial", mock_topology_path="/Users/me/mock_topology")
+    cfg._air_content_staged = True
+
+    assert air_callback.blueprint_dir(cfg, "/home/nvcm/nv-config-manager") == (
+        "/home/nvcm/nv-config-manager/development/mock_topology/context/air_trial"
+    )
+
+
 # -- hooks ---------------------------------------------------------------------
 
 
@@ -189,6 +210,21 @@ def test_hooks_own_the_provider_lifecycle(fake_deployment, monkeypatch):
         ("post", "worker.example", 17117),
     ]
     assert hooks.gateway_hostnames(cfg) == ("netbox.nvcm.air",)
+
+
+def test_hooks_layer_the_uploaded_wheelhouse_onto_the_box_installer():
+    packages = air_hooks.NetBoxAirHooks().installer_packages(_sim())
+
+    assert packages.find_links == (air_callback.REMOTE_WHEEL_DIR,)
+    assert packages.requirements == (air_callback.PROVIDER_DISTRIBUTION,)
+    command = build_deploy_command(_sim(), packages)
+    assert f"--with {air_callback.PROVIDER_DISTRIBUTION}" in command
+
+
+def test_the_box_requirement_names_the_distribution_holding_the_entry_point():
+    (entry_point,) = metadata.entry_points(group="nv_config_manager.installer.dcim", name="netbox")
+    assert entry_point.dist is not None
+    assert entry_point.dist.name == air_callback.PROVIDER_DISTRIBUTION
 
 
 def test_hooks_need_the_sim_config_before_the_per_host_stages(fake_deployment):
@@ -328,20 +364,20 @@ def test_netbox_is_installed_once_with_the_nats_password():
     be configured with it up front instead of being upgraded a second time once
     NVCM's deployer has generated one."""
     cb = _callback_for_script()
-    script = cb.bring_up_script("/i.tar", "/c.tgz")
+    script = cb.bring_up_script("/i.tar", "/c.tgz", "/w.tgz")
     assert script.count("helm upgrade --install") == 1
     assert f"nvcm.natsPassword={cb.nats_password}" in script
 
 
 def test_air_netbox_uses_overridable_demo_login():
-    script = _callback_for_script().bring_up_script("/i.tar", "/c.tgz")
+    script = _callback_for_script().bring_up_script("/i.tar", "/c.tgz", "/w.tgz")
     assert "netbox.superuser.name=demo" in script
     assert "netbox.superuser.password=demo" in script
 
     custom = _callback_for_script(
         superuser_name="operator",
         superuser_password="lab-password",
-    ).bring_up_script("/i.tar", "/c.tgz")
+    ).bring_up_script("/i.tar", "/c.tgz", "/w.tgz")
     assert "netbox.superuser.name=operator" in custom
     assert "netbox.superuser.password=lab-password" in custom
 
@@ -356,7 +392,7 @@ def test_air_netbox_login_escapes_helm_separators():
     """
     script = _callback_for_script(
         superuser_password=r"lab,pass\word",
-    ).bring_up_script("/i.tar", "/c.tgz")
+    ).bring_up_script("/i.tar", "/c.tgz", "/w.tgz")
     assert r"netbox.superuser.password=lab\,pass\\word" in script
 
 
@@ -443,7 +479,9 @@ def test_bring_up_is_one_script_covering_every_on_box_step():
     A command at a time costs an authenticated SSH connection each, and any one
     of them can catch a freshly booted sshd mid-blip and lose the run.
     """
-    script = _callback_for_script().bring_up_script("/home/nvcm/i.tar", "/home/nvcm/c.tgz")
+    script = _callback_for_script().bring_up_script(
+        "/home/nvcm/i.tar", "/home/nvcm/c.tgz", "/home/nvcm/w.tgz"
+    )
 
     for expected in (
         "kind load image-archive /home/nvcm/i.tar",
@@ -500,28 +538,92 @@ class _Uploads:
         return ""
 
 
+def _assert_untraced(script: str, secret: str, label: str) -> None:
+    lines = script.splitlines()
+    seen = False
+    for i, line in enumerate(lines):
+        if secret in line:
+            seen = True
+            preceding = "\n".join(lines[max(0, i - 4) : i])
+            assert "set +x" in preceding, f"{label} traced at line {i}: {line[:60]}"
+    assert seen, f"{label} not in script; the assertion checked nothing"
+
+
 def test_the_api_token_is_never_traced():
     # The script runs under `set -x` and its output is streamed back to the
     # operator, so any line carrying the token must disable tracing first.
     cb = _callback_for_script()
-    script = cb.bring_up_script("/i.tar", "/c.tgz")
+    _assert_untraced(cb.bring_up_script("/i.tar", "/c.tgz", "/w.tgz"), cb.api_token, "token")
 
-    lines = script.splitlines()
-    for i, line in enumerate(lines):
-        if cb.api_token in line:
-            preceding = "\n".join(lines[max(0, i - 4) : i])
-            assert "set +x" in preceding, f"token traced at line {i}: {line[:60]}"
+
+def test_no_password_in_the_script_is_traced():
+    """The NATS and superuser passwords are redacted in their own right.
+
+    They happen to share the helm line with the API token today, so a redact
+    list of just the token covers them by accident. Each must be named so a
+    refactor that moves one onto its own line does not start echoing it.
+    """
+    cb = _callback_for_script(superuser_password=r"lab,pass\word")
+    script = cb.bring_up_script("/i.tar", "/c.tgz", "/w.tgz")
+    _assert_untraced(script, cb.nats_password, "NATS password")
+    # The script holds the helm-escaped form, not the raw value.
+    _assert_untraced(script, r"lab\,pass\\word", "superuser password")
+
+    from nv_config_manager_dcim_netbox.installer.remote import ScriptRunner
+
+    captured = {}
+    original = ScriptRunner.script
+
+    def spy(self, *, marker, redact=None):
+        captured["redact"] = list(redact or [])
+        return original(self, marker=marker, redact=redact)
+
+    ScriptRunner.script = spy
+    try:
+        cb.bring_up_script("/i.tar", "/c.tgz", "/w.tgz")
+    finally:
+        ScriptRunner.script = original
+    assert cb.nats_password in captured["redact"]
+    assert r"lab,pass\word" in captured["redact"]
+    assert r"lab\,pass\\word" in captured["redact"]
+
+
+def test_the_local_script_is_created_private(tmp_path):
+    """The script holds the token and passwords, so it must never exist at the
+    umask default, not even between a write and a chmod."""
+    cb = _callback_for_script()
+    seen = {}
+
+    class _Manager:
+        def _ssh_run_and_tail(self, host, port, command, *, marker, label, timeout):
+            return True
+
+    class _ModeCapture:
+        def upload(self, local, remote):
+            seen["mode"] = local.stat().st_mode & 0o777
+
+        def run(self, argv, *, stdin=None):
+            return ""
+
+    cb._manager = _Manager()
+    cb.runner = lambda host, port: _ModeCapture()
+
+    cb.run_script("box", 22, "#!/usr/bin/env bash\necho hi\n")
+
+    assert seen["mode"] == 0o600
 
 
 def test_the_blueprint_load_is_skipped_when_asked():
-    script = _callback_for_script(load_blueprint=False).bring_up_script("/i.tar", "/c.tgz")
+    script = _callback_for_script(load_blueprint=False).bring_up_script(
+        "/i.tar", "/c.tgz", "/w.tgz"
+    )
     assert "nvcm_load_dcim" not in script
 
 
 def test_the_sim_installs_netbox_on_the_bundled_postgres():
     # The bring-up runs before NVCM's deploy installs the CNPG operator on the
     # box, so the chart's CNPG default would leave NetBox without a database.
-    script = _callback_for_script().bring_up_script("/i.tar", "/c.tgz")
+    script = _callback_for_script().bring_up_script("/i.tar", "/c.tgz", "/w.tgz")
     assert "nvcm.database.cnpg.enabled=false" in script
     assert "netbox.postgresql.enabled=true" in script
     # Routes come from NVCM's release; the chart takes no gateway values.
@@ -557,7 +659,7 @@ def test_air_image_preparation_builds_without_make(monkeypatch, tmp_path):
         "_load_versions",
         lambda: {
             "NETBOX_BASE_IMAGE": "netbox-base:4.7",
-            "NETBOX_BGP_REF": "abc123",
+            "NETBOX_BGP_VERSION": "0.20.2",
             "NETBOX_PLUGIN_REF": "main",
         },
     )
@@ -597,7 +699,7 @@ def test_a_rate_limited_build_retries_through_a_mirror(monkeypatch, tmp_path):
     monkeypatch.setattr(
         air_images,
         "_load_versions",
-        lambda: {"NETBOX_BASE_IMAGE": "netbox-base:4.7", "NETBOX_BGP_REF": "abc"},
+        lambda: {"NETBOX_BASE_IMAGE": "netbox-base:4.7", "NETBOX_BGP_VERSION": "0.20.2"},
     )
     monkeypatch.setattr(air_images, "_stream", fake_stream)
 
@@ -1005,7 +1107,9 @@ def test_the_air_netbox_install_gets_longer_than_the_kind_default():
     release `pending-install`, which needs a manual `helm uninstall` before a
     retry, so the margin matters more than the wait.
     """
-    script = _callback_for_script().bring_up_script("/home/nvcm/i.tar", "/home/nvcm/c.tgz")
+    script = _callback_for_script().bring_up_script(
+        "/home/nvcm/i.tar", "/home/nvcm/c.tgz", "/home/nvcm/w.tgz"
+    )
     assert "--timeout 20m" in script, script
     # The kind path is untouched: that default still lives on install_netbox.
     assert air_callback.NETBOX_INSTALL_TIMEOUT == "20m"
@@ -1061,3 +1165,63 @@ def test_tunnel_still_reports_a_genuinely_missing_key(tmp_path, monkeypatch):
 
     assert result.exit_code != 0
     assert "needs an NGC API key" in result.output
+
+
+# -- provider wheels for NVCM's installer on the box ----------------------------
+
+
+def test_bring_up_unpacks_the_wheelhouse_where_the_installer_looks():
+    script = _callback_for_script().bring_up_script("/i.tar", "/c.tgz", "/home/nvcm/w.tgz")
+
+    assert f"mkdir -p {air_callback.REMOTE_WHEEL_DIR}" in script
+    assert f"tar -xzf /home/nvcm/w.tgz -C {air_callback.REMOTE_WHEEL_DIR}" in script
+
+
+def test_upload_wheels_ships_the_provider_images_wheelhouse(monkeypatch):
+    cb = _callback_for_script(provider_image="provider:test")
+    commands = []
+    uploads = []
+
+    def fake_run(argv, *, stdin=None):
+        commands.append(argv)
+        if argv[:2] == ["docker", "create"]:
+            return "cid\n"
+        if argv[:2] == ["docker", "cp"]:
+            Path(argv[3]).mkdir()
+            (Path(argv[3]) / "nv_config_manager_dcim_netbox-0.1.0-py3-none-any.whl").write_text("")
+        if argv[0] == "tar":
+            Path(argv[2]).write_text("archive")
+        return ""
+
+    class _Runner(_Uploads):
+        def upload(self, local, remote):
+            uploads.append((local.read_text(), remote))
+
+    monkeypatch.setattr(air_callback, "run", fake_run)
+    cb.runner = lambda host, port: _Runner()
+
+    remote = cb.upload_wheels("box", 22)
+
+    assert commands[0] == ["docker", "create", "provider:test"]
+    assert commands[1][:3] == ["docker", "cp", "cid:/plugin-wheels/."]
+    assert commands[-1] == ["docker", "rm", "cid"]
+    assert uploads == [("archive", remote)]
+
+
+def test_upload_wheels_removes_the_container_when_the_copy_fails(monkeypatch):
+    cb = _callback_for_script()
+    commands = []
+
+    def fake_run(argv, *, stdin=None):
+        commands.append(argv)
+        if argv[:2] == ["docker", "create"]:
+            return "cid"
+        if argv[:2] == ["docker", "cp"]:
+            raise air_callback.CommandError(argv, 1, "no such path")
+        return ""
+
+    monkeypatch.setattr(air_callback, "run", fake_run)
+
+    with pytest.raises(air_callback.CommandError):
+        cb.upload_wheels("box", 22)
+    assert commands[-1] == ["docker", "rm", "cid"]

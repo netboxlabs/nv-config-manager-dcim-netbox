@@ -16,8 +16,8 @@ class NetBoxIntegrationAdapter:
     service_name = "netbox"
     service_port = 80
     hostname_prefix = "netbox"
-    # NVCM 1.x retains this legacy secret name for chart compatibility.
-    secret_name = "nautobot-token"
+    # installer.plugin.TOKEN_SECRET_NAME; not imported, the installer extra is optional.
+    secret_name = "dcim-token"
     secret_key = "token"
     url_environment_variable = "NETBOX_URL"
     token_environment_variable = "NETBOX_TOKEN"

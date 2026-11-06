@@ -8,7 +8,7 @@
 #
 #   docker build -f build/netbox.Dockerfile \
 #     --build-arg NETBOX_BASE_IMAGE=ghcr.io/netbox-community/netbox:v4.7.0 \
-#     --build-arg NETBOX_BGP_REF=da40b401055ce489d66a1a33c5d97f91100f303e \
+#     --build-arg NETBOX_BGP_VERSION=0.20.2 \
 #     --build-context plugin=../netbox-nv-config-manager \
 #     -t nv-config-manager-netbox:0.1.0 .
 
@@ -24,7 +24,7 @@ COPY --from=plugin . /build/plugin
 RUN python -m build --wheel --outdir /wheels /build/plugin
 
 FROM ${NETBOX_BASE_IMAGE} AS main
-ARG NETBOX_BGP_REF
+ARG NETBOX_BGP_VERSION
 
 COPY --from=plugin-build /wheels/ /tmp/wheels/
 # uv, not pip: netbox-docker builds /opt/netbox/venv with `uv venv`, which does
@@ -49,7 +49,7 @@ RUN set -eu; \
       ls -1 /tmp/wheels >&2; exit 1; \
     fi; \
     uv pip install --python /opt/netbox/venv/bin/python --no-cache \
-      "https://github.com/netbox-community/netbox-bgp/archive/${NETBOX_BGP_REF}.tar.gz" \
+      "netbox-bgp==${NETBOX_BGP_VERSION}" \
       "${wheels}[nats]" \
  && rm -rf /tmp/wheels
 

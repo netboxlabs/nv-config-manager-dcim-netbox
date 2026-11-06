@@ -786,3 +786,31 @@ def test_split_overrides_keeps_strings_on_set_and_the_rest_on_set_json():
     )
     assert plain == [r"a.b=x\,y"]
     assert as_json == ["a.c=true", 'a.d=["g1", "g2"]', "a.e={}", "a.f=5433"]
+
+
+class _KubectlOutput:
+    def __init__(self, output="", error=None):
+        self.output = output
+        self.error = error
+        self.argv = None
+
+    def run(self, argv, *, stdin=None):
+        self.argv = argv
+        if self.error:
+            raise self.error
+        return self.output
+
+
+def test_route_is_found_by_its_netbox_backend_not_its_name():
+    runner = _KubectlOutput("nv-config-manager-render-api netbox nv-config-manager-ui")
+    assert cluster.netbox_route_exists("ns", runner=runner)
+    assert "jsonpath={.items[*].spec.rules[*].backendRefs[*].name}" in runner.argv
+
+
+def test_no_route_to_netbox_is_reported_missing():
+    assert not cluster.netbox_route_exists("ns", runner=_KubectlOutput("netbox-worker other"))
+
+
+def test_a_failed_route_query_is_reported_missing():
+    error = cluster.CommandError(["kubectl"], 1, "no gateway api")
+    assert not cluster.netbox_route_exists("ns", runner=_KubectlOutput(error=error))

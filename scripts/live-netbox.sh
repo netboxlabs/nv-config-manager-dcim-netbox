@@ -10,9 +10,8 @@
 # Expects NetBox and the plugin already installed in the active environment, and
 # PostgreSQL and Redis already reachable. Installing them is the caller's job:
 #
-#   pip install netbox==4.7.0 \
-#     https://github.com/netbox-community/netbox-bgp/archive/refs/heads/0.20.0.tar.gz
-#   pip install -e ../netbox-nv-config-manager
+#   pip install netbox==4.7.0
+#   pip install -e ../netbox-nv-config-manager   # pulls netbox-bgp>=0.20.0 from PyPI
 #
 # Usage: scripts/live-netbox.sh <instance-dir> <blueprint-dir>
 #

@@ -14,7 +14,11 @@ from nv_config_manager_installer.air_sim.constants import (
     CONFIG_MANAGER_NAMESPACE,
     NVCM_BOX_USER,
 )
-from nv_config_manager_installer.air_sim.provider import AirProviderHooks, AirProviderStatus
+from nv_config_manager_installer.air_sim.provider import (
+    AirInstallerPackages,
+    AirProviderHooks,
+    AirProviderStatus,
+)
 from nv_config_manager_installer.air_sim.sim_config import SimConfig
 from nv_config_manager_installer.air_sim.sim_manager import AirSimulationManager
 from nv_config_manager_installer.tui.air_sim.screens.population import PopulationPanel
@@ -24,7 +28,9 @@ from textual.widgets import Label
 
 from nv_config_manager_dcim_netbox.installer import cluster
 from nv_config_manager_dcim_netbox.installer.air.callback import (
+    PROVIDER_DISTRIBUTION,
     REMOTE_CHART_DIR,
+    REMOTE_WHEEL_DIR,
     NetBoxAirCallback,
 )
 from nv_config_manager_dcim_netbox.installer.air.images import ensure_air_images
@@ -162,6 +168,12 @@ class NetBoxAirHooks(AirProviderHooks):
 
     def pre_deploy(self, manager: AirSimulationManager, host: str, port: int) -> None:
         self._deployment(manager).bring_up_netbox(host, port)
+
+    def installer_packages(self, cfg: SimConfig) -> AirInstallerPackages:
+        return AirInstallerPackages(
+            requirements=(PROVIDER_DISTRIBUTION,),
+            find_links=(REMOTE_WHEEL_DIR,),
+        )
 
     def wait_for_configs(
         self,

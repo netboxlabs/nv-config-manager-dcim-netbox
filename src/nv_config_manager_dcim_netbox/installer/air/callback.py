@@ -9,6 +9,7 @@ the same SSH plumbing afterwards.
 
 from __future__ import annotations
 
+import os
 import shlex
 import tempfile
 import time
@@ -16,6 +17,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from nv_config_manager_installer.air_sim.constants import (
+    AIR_CONTENT_REMOTE_DIR,
     CONFIG_MANAGER_HOSTNAME,
     CONFIG_MANAGER_REMOTE_DIR,
     NVCM_BOX_USER,
@@ -60,11 +62,20 @@ NETBOX_INSTALL_TIMEOUT = "20m"
 SCRIPT_DONE_MARKER = "NVCM_NETBOX_SCRIPT_DONE"
 NAMESPACE = "nv-config-manager"
 REMOTE_CHART_DIR = f"/home/{NVCM_BOX_USER}/charts"
+# The provider image's /plugin-wheels, unpacked for NVCM's installer run on the box.
+REMOTE_WHEEL_DIR = f"/home/{NVCM_BOX_USER}/nvcm-netbox-wheels"
+PROVIDER_DISTRIBUTION = "nv-config-manager-dcim-netbox"
 
 
 def blueprint_dir(cfg: SimConfig, remote_repo: str = CONFIG_MANAGER_REMOTE_DIR) -> str:
-    """Return the sim's topology blueprint inside the NVCM clone on the box."""
-    return f"{remote_repo}/development/mock_topology/context/{cfg.mock_blueprint}"
+    """Return the sim's topology blueprint on the box.
+
+    Uses the uploaded mock-topology tree when NVCM staged one, else the NVCM clone.
+    """
+    mock_root = f"{remote_repo}/development/mock_topology"
+    if cfg._air_content_staged and cfg.mock_topology_path.startswith(AIR_CONTENT_REMOTE_DIR):
+        mock_root = cfg.mock_topology_path
+    return f"{mock_root}/context/{cfg.mock_blueprint}"
 
 
 class NetBoxAirCallback:
@@ -129,8 +140,11 @@ class NetBoxAirCallback:
         self.on_log("Uploading the NetBox chart...")
         chart_tar = self.upload_chart(host, port)
 
+        self.on_log("Uploading the provider wheels for NVCM's installer...")
+        wheels_tar = self.upload_wheels(host, port)
+
         self.on_log("Deploying NetBox...")
-        self.run_script(host, port, self.bring_up_script(images_tar, chart_tar))
+        self.run_script(host, port, self.bring_up_script(images_tar, chart_tar, wheels_tar))
 
     def wait_for_intended_configs(
         self,
@@ -187,7 +201,7 @@ class NetBoxAirCallback:
         self.on_log(f"Timed out waiting for NetBox intended configs; last count: {last_counts}")
         return False
 
-    def bring_up_script(self, images_tar: str, chart_tar: str) -> str:
+    def bring_up_script(self, images_tar: str, chart_tar: str, wheels_tar: str) -> str:
         """Render every on-box step as one script.
 
         Built by running the same `cluster` functions the kind path uses against a
@@ -207,6 +221,16 @@ class NetBoxAirCallback:
                 f"rm -rf {chart_dir} && mkdir -p {chart_dir} "
                 f"&& tar -xzf {shlex.quote(chart_tar)} -C {chart_dir} "
                 f"&& rm -f {shlex.quote(chart_tar)}",
+            ]
+        )
+        wheel_dir = shlex.quote(REMOTE_WHEEL_DIR)
+        script.run(
+            [
+                "sh",
+                "-c",
+                f"rm -rf {wheel_dir} && mkdir -p {wheel_dir} "
+                f"&& tar -xzf {shlex.quote(wheels_tar)} -C {wheel_dir} "
+                f"&& rm -f {shlex.quote(wheels_tar)}",
             ]
         )
         esc = cluster.helm_set_value
@@ -240,7 +264,19 @@ class NetBoxAirCallback:
                 deployment_name=self.cfg.deployment_name or self.cfg.mock_blueprint,
                 runner=script,
             )
-        return script.script(marker=SCRIPT_DONE_MARKER, redact=[self.api_token])
+        # Every secret the script carries, not just the token: the NATS and
+        # superuser passwords currently share the helm line with it, but the
+        # redaction must not depend on that staying true. Both the raw superuser
+        # password and its helm-escaped form, since the script holds the latter.
+        return script.script(
+            marker=SCRIPT_DONE_MARKER,
+            redact=[
+                self.api_token,
+                self.nats_password,
+                self.settings.superuser_password,
+                cluster.helm_set_value(self.settings.superuser_password),
+            ],
+        )
 
     def run_script(self, host: str, port: int, body: str) -> None:
         """Upload the script and run it in a single SSH session.
@@ -257,8 +293,11 @@ class NetBoxAirCallback:
         remote = f"/home/{NVCM_BOX_USER}/nvcm-netbox-bring-up.sh"
         with tempfile.TemporaryDirectory() as tmpdir:
             local = Path(tmpdir) / "nvcm-netbox-bring-up.sh"
-            local.write_text(body)
-            local.chmod(0o600)
+            # Created 0600 rather than written and then chmod'ed, so the file
+            # never exists at the umask default while it holds the secrets.
+            fd = os.open(local, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as handle:
+                handle.write(body)
             self.runner(host, port).upload(local, remote)
 
         quoted = shlex.quote(remote)
@@ -390,6 +429,25 @@ class NetBoxAirCallback:
             run(["docker", "save", *images, "-o", str(archive)])
             self.runner(host, port).upload(archive, remote)
         return remote
+
+    def upload_wheels(self, host: str, port: int) -> str:
+        """Upload the provider image's wheelhouse. Returns the archive's path.
+
+        The same wheels NVCM's pods install from, so the installer on the box loads
+        the provider code they run. Unpacking happens later, in the script.
+        """
+        remote_tar = f"/home/{NVCM_BOX_USER}/nvcm-netbox-wheels.tgz"
+        container = run(["docker", "create", self.settings.provider_image]).strip()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                wheels = Path(tmpdir) / "wheels"
+                run(["docker", "cp", f"{container}:/plugin-wheels/.", str(wheels)])
+                archive = Path(tmpdir) / "wheels.tgz"
+                run(["tar", "-czf", str(archive), "-C", str(wheels), "."])
+                self.runner(host, port).upload(archive, remote_tar)
+        finally:
+            run(["docker", "rm", container])
+        return remote_tar
 
     def upload_chart(self, host: str, port: int) -> str:
         """Upload the chart with its dependencies vendored. Returns its path.

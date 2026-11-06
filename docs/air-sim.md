@@ -50,10 +50,25 @@ dcim_provider: netbox
   .venv/bin/nv-config-manager-installer providers list   # must list netbox
   ```
 
-The sim clones NVCM's `config_manager_ref` onto its box (`main` by default).
-That checkout must carry the pluggable installer, and the box's installer
-environment must have this package's `installer` extra for `dcim.provider:
-netbox` to resolve there. See NOTES.md for the current state of that.
+For a remote `config_manager_repo`, the sim clones NVCM's `config_manager_ref`
+onto its box (`main` by default). To test an unpublished NVCM change, set
+`config_manager_repo` to an absolute or relative path to a local checkout (a
+`file://` URL also works). The orchestrator uploads that working tree to the sim
+after bootstrap, excluding `.git`, virtual environments, caches, and
+`node_modules`; no remote branch is required.
+
+Either way, that checkout must carry the pluggable installer. The box's
+installer has only NVCM's own providers, so before NVCM deploys, the provider
+uploads the provider image's `/plugin-wheels` to `/home/nvcm/nvcm-netbox-wheels`
+and the deploy command runs with `--find-links` on that directory and
+`--with nv-config-manager-dcim-netbox`. These are the same wheels NVCM's pods
+install, so the installer and the services load the same provider code.
+
+Topology files, mock-topology trees, content jobs, and template plugins are also
+resolved locally and uploaded under `/home/nvcm/air-content`. The generated
+installer config and NetBox topology loader use those staged paths, so custom
+demo content does not need to exist in the cloned branch either. Relative paths
+are checked from the invoking working directory and then from the NVCM checkout.
 
 ## Running it
 
