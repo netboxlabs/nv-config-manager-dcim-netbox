@@ -2,6 +2,9 @@
 
 ## 0.1.0 (unreleased)
 
+- Use registry images without local NVCM builds for `up --no-kind-load`,
+  preserving compatibility with NVCM's local-cluster deployment guard.
+
 - Initial release of the NetBox DCIM provider.
 - Package discovery via the `nv_config_manager.dcim` entry point, provider
   factory, settings validation, and an aiohttp-based async HTTP transport
