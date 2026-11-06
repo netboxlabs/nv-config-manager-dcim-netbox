@@ -1,0 +1,37 @@
+{{- /*
+NetBox settings this deployment fixes, loaded through the netbox chart's
+`extraConfig` (deploy/netbox/values.yaml). A ConfigMap rather than `values:`
+inline: the chart runs inline values through `tpl`, which turns a templated
+boolean into the string "false", and NetBox's YAML loader would read that as
+true.
+
+CENSUS_REPORTING_ENABLED is NetBox's own anonymous census, on by default: the
+daily housekeeping job GETs the NetBox version, Python version and a hash of the
+secret key to census.netbox.oss.netboxlabs.com. Off here so an NVCM deployment
+makes no outbound call that is not to NVCM itself. ISOLATED_DEPLOYMENT also
+disables the release check and anything else that assumes internet access; the
+air-gapped installer sets it (deploy/airgapped/install-netbox.sh).
+*/ -}}
+{{- /*
+Read defensively, as httproute.yaml does: `helm upgrade --reuse-values` replays
+the previous release's values, where `nvcm.isolatedDeployment` may not exist.
+`hasKey` so an explicit false is honoured.
+*/ -}}
+{{- $nvcm := .Values.nvcm | default dict -}}
+{{- $isolated := false -}}
+{{- if hasKey $nvcm "isolatedDeployment" }}{{- $isolated = $nvcm.isolatedDeployment -}}{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvcm-netbox-settings
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: nvcm-netbox
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: netbox-settings
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+data:
+  # Loaded by NetBox as additional configuration; the key must end in .yaml.
+  nvcm-settings.yaml: |
+    CENSUS_REPORTING_ENABLED: false
+    ISOLATED_DEPLOYMENT: {{ $isolated }}
