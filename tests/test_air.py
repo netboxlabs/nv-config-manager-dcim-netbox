@@ -32,6 +32,8 @@ from nv_config_manager_installer.air_sim.installer_config import (  # noqa: E402
 )
 from nv_config_manager_installer.air_sim.orchestrator import SimOrchestrator  # noqa: E402
 from nv_config_manager_installer.air_sim.sim_config import SimConfig  # noqa: E402
+from nv_config_manager_installer.schema import NVConfigManagerInstallConfig  # noqa: E402
+from nv_config_manager_installer.secrets import generate_secrets  # noqa: E402
 
 from nv_config_manager_dcim_netbox.installer import air_hooks  # noqa: E402
 from nv_config_manager_dcim_netbox.installer.air import callback as air_callback  # noqa: E402
@@ -160,10 +162,12 @@ def test_blueprint_dir_ignores_a_local_mock_topology_that_was_not_staged():
 class _FakeDeployment:
     instances: list = []
 
-    def __init__(self, log, cfg, settings, manager=None):
+    def __init__(self, log, cfg, settings, manager=None, *, api_token="", nats_password=""):
         self.cfg = cfg
         self.settings = settings
         self.manager = manager
+        self.api_token = api_token
+        self.nats_password = nats_password
         self.calls: list[tuple] = []
         _FakeDeployment.instances.append(self)
 
@@ -628,6 +632,33 @@ def test_the_sim_installs_netbox_on_the_bundled_postgres():
     assert "netbox.postgresql.enabled=true" in script
     # Routes come from NVCM's release; the chart takes no gateway values.
     assert "nvcm.gateway" not in script
+
+
+def test_bring_up_and_nvcm_share_the_token_and_nats_password():
+    """The box's deploy must reuse the values NetBox was installed with."""
+    hooks = air_hooks.NetBoxAirHooks()
+    cfg = _sim()
+
+    seeded = hooks.install_secrets(cfg)
+    bring_up = hooks._deployment(_FakeManager())
+
+    assert seeded == {
+        "dcim": {"token": bring_up.api_token},
+        "nats": {"password": bring_up.nats_password},
+    }
+    assert is_valid_api_token(bring_up.api_token)
+    install = generate_air_sim_install_config(
+        cfg, site_name="air-demo", lb_allowed_prefixes=[], provider_hooks=hooks
+    )
+    state = generate_secrets(NVConfigManagerInstallConfig.model_validate(install))
+    assert state["dcim_token"] == bring_up.api_token
+    assert state["nats_password"] == bring_up.nats_password
+
+
+def test_a_supplied_token_reaches_the_install_config():
+    supplied = generate_api_token()
+    seeded = air_hooks.NetBoxAirHooks().install_secrets(_sim(dcim_settings={"token": supplied}))
+    assert seeded["dcim"]["token"] == supplied
 
 
 def test_install_settings_keep_the_box_on_the_bundled_postgres():

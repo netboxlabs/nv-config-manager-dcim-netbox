@@ -38,6 +38,10 @@ from nv_config_manager_dcim_netbox.installer.settings import (
     NetBoxAirSettings,
     NetBoxInstallerSettings,
 )
+from nv_config_manager_dcim_netbox.installer.tokens import (
+    generate_api_token,
+    generate_nats_password,
+)
 
 __all__ = [
     "NETBOX_LAUNCH_STATUS",
@@ -128,6 +132,15 @@ class NetBoxAirHooks(AirProviderHooks):
         self._cfg: SimConfig | None = None
         self._log: Callable[[str], None] = LOG.info
         self._bring_up: NetBoxAirCallback | None = None
+        self._api_token = ""
+        self._nats_password = ""
+
+    def _shared_secrets(self, cfg: SimConfig) -> tuple[str, str]:
+        """Return the API token and NATS password used by the bring-up and NVCM."""
+        if not self._api_token:
+            self._api_token = air_settings(cfg).token or generate_api_token()
+            self._nats_password = generate_nats_password()
+        return self._api_token, self._nats_password
 
     def _bind(self, cfg: SimConfig) -> NetBoxAirSettings:
         self._cfg = cfg
@@ -137,8 +150,14 @@ class NetBoxAirHooks(AirProviderHooks):
         if self._cfg is None:
             raise RuntimeError("NetBoxAirHooks: prepare_images or install_settings must run first")
         if self._bring_up is None:
+            token, nats_password = self._shared_secrets(self._cfg)
             self._bring_up = NetBoxAirCallback(
-                self._log, self._cfg, air_settings(self._cfg), manager=manager
+                self._log,
+                self._cfg,
+                air_settings(self._cfg),
+                manager=manager,
+                api_token=token,
+                nats_password=nats_password,
             )
         self._bring_up.set_manager(manager)
         return self._bring_up
@@ -157,6 +176,12 @@ class NetBoxAirHooks(AirProviderHooks):
             **settings.model_dump(exclude={"token"}),
         ).model_copy(update={"chart": Path(REMOTE_CHART_DIR) / settings.chart.name})
         return installed.model_dump(mode="json", exclude_defaults=True)
+
+    def install_secrets(self, cfg: SimConfig) -> dict[str, dict[str, str]]:
+        """Seed NVCM's install config with the values the bring-up installs NetBox with."""
+        self._bind(cfg)
+        token, nats_password = self._shared_secrets(cfg)
+        return {"dcim": {"token": token}, "nats": {"password": nats_password}}
 
     def prepare_images(self, cfg: SimConfig, log: Callable[[str], None]) -> None:
         settings = self._bind(cfg)

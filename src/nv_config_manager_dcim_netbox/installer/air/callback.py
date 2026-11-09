@@ -92,15 +92,18 @@ class NetBoxAirCallback:
         settings: NetBoxAirSettings | None = None,
         chart: Path | None = None,
         manager: AirSimulationManager | None = None,
+        *,
+        api_token: str = "",
+        nats_password: str = "",
     ) -> None:
         self._log = log
         self.cfg = cfg
         self.settings = settings or NetBoxAirSettings.model_validate(cfg.dcim_settings)
         self.chart = chart or self.settings.chart or DEFAULT_CHART
-        self.api_token = self.settings.token or generate_api_token()
-        # Supplied to NVCM in the install config, so NetBox is installed with it
-        # rather than upgraded again once NVCM's deployer has minted one.
-        self.nats_password = generate_nats_password()
+        self.api_token = api_token or self.settings.token or generate_api_token()
+        # The hooks hand the same values to NVCM through the install config, so
+        # the box's deploy keeps them instead of minting new ones.
+        self.nats_password = nats_password or generate_nats_password()
         self.host = ""
         self.port = 0
         # Injectable so the bring-up can be tested without a simulation.

@@ -17,7 +17,7 @@ import yaml
 from nv_config_manager_installer.deployer import Deployer, DeployOptions, DeployStep, StepStatus
 from nv_config_manager_installer.providers.api import INSTALLER_DCIM_ENTRY_POINT_GROUP
 from nv_config_manager_installer.providers.registry import resolve_provider
-from nv_config_manager_installer.schema import NVConfigManagerInstallConfig
+from nv_config_manager_installer.schema import NVConfigManagerInstallConfig, SecretsMethod
 from nv_config_manager_installer.secrets import generate_secrets
 
 from nv_config_manager_dcim_netbox.installer import cluster
@@ -193,6 +193,16 @@ def test_event_settings_agree_with_the_chart():
 def test_external_netbox_requires_a_server():
     config = _config(local=False, server="")
     assert any("dcim.server" in e for e in NetBoxInstallerProvider().validate_config(config))
+    config.dcim.server = "https://netbox.example.com"
+    assert NetBoxInstallerProvider().validate_config(config) == []
+
+
+def test_local_netbox_is_rejected_with_eso():
+    config = _config()
+    config.secrets.method = SecretsMethod.ESO
+    errors = NetBoxInstallerProvider().validate_config(config)
+    assert any("secrets.method kubernetes" in e for e in errors)
+    config.dcim.local = False
     config.dcim.server = "https://netbox.example.com"
     assert NetBoxInstallerProvider().validate_config(config) == []
 

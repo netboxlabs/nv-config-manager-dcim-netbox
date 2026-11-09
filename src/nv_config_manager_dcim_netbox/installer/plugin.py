@@ -28,7 +28,11 @@ from nv_config_manager_installer.providers.api import (
     SecretValue,
     TUIContribution,
 )
-from nv_config_manager_installer.schema import NVConfigManagerInstallConfig, SPIFFEProvider
+from nv_config_manager_installer.schema import (
+    NVConfigManagerInstallConfig,
+    SecretsMethod,
+    SPIFFEProvider,
+)
 from nv_config_manager_installer.tui.screens.external_services import ProviderDCIMPanel
 from textual.app import ComposeResult
 from textual.widgets import Input, Label
@@ -325,6 +329,13 @@ class NetBoxInstallerProvider(DCIMInstallerProvider):
         errors: list[str] = []
         if not config.dcim.local and not config.dcim.server:
             errors.append("dcim.server is required when dcim.local is false")
+        if config.dcim.local and config.secrets.method == SecretsMethod.ESO:
+            # The install needs the token and NATS password NVCM generates;
+            # under ESO they live only in Vault.
+            errors.append(
+                "a local NetBox requires secrets.method kubernetes; with ESO, run NetBox "
+                "externally (dcim.local false) and set dcim.server"
+            )
         token = config.secrets.k8s.group("dcim").values.get("token", "")
         if token and not is_valid_api_token(token):
             errors.append(
